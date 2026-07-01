@@ -3,7 +3,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { createDatabase, type DB } from './db/database'
 import { ensureCentralDir, DB_PATH } from './paths'
-import { registerIpcHandlers } from './ipc'
+import { registerIpcHandlers, runStartupSequence } from './ipc'
 
 let db: DB | undefined
 
@@ -37,6 +37,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   ensureCentralDir()
   db = createDatabase(DB_PATH)
+  runStartupSequence(db)
   registerIpcHandlers(db)
 
   createWindow()

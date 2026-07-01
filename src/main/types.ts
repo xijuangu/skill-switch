@@ -46,3 +46,70 @@ export interface ScanResult {
   scanned: number
   upserted: number
 }
+
+/** 内置工具预设(代码内固定,displayName + internal key + 默认路径) */
+export interface ToolPreset {
+  key: string
+  displayName: string
+  defaultPaths: string[]
+}
+
+/** settings.json 中单个预设的配置(enabled + paths 覆盖) */
+export interface PresetConfig {
+  enabled: boolean
+  paths: string[]
+}
+
+/** 用户自定义工具 */
+export interface CustomTool {
+  key: string
+  displayName: string
+  paths: string[]
+}
+
+/** 平台能力检测结果 */
+export interface PlatformInfo {
+  platform: string
+  canSymlink: boolean
+  canJunction: boolean
+}
+
+/** settings.json 顶层结构 */
+export interface AppSettings {
+  tools: {
+    presets: Record<string, PresetConfig>
+    custom: CustomTool[]
+  }
+  backupRetention: number
+  platform: PlatformInfo
+}
+
+/**
+ * 解析后的工具视图(UI 与扫描共用):
+ * 把内置预设 + 自定义工具 + settings + 磁盘探测合并成统一列表。
+ */
+export interface ToolConfig {
+  key: string
+  displayName: string
+  enabled: boolean
+  paths: string[]
+  existingPaths: string[]
+  isCustom: boolean
+  exists: boolean
+}
+
+/** 单个工具目录的扫描结果 */
+export interface ToolScanResult {
+  key: string
+  displayName: string
+  path: string
+  scanned: number
+  upserted: number
+}
+
+/** 多工具聚合扫描结果 */
+export interface MultiScanResult {
+  tools: ToolScanResult[]
+  totalScanned: number
+  totalUpserted: number
+}

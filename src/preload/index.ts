@@ -3,7 +3,16 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 const api = {
   scan: () => ipcRenderer.invoke('scan'),
-  getSkills: () => ipcRenderer.invoke('getSkills')
+  getSkills: () => ipcRenderer.invoke('getSkills'),
+  getSettings: () => ipcRenderer.invoke('getSettings'),
+  setPresetEnabled: (key: string, enabled: boolean) =>
+    ipcRenderer.invoke('setPresetEnabled', key, enabled),
+  setPresetPaths: (key: string, paths: string[]) =>
+    ipcRenderer.invoke('setPresetPaths', key, paths),
+  addCustomTool: (tool: { key: string; displayName: string; paths: string[] }) =>
+    ipcRenderer.invoke('addCustomTool', tool),
+  removeCustomTool: (key: string) => ipcRenderer.invoke('removeCustomTool', key),
+  setBackupRetention: (n: number) => ipcRenderer.invoke('setBackupRetention', n)
 }
 
 if (process.contextIsolated) {
