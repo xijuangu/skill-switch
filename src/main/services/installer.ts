@@ -2,14 +2,14 @@
 //
 // 设计 = Option A:所有函数显式接收 centralSkillsDir / backupsDir,便于测试用
 // temp fs 驱动,不触碰真实 ~/.skill-switch。git / unzip 操作抽成可注入参数
-// (GitRunner / unzip),默认用 execSync 跑真实命令,测试传 mock 函数预置结果。
+// (GitRunner / unzip),默认用 execFileSync 参数数组,测试传 mock 函数预置结果。
 //
 // 三种安装来源:
 // - GitHub:clone 仓库到临时目录 → 拷到 centralSkillsDir/{name} → DB 记 central-repo source
 // - ZIP:解压到临时目录 → 拷到 centralSkillsDir/{name} → DB 记 central-repo source
 // - 本地目录:不搬文件(索引模式)→ DB 记 indexed source
 
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import {
   cpSync,
   existsSync,
@@ -23,12 +23,14 @@ import {
 import { tmpdir } from 'os'
 import { basename, join } from 'path'
 import matter from 'gray-matter'
+import AdmZip from 'adm-zip'
 import type { DB } from '../db/database'
 import { runInTransaction } from '../db/database'
 import { upsertSkill } from '../db/dao/skills'
 import { upsertSource } from '../db/dao/skill-sources'
 import { hashDir } from './hash'
 import { createBackup } from './backup'
+import { resolveWithin, validateSkillName } from './path-safety'
 import type {
   InstallOptions,
   InstallResult,
@@ -36,41 +38,52 @@ import type {
 } from '../types'
 
 /**
- * Git 操作抽象:默认用 execSync 跑真实 git,测试可注入 mock。
+ * Git 操作抽象:默认用 execFileSync 跑真实 git,测试可注入 mock。
  * clone 负责把仓库内容拉到 targetDir(有 subPath 时走 sparse-checkout);
  * getHeadSha 返回 targetDir 当前 HEAD 的 commit SHA。
  */
 export interface GitRunner {
-  clone(repoUrl: string, targetDir: string, subPath: string | null): void
+  clone(
+    repoUrl: string,
+    targetDir: string,
+    subPath: string | null,
+    ref: string
+  ): void
   getHeadSha(dir: string): string
 }
 
-/** 默认 git runner:用 execSync 跑 git 命令 */
+/** 默认 git runner:参数数组直调 git,不经过 shell。 */
 const defaultGitRunner: GitRunner = {
-  clone: (repoUrl, targetDir, subPath) => {
+  clone: (repoUrl, targetDir, subPath, ref) => {
+    execFileSync(
+      'git',
+      ['clone', '--filter=blob:none', '--no-checkout', repoUrl, targetDir],
+      { stdio: 'ignore' }
+    )
     if (subPath) {
-      // 子路径用 sparse checkout 只拉目标子目录,省带宽
-      execSync(
-        `git clone --depth 1 --filter=blob:none --sparse "${repoUrl}" "${targetDir}"`,
+      execFileSync(
+        'git',
+        ['-C', targetDir, 'sparse-checkout', 'set', '--', subPath],
         { stdio: 'ignore' }
       )
-      execSync(`git -C "${targetDir}" sparse-checkout set "${subPath}"`, {
-        stdio: 'ignore'
-      })
-    } else {
-      execSync(`git clone --depth 1 "${repoUrl}" "${targetDir}"`, {
-        stdio: 'ignore'
-      })
     }
+    execFileSync('git', ['-C', targetDir, 'fetch', '--depth', '1', 'origin', ref], {
+      stdio: 'ignore'
+    })
+    execFileSync('git', ['-C', targetDir, 'checkout', '--detach', 'FETCH_HEAD'], {
+      stdio: 'ignore'
+    })
   },
   getHeadSha: (dir) => {
-    return execSync(`git -C "${dir}" rev-parse HEAD`).toString().trim()
+    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'])
+      .toString()
+      .trim()
   }
 }
 
-/** 默认 unzip:用系统 unzip 命令解压到目标目录 */
+/** 默认 ZIP 解压:应用内跨平台实现,不依赖系统 unzip。 */
 function defaultUnzip(zipPath: string, targetDir: string): void {
-  execSync(`unzip -o "${zipPath}" -d "${targetDir}"`, { stdio: 'ignore' })
+  new AdmZip(zipPath).extractAllTo(targetDir, true)
 }
 
 /**
@@ -129,10 +142,10 @@ function resolveSkillName(skillDir: string): string {
     const parsed = matter(content)
     const name = parsed.data.name
     if (typeof name === 'string' && name.trim().length > 0) {
-      return name.trim()
+      return validateSkillName(name)
     }
   }
-  return basename(skillDir)
+  return validateSkillName(basename(skillDir))
 }
 
 /**
@@ -163,7 +176,7 @@ function copyWithBackup(
 
 /**
  * 从 GitHub 安装 skill 到中央仓库。
- * gitRunner 可注入(测试用),默认用 execSync 跑真实 git。
+ * gitRunner 可注入(测试用),默认用 execFileSync 跑真实 git。
  */
 export function installFromGitHub(
   db: DB,
@@ -174,13 +187,15 @@ export function installFromGitHub(
   const parsed = parseGitHubUrl(rawUrl)
   const tmpDir = mkdtempSync(join(tmpdir(), 'ss-gh-'))
   try {
-    gitRunner.clone(parsed.repoUrl, tmpDir, parsed.subPath)
+    gitRunner.clone(parsed.repoUrl, tmpDir, parsed.subPath, parsed.ref)
     const commitSha = gitRunner.getHeadSha(tmpDir)
 
     // 有 subPath → 源 = tmpDir/subPath;无 → 源 = tmpDir(整个仓库就是 skill)
-    const sourceDir = parsed.subPath ? join(tmpDir, parsed.subPath) : tmpDir
+    const sourceDir = parsed.subPath
+      ? resolveWithin(tmpDir, ...parsed.subPath.split('/'))
+      : tmpDir
     const skillName = resolveSkillName(sourceDir)
-    const destPath = join(opts.centralSkillsDir, skillName)
+    const destPath = resolveWithin(opts.centralSkillsDir, skillName)
 
     const overwritten = copyWithBackup(sourceDir, destPath, skillName, opts)
     const hash = hashDir(destPath)
@@ -239,7 +254,7 @@ export function installFromZip(
         : tmpDir
 
     const skillName = resolveSkillName(sourceDir)
-    const destPath = join(opts.centralSkillsDir, skillName)
+    const destPath = resolveWithin(opts.centralSkillsDir, skillName)
 
     const overwritten = copyWithBackup(sourceDir, destPath, skillName, opts)
     const hash = hashDir(destPath)

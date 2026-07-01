@@ -8,14 +8,22 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync
 } from 'fs'
-import { basename, join } from 'path'
+import { basename, dirname, join } from 'path'
 import { homedir } from 'os'
 import { hashDir } from './hash'
+import {
+  assertAbsolutePath,
+  resolveWithin,
+  validateBackupId,
+  validatePathSegment
+} from './path-safety'
 
 /** 备份元数据(同时落盘为 sidecar .meta.json) */
 export interface BackupMeta {
@@ -45,6 +53,17 @@ export interface CreateBackupOptions {
 
 const DEFAULT_RETENTION = 20
 
+function validateBackupTime(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new Error('backup time must be a string')
+  }
+  const parsed = new Date(value)
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
+    throw new Error(`invalid backup time: ${value}`)
+  }
+  return value
+}
+
 /** 格式化时间戳:YYYYMMDD-HHmmss-SSS(可排序、文件系统安全) */
 function formatTimestamp(date: Date): string {
   const pad = (n: number, len = 2): string => String(n).padStart(len, '0')
@@ -63,7 +82,14 @@ export function getBackupRetention(settingsPath?: string): number {
     const parsed: unknown = JSON.parse(readFileSync(p, 'utf-8'))
     if (typeof parsed !== 'object' || parsed === null) return DEFAULT_RETENTION
     const val = (parsed as Record<string, unknown>).backupRetention
-    if (typeof val !== 'number' || !Number.isFinite(val)) return DEFAULT_RETENTION
+    if (
+      typeof val !== 'number' ||
+      !Number.isSafeInteger(val) ||
+      val < 1 ||
+      val > 10_000
+    ) {
+      return DEFAULT_RETENTION
+    }
     return val
   } catch {
     return DEFAULT_RETENTION
@@ -75,7 +101,10 @@ export function getBackupRetention(settingsPath?: string): number {
  * 写 sidecar .meta.json,然后按 retention 轮转删旧。返回新备份的 BackupMeta。
  */
 export function createBackup(opts: CreateBackupOptions): BackupMeta {
-  const { skillName, targetTool, sourcePath, backupsDir } = opts
+  const skillName = validatePathSegment(opts.skillName, 'backup skill name')
+  const targetTool = validatePathSegment(opts.targetTool, 'backup target tool')
+  const sourcePath = assertAbsolutePath(opts.sourcePath, 'backup source path')
+  const backupsDir = assertAbsolutePath(opts.backupsDir, 'backups directory')
   mkdirSync(backupsDir, { recursive: true })
 
   // 时间戳目录名;同毫秒冲突时追加 counter 保证唯一
@@ -91,7 +120,7 @@ export function createBackup(opts: CreateBackupOptions): BackupMeta {
     counter++
   }
 
-  const backupDir = join(backupsDir, dirName)
+  const backupDir = resolveWithin(backupsDir, dirName)
   mkdirSync(backupDir, { recursive: true })
   cpSync(sourcePath, backupDir, { recursive: true, force: true })
 
@@ -105,7 +134,10 @@ export function createBackup(opts: CreateBackupOptions): BackupMeta {
     backupTime: new Date().toISOString(),
     dirName
   }
-  writeFileSync(join(backupsDir, `${dirName}.meta.json`), JSON.stringify(meta, null, 2))
+  writeFileSync(
+    resolveWithin(backupsDir, `${dirName}.meta.json`),
+    JSON.stringify(meta, null, 2)
+  )
 
   const retention = opts.retention ?? getBackupRetention()
   pruneBackups(backupsDir, retention)
@@ -120,7 +152,39 @@ export function listBackups(backupsDir: string): BackupMeta[] {
   for (const entry of readdirSync(backupsDir, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith('.meta.json')) {
       try {
-        metas.push(JSON.parse(readFileSync(join(backupsDir, entry.name), 'utf-8')) as BackupMeta)
+        const parsed = JSON.parse(
+          readFileSync(resolveWithin(backupsDir, entry.name), 'utf-8')
+        ) as Partial<BackupMeta>
+        const backupId = validateBackupId(parsed.backupId ?? '')
+        const expectedMetaName = `${backupId}.meta.json`
+        if (
+          entry.name !== expectedMetaName ||
+          parsed.dirName !== backupId ||
+          !existsSync(resolveWithin(backupsDir, backupId))
+        ) {
+          continue
+        }
+        metas.push({
+          backupId,
+          dirName: backupId,
+          skillName: validatePathSegment(
+            parsed.skillName ?? '',
+            'backup skill name'
+          ),
+          targetTool: validatePathSegment(
+            parsed.targetTool ?? '',
+            'backup target tool'
+          ),
+          sourcePath: assertAbsolutePath(
+            parsed.sourcePath ?? '',
+            'backup source path'
+          ),
+          sourceHash: validatePathSegment(
+            parsed.sourceHash ?? '',
+            'backup source hash'
+          ),
+          backupTime: validateBackupTime(parsed.backupTime)
+        })
       } catch {
         // 损坏的 meta 跳过(不抛,保证列表稳定)
       }
@@ -145,8 +209,11 @@ export function pruneBackups(backupsDir: string, retentionCount: number): number
   let pruned = 0
   for (const m of asc) {
     if (total.length - pruned <= retentionCount) break
-    rmSync(join(backupsDir, m.dirName), { recursive: true, force: true })
-    rmSync(join(backupsDir, `${m.dirName}.meta.json`), { force: true })
+    rmSync(resolveWithin(backupsDir, m.dirName), {
+      recursive: true,
+      force: true
+    })
+    rmSync(resolveWithin(backupsDir, `${m.dirName}.meta.json`), { force: true })
     pruned++
   }
   return pruned
@@ -163,28 +230,64 @@ export function restoreBackup(
   backupsDir: string,
   retention?: number
 ): void {
-  const backupDir = join(backupsDir, backupId)
+  const safeId = validateBackupId(backupId)
+  const backupDir = resolveWithin(backupsDir, safeId)
   if (!existsSync(backupDir)) {
     throw new Error(`backup not found: ${backupId}`)
   }
 
-  if (existsSync(destPath)) {
-    createBackup({
-      skillName: 'restore-pre-restore',
-      targetTool: basename(destPath),
-      sourcePath: destPath,
-      backupsDir,
-      retention
-    })
-    rmSync(destPath, { recursive: true, force: true })
-  }
+  const destinationParent = dirname(destPath)
+  mkdirSync(destinationParent, { recursive: true })
+  const stagingRoot = mkdtempSync(
+    join(destinationParent, '.skill-switch-restore-')
+  )
+  const stagedDestination = join(stagingRoot, 'restored')
+  const displacedDestination = join(stagingRoot, 'previous')
+  let displaced = false
 
-  mkdirSync(destPath, { recursive: true })
-  cpSync(backupDir, destPath, { recursive: true, force: true })
+  try {
+    // Copy the restore source before retention or destination mutations.
+    cpSync(backupDir, stagedDestination, { recursive: true, force: true })
+
+    if (existsSync(destPath)) {
+      createBackup({
+        skillName: 'restore-pre-restore',
+        targetTool: basename(destPath),
+        sourcePath: destPath,
+        backupsDir,
+        // Defer pruning until the restored content is safely in place.
+        retention: Number.MAX_SAFE_INTEGER
+      })
+      renameSync(destPath, displacedDestination)
+      displaced = true
+    }
+
+    try {
+      renameSync(stagedDestination, destPath)
+    } catch (error) {
+      if (displaced && !existsSync(destPath)) {
+        renameSync(displacedDestination, destPath)
+        displaced = false
+      }
+      throw error
+    }
+
+    if (displaced) {
+      rmSync(displacedDestination, { recursive: true, force: true })
+      displaced = false
+    }
+    pruneBackups(backupsDir, retention ?? getBackupRetention())
+  } finally {
+    if (displaced && !existsSync(destPath)) {
+      renameSync(displacedDestination, destPath)
+    }
+    rmSync(stagingRoot, { recursive: true, force: true })
+  }
 }
 
 /** 删除指定备份(目录 + .meta.json)。幂等:不存在不报错。 */
 export function deleteBackup(backupId: string, backupsDir: string): void {
-  rmSync(join(backupsDir, backupId), { recursive: true, force: true })
-  rmSync(join(backupsDir, `${backupId}.meta.json`), { force: true })
+  const safeId = validateBackupId(backupId)
+  rmSync(resolveWithin(backupsDir, safeId), { recursive: true, force: true })
+  rmSync(resolveWithin(backupsDir, `${safeId}.meta.json`), { force: true })
 }

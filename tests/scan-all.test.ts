@@ -1,11 +1,14 @@
 import { test, expect, describe } from 'vitest'
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
 import { scanAllTools } from '../src/main/services/scan-all'
 import { getSkillByName } from '../src/main/db/dao/skills'
 import { getAllSkills } from '../src/main/db/dao/skills'
+import { getSourcesBySkillId } from '../src/main/db/dao/skill-sources'
 import type { ActiveScanDir } from '../src/main/services/tools-config'
+import { deploySkill } from '../src/main/services/deployer'
+import { upsertSkill } from '../src/main/db/dao/skills'
 
 describe('scan-all service', () => {
   test('scans a single tool dir and returns aggregated result', () => {
@@ -178,6 +181,100 @@ describe('scan-all service', () => {
     expect(all).toHaveLength(1)
 
     cleanup()
+    cleanupDb()
+  })
+
+  test('successful rescan removes a deleted indexed skill without leaving an orphan skill', () => {
+    const { dir, cleanup } = createTempDir()
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const toolDir = join(dir, '.codex', 'skills')
+    const skillDir = join(toolDir, 'obsolete')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '---\nname: obsolete\n---\n'
+    )
+    const tools: ActiveScanDir[] = [
+      { key: 'codex', displayName: 'Codex', paths: [toolDir] }
+    ]
+
+    scanAllTools(db, tools)
+    rmSync(skillDir, { recursive: true, force: true })
+    scanAllTools(db, tools)
+
+    expect(getSkillByName(db, 'obsolete')).toBeUndefined()
+
+    cleanup()
+    cleanupDb()
+  })
+
+  test('temporarily missing scan directory preserves previously indexed sources', () => {
+    const { dir, cleanup } = createTempDir()
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const toolDir = join(dir, '.codex', 'skills')
+    const skillDir = join(toolDir, 'keep-me')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '---\nname: keep-me\n---\n'
+    )
+    const tools: ActiveScanDir[] = [
+      { key: 'codex', displayName: 'Codex', paths: [toolDir] }
+    ]
+
+    scanAllTools(db, tools)
+    const skill = getSkillByName(db, 'keep-me')!
+    rmSync(toolDir, { recursive: true, force: true })
+    scanAllTools(db, tools)
+
+    expect(getSourcesBySkillId(db, skill.id)).toHaveLength(1)
+
+    cleanup()
+    cleanupDb()
+  })
+
+  test('copy deployment skips only its exact target path in a multi-path tool', () => {
+    const root = createTempDir('scan-all-copy-skip-')
+    const backups = createTempDir('scan-all-copy-backups-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const source = join(root.dir, 'source', 'shared')
+    const firstTool = join(root.dir, 'tool-a')
+    const secondTool = join(root.dir, 'tool-b')
+    mkdirSync(source, { recursive: true })
+    mkdirSync(firstTool)
+    mkdirSync(join(secondTool, 'shared'), { recursive: true })
+    writeFileSync(join(source, 'SKILL.md'), '---\nname: shared\n---\nsource')
+    writeFileSync(
+      join(secondTool, 'shared', 'SKILL.md'),
+      '---\nname: shared\n---\nexternal-second-path'
+    )
+    const skillId = upsertSkill(db, 'shared', source)
+    deploySkill(db, {
+      skillId,
+      skillName: 'shared',
+      targetTool: 'trae',
+      mode: 'copy',
+      sourcePath: source,
+      targetDir: join(firstTool, 'shared'),
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+
+    scanAllTools(db, [
+      {
+        key: 'trae',
+        displayName: 'TRAE',
+        paths: [firstTool, secondTool]
+      }
+    ])
+
+    expect(getSourcesBySkillId(db, skillId).map((item) => item.path)).toEqual([
+      join(secondTool, 'shared')
+    ])
+
+    root.cleanup()
+    backups.cleanup()
     cleanupDb()
   })
 })

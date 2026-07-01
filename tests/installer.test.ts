@@ -12,6 +12,7 @@ import {
 import { getSkillByName } from '../src/main/db/dao/skills'
 import { getSourcesBySkillId } from '../src/main/db/dao/skill-sources'
 import { listBackups } from '../src/main/services/backup'
+import AdmZip from 'adm-zip'
 
 // helper:在 parent 下创建一个含 SKILL.md 的 skill 目录,返回其路径
 function writeSkillDir(parent: string, name: string, content: string): string {
@@ -79,6 +80,38 @@ describe('parseGitHubUrl', () => {
 })
 
 describe('installFromGitHub', () => {
+  test('passes the URL ref to the git runner for non-default branches', () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    let receivedRef: string | null = null
+
+    const mockRunner: GitRunner = {
+      clone: (_repoUrl, targetDir, subPath, ref) => {
+        receivedRef = ref
+        mkdirSync(join(targetDir, subPath!), { recursive: true })
+        writeFileSync(
+          join(targetDir, subPath!, 'SKILL.md'),
+          '---\nname: branch-skill\n---\n'
+        )
+      },
+      getHeadSha: () => 'branch-sha'
+    }
+
+    installFromGitHub(
+      db,
+      'https://github.com/owner/repo/tree/dev/skills/branch-skill',
+      { centralSkillsDir: central.dir, backupsDir: backups.dir },
+      mockRunner
+    )
+
+    expect(receivedRef).toBe('dev')
+
+    central.cleanup()
+    backups.cleanup()
+    cleanupDb()
+  })
+
   test('单仓库安装:mock clone 预置 SKILL.md → 安装到 centralSkillsDir,source_type=central-repo', () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
@@ -238,6 +271,35 @@ describe('installFromGitHub', () => {
 })
 
 describe('installFromZip', () => {
+  test('default ZIP extractor installs without a system unzip command', () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const archive = createTempDir('ss-archive-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const zipPath = join(archive.dir, 'portable.zip')
+    const zip = new AdmZip()
+    zip.addFile(
+      'portable/SKILL.md',
+      Buffer.from('---\nname: portable\n---\nbody')
+    )
+    zip.writeZip(zipPath)
+
+    const result = installFromZip(db, zipPath, {
+      centralSkillsDir: central.dir,
+      backupsDir: backups.dir
+    })
+
+    expect(result.skillName).toBe('portable')
+    expect(readFileSync(join(result.sourcePath, 'SKILL.md'), 'utf-8')).toContain(
+      'body'
+    )
+
+    central.cleanup()
+    backups.cleanup()
+    archive.cleanup()
+    cleanupDb()
+  })
+
   test('mock unzip 预置扁平结构 → 安装到 centralSkillsDir,source_type=central-repo', () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')

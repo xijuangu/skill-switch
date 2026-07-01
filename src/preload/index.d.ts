@@ -35,6 +35,7 @@ export interface SkillWithConflictView {
   created_at: string
   sources: SkillSourceView[]
   conflict: ConflictStatusView
+  deployments: DeploymentView[]
 }
 
 export interface ToolScanResultView {
@@ -117,13 +118,22 @@ export interface DeploymentView {
   id: number
   skill_id: number
   target_tool: string
+  target_path: string | null
   mode: DeployModeView
   source_path: string
   deployed_at: string
   source_hash_at_deploy: string
 }
 
-export type DriftKindView = 'normal' | 'source-updated' | 'drift' | 'external'
+export type DriftKindView =
+  | 'normal'
+  | 'source-updated'
+  | 'target-modified'
+  | 'link-mismatch'
+  | 'source-missing'
+  | 'unresolved'
+  | 'drift'
+  | 'external'
 
 export interface DriftStatusView {
   skillId: number
@@ -133,6 +143,7 @@ export interface DriftStatusView {
   deployment: DeploymentView | null
   targetExists: boolean
   currentSourceHash: string | null
+  currentTargetHash: string | null
   kind: DriftKindView
 }
 
@@ -168,11 +179,28 @@ declare global {
       restoreBackup: (backupId: string) => Promise<void>
       deleteBackup: (backupId: string) => Promise<void>
       // Deploy
+      prepareDeploy: (
+        skillId: number,
+        targetTool: string,
+        mode: DeployModeView,
+        sourcePath: string,
+        targetRoot?: string
+      ) => Promise<{
+        kind:
+          | 'created'
+          | 'managed-update'
+          | 'mode-switch'
+          | 'external-overwrite'
+        targetPath: string
+        confirmationToken: string | null
+      }>
       deploy: (
         skillId: number,
         targetTool: string,
         mode: DeployModeView,
-        sourcePath: string
+        sourcePath: string,
+        targetRoot?: string,
+        confirmationToken?: string
       ) => Promise<DeployResultView>
       undeploy: (skillId: number, targetTool: string) => Promise<void>
       getTools: () => Promise<ToolWithDriftsView[]>

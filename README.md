@@ -39,6 +39,36 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 - better-sqlite3 (main process)
 - electron-builder (packaging)
 
+## Development
+
+`better-sqlite3` is a native dependency. Node/Vitest and Electron use different
+ABIs, so the npm scripts prepare the correct binary before each workflow:
+
+```bash
+# Test with the current Node runtime
+npm test
+
+# Typecheck, test, and build renderer/main bundles
+npm run verify
+
+# Run the Electron development app
+npm run dev
+
+# Build installers for the current operating system
+npm run package
+```
+
+Use `npm run native:node` when running Node-based tools directly, and
+`npm run native:electron` before invoking Electron outside the npm scripts.
+If `better_sqlite3.node` reports `NODE_MODULE_VERSION` mismatch, run the
+matching native preparation command instead of reinstalling the repository.
+
+Platform-specific package commands:
+
+- `npm run package:mac` → DMG
+- `npm run package:win` → NSIS installer
+- `npm run package:linux` → AppImage and DEB
+
 ## Status
 
 Spec'd via `/grill-me` → `/to-prd` → `/to-issues`. See:

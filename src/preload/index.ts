@@ -17,8 +17,10 @@ const api = {
   restoreBackup: (backupId: string) => ipcRenderer.invoke('restoreBackup', backupId),
   deleteBackup: (backupId: string) => ipcRenderer.invoke('deleteBackup', backupId),
   // Deploy(#6 + #9 junction fallback)
-  deploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction', sourcePath: string) =>
-    ipcRenderer.invoke('deploy', skillId, targetTool, mode, sourcePath),
+  prepareDeploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction', sourcePath: string, targetRoot?: string) =>
+    ipcRenderer.invoke('prepareDeploy', skillId, targetTool, mode, sourcePath, targetRoot),
+  deploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction', sourcePath: string, targetRoot?: string, confirmationToken?: string) =>
+    ipcRenderer.invoke('deploy', skillId, targetTool, mode, sourcePath, targetRoot, confirmationToken),
   undeploy: (skillId: number, targetTool: string) =>
     ipcRenderer.invoke('undeploy', skillId, targetTool),
   getTools: () => ipcRenderer.invoke('getTools'),

@@ -47,19 +47,29 @@ export function upsertDeployment(
   db: DB,
   skillId: number,
   targetTool: string,
+  targetPath: string,
   mode: DeployMode,
   sourcePath: string,
   sourceHashAtDeploy: string
 ): void {
   db.prepare(
-    `INSERT INTO deployments (skill_id, target_tool, mode, source_path, deployed_at, source_hash_at_deploy)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO deployments (skill_id, target_tool, target_path, mode, source_path, deployed_at, source_hash_at_deploy)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(skill_id, target_tool) DO UPDATE SET
+       target_path = excluded.target_path,
        mode = excluded.mode,
        source_path = excluded.source_path,
        deployed_at = excluded.deployed_at,
        source_hash_at_deploy = excluded.source_hash_at_deploy`
-  ).run(skillId, targetTool, mode, sourcePath, new Date().toISOString(), sourceHashAtDeploy)
+  ).run(
+    skillId,
+    targetTool,
+    targetPath,
+    mode,
+    sourcePath,
+    new Date().toISOString(),
+    sourceHashAtDeploy
+  )
 }
 
 /** 按 (skill_id, target_tool) 删除部署记录(幂等:不存在不报错) */

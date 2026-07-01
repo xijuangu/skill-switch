@@ -13,8 +13,17 @@ import { existsSync, rmSync } from 'fs'
 import { join } from 'path'
 import type { DB } from '../db/database'
 import type { ConflictStatus, SkillSource } from '../types'
-import { getSourcesBySkillId, deleteSourcesBySkillId } from '../db/dao/skill-sources'
-import { getSkillById, deleteSkill } from '../db/dao/skills'
+import {
+  deleteSourceById,
+  deleteSourcesBySkillId,
+  getAllIndexedSources,
+  getSourcesBySkillId
+} from '../db/dao/skill-sources'
+import {
+  deleteSkill,
+  getSkillById,
+  updatePrimarySourcePath
+} from '../db/dao/skills'
 import {
   getDeploymentsBySkillId,
   deleteDeployment
@@ -22,6 +31,12 @@ import {
 import { runInTransaction } from '../db/database'
 import { undeploySkill } from './deployer'
 import { createBackup } from './backup'
+import {
+  assertAbsolutePath,
+  isPathWithin,
+  resolveWithin,
+  validateSkillName
+} from './path-safety'
 
 /**
  * 基于已加载的 sources 计算冲突状态(纯函数,不查 DB)。
@@ -62,19 +77,85 @@ export function getAllConflicts(db: DB, skillIds: number[]): ConflictStatus[] {
   return out
 }
 
+/** Resolve a renderer-provided path only when it belongs to this skill. */
+export function assertRegisteredSkillSource(
+  db: DB,
+  skillId: number,
+  sourcePath: string
+): string {
+  const candidate = assertAbsolutePath(sourcePath, 'sourcePath')
+  const registered = getSourcesBySkillId(db, skillId).some(
+    (source) => assertAbsolutePath(source.path, 'registered source path') === candidate
+  )
+  if (!registered) {
+    throw new Error(`source path is not registered for skill ${skillId}`)
+  }
+  return candidate
+}
+
 /**
- * removeFromRegistry 入参(Option A:显式注入路径 + 回调,无 Electron/settings.json 依赖)。
+ * Reconcile indexed sources beneath directories whose contents are known.
+ * Callers must only pass successfully scanned or explicitly removed directories.
+ */
+export function reconcileIndexedSources(
+  db: DB,
+  scopedDirs: string[],
+  keepSourcePaths: string[]
+): number {
+  if (scopedDirs.length === 0) return 0
+  const keep = new Set(
+    keepSourcePaths.map((path) => assertAbsolutePath(path, 'source path'))
+  )
+  const stale = getAllIndexedSources(db).filter((source) => {
+    const sourcePath = assertAbsolutePath(source.path, 'indexed source path')
+    return (
+      scopedDirs.some((dir) => isPathWithin(dir, sourcePath)) &&
+      !keep.has(sourcePath)
+    )
+  })
+
+  let removed = 0
+  runInTransaction(db, () => {
+    for (const source of stale) {
+      const skill = getSkillById(db, source.skill_id)
+      if (!skill) continue
+      const remaining = getSourcesBySkillId(db, source.skill_id).filter(
+        (candidate) => candidate.id !== source.id
+      )
+      const deployments = getDeploymentsBySkillId(db, source.skill_id)
+
+      if (remaining.length === 0 && deployments.length > 0) {
+        // Keep the last source as a missing-source record until deployments are removed.
+        continue
+      }
+      if (remaining.length === 0) {
+        deleteSkill(db, source.skill_id)
+        removed++
+        continue
+      }
+
+      deleteSourceById(db, source.id)
+      if (
+        assertAbsolutePath(skill.primary_source_path, 'primary source path') ===
+        assertAbsolutePath(source.path, 'source path')
+      ) {
+        updatePrimarySourcePath(db, source.skill_id, remaining[0].path)
+      }
+      removed++
+    }
+  })
+  return removed
+}
+
+/**
+ * removeFromRegistry 入参:显式注入中央仓库与备份路径。
  * - centralSkillsDir:中央仓库 skills 目录(~/.skill-switch/skills)。
  *   中央实体 = {centralSkillsDir}/{skill.name}/,删除前先备份。
  * - backupsDir:备份目录(~/.skill-switch/skill-backups),中央实体备份到这里。
- * - resolveTargetPath:把 (targetTool, skillName) 解析成磁盘上的目标路径。
- *   返回绝对路径,或 null(工具不可用 → 跳过 fs 清理,只删 DB 记录)。
- *   把路径解析留给 IPC 调用方(从 settings.json 解析),服务层保持纯函数式。
  */
 export interface RemoveFromRegistryOptions {
   centralSkillsDir: string
   backupsDir: string
-  resolveTargetPath: (targetTool: string, skillName: string) => string | null
 }
 
 /** removeFromRegistry 返回结果 */
@@ -91,8 +172,7 @@ export interface RemoveFromRegistryResult {
  *
  * 顺序(保证 DB 与磁盘一致性):
  * 1. (事务外)若中央实体存在 → createBackup(拷贝),backedUp=true
- * 2. (事务内)逐个卸载部署:resolveTargetPath 可解析 → undeploySkill(清理 + 删记录);
- *    返回 null(工具不可用)→ 直接 deleteDeployment(跳过 fs 清理,目标可能已不在)
+ * 2. (事务内)逐个按 deployment.target_path 卸载;旧记录 target_path 为 null 时只删清单。
  * 3. (事务内)deleteSourcesBySkillId
  * 4. (事务内)deleteSkill(ON DELETE CASCADE 兜底,但此处已显式清理)
  * 5. (事务外)rmSync 中央实体目录(备份已先拷贝,删除不影响备份)
@@ -113,7 +193,10 @@ export function removeFromRegistry(
     throw new Error(`skill not found: id=${skillId}`)
   }
 
-  const centralEntityPath = join(opts.centralSkillsDir, skill.name)
+  const centralEntityPath = resolveWithin(
+    opts.centralSkillsDir,
+    validateSkillName(skill.name)
+  )
   const centralEntityExists = existsSync(centralEntityPath)
 
   // Step 2 (事务外):备份 skill 内容
@@ -139,18 +222,11 @@ export function removeFromRegistry(
   runInTransaction(db, () => {
     const deployments = getDeploymentsBySkillId(db, skillId)
     for (const dep of deployments) {
-      const targetPath = opts.resolveTargetPath(dep.target_tool, skill.name)
-      if (targetPath !== null) {
-        // 路径可解析:undeploySkill 做 fs 清理 + 删清单记录
-        try {
-          undeploySkill(db, skillId, dep.target_tool, targetPath)
-        } catch {
-          // 防御性:若记录已被删(理论不会,每个 deployment 不同 target_tool),兜底删记录
-          deleteDeployment(db, skillId, dep.target_tool)
-        }
-      } else {
-        // 工具不可用:跳过 fs 清理,只删清单记录(目标可能已不在,幂等)
+      if (dep.target_path == null) {
+        // Legacy record: remove metadata without guessing a destructive path.
         deleteDeployment(db, skillId, dep.target_tool)
+      } else {
+        undeploySkill(db, skillId, dep.target_tool)
       }
       undeployedTools.push(dep.target_tool)
     }

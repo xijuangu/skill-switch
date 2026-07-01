@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS deployments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   skill_id INTEGER NOT NULL,
   target_tool TEXT NOT NULL,
+  target_path TEXT NOT NULL,
   mode TEXT NOT NULL,
   source_path TEXT NOT NULL,
   deployed_at TEXT NOT NULL,
@@ -56,5 +57,13 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
   }
   if (!names.has('commit_sha')) {
     db.exec('ALTER TABLE skill_sources ADD COLUMN commit_sha TEXT')
+  }
+
+  const deploymentCols = db.prepare('PRAGMA table_info(deployments)').all() as {
+    name: string
+  }[]
+  if (!deploymentCols.some((column) => column.name === 'target_path')) {
+    // Existing rows remain unresolved instead of guessing from mutable tool settings.
+    db.exec('ALTER TABLE deployments ADD COLUMN target_path TEXT')
   }
 }

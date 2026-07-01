@@ -8,7 +8,9 @@ import {
   computeConflict,
   getConflictStatus,
   getAllConflicts,
-  removeFromRegistry
+  assertRegisteredSkillSource,
+  removeFromRegistry,
+  reconcileIndexedSources
 } from '../src/main/services/registry'
 import { getSkillByName, getSkillById, getAllSkills, upsertSkill } from '../src/main/db/dao/skills'
 import { getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
@@ -33,6 +35,52 @@ function mkSrc(partial: Partial<SkillSource> & Pick<SkillSource, 'id' | 'path' |
 }
 
 describe('registry service — multi-source identity + conflict detection', () => {
+  test('only accepts source paths registered to the requested skill', () => {
+    const { db, cleanup } = createTempDb()
+    const root = createTempDir('registry-source-guard-')
+    const owned = join(root.dir, 'owned')
+    const other = join(root.dir, 'other')
+    mkdirSync(owned)
+    mkdirSync(other)
+    const skillId = upsertSkill(db, 'owned', owned)
+    const otherSkillId = upsertSkill(db, 'other', other)
+    upsertSource(db, skillId, owned, 'hash-a', 1, 'indexed')
+    upsertSource(db, otherSkillId, other, 'hash-b', 1, 'indexed')
+
+    expect(assertRegisteredSkillSource(db, skillId, owned)).toBe(owned)
+    expect(() => assertRegisteredSkillSource(db, skillId, other)).toThrow(
+      /not registered/
+    )
+
+    root.cleanup()
+    cleanup()
+  })
+
+  test('removed tool path drops its source and promotes the remaining source', () => {
+    const { db, cleanup } = createTempDb()
+    const first = createTempDir('registry-old-tool-')
+    const second = createTempDir('registry-new-tool-')
+    const firstSkill = join(first.dir, 'shared')
+    const secondSkill = join(second.dir, 'shared')
+    mkdirSync(firstSkill)
+    mkdirSync(secondSkill)
+    writeFileSync(join(firstSkill, 'SKILL.md'), '---\nname: shared\n---\none')
+    writeFileSync(join(secondSkill, 'SKILL.md'), '---\nname: shared\n---\ntwo')
+    scanToolDir(db, first.dir)
+    scanToolDir(db, second.dir)
+    const skill = getSkillByName(db, 'shared')!
+
+    expect(reconcileIndexedSources(db, [first.dir], [])).toBe(1)
+    expect(getSourcesBySkillId(db, skill.id).map((source) => source.path)).toEqual([
+      secondSkill
+    ])
+    expect(getSkillById(db, skill.id)?.primary_source_path).toBe(secondSkill)
+
+    first.cleanup()
+    second.cleanup()
+    cleanup()
+  })
+
   describe('computeConflict (pure)', () => {
     test('empty sources → no conflict, primarySource null', () => {
       const status = computeConflict([], 1)
@@ -465,12 +513,7 @@ describe('removeFromRegistry', () => {
 
     const result = removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir,
-      resolveTargetPath: (tool, name) => {
-        if (tool === 'codex') return join(target1.dir, name)
-        if (tool === 'agents') return join(target2.dir, name)
-        return null
-      }
+      backupsDir: backups.dir
     })
 
     expect(result.skillName).toBe(skillName)
@@ -538,8 +581,7 @@ describe('removeFromRegistry', () => {
 
     const result = removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir,
-      resolveTargetPath: (_tool, name) => join(target.dir, name)
+      backupsDir: backups.dir
     })
 
     expect(result.skillName).toBe(skillName)
@@ -561,7 +603,7 @@ describe('removeFromRegistry', () => {
     cleanupDb()
   })
 
-  test('tool unavailable (resolveTargetPath returns null) → skip fs cleanup, still delete DB record', () => {
+  test('tool config unavailable still cleans the exact target_path stored in manifest', () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const target = createTempDir('ss-target-')
@@ -591,11 +633,10 @@ describe('removeFromRegistry', () => {
     })
     expect(existsSync(targetDir)).toBe(true)
 
-    // resolveTargetPath 返回 null → 工具不可用
+    // 当前工具配置不可用,仍应使用 manifest.target_path
     const result = removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir,
-      resolveTargetPath: () => null
+      backupsDir: backups.dir
     })
 
     expect(result.undeployedTools).toEqual(['codex'])
@@ -603,8 +644,7 @@ describe('removeFromRegistry', () => {
     expect(getDeploymentsBySkillId(db, skillId)).toHaveLength(0)
     // skill 已删
     expect(getSkillById(db, skillId)).toBeUndefined()
-    // 目标目录未删(无法解析路径,跳过 fs 清理)
-    expect(existsSync(targetDir)).toBe(true)
+    expect(existsSync(targetDir)).toBe(false)
 
     central.cleanup()
     backups.cleanup()
@@ -620,8 +660,7 @@ describe('removeFromRegistry', () => {
     expect(() =>
       removeFromRegistry(db, 99999, {
         centralSkillsDir: central.dir,
-        backupsDir: backups.dir,
-        resolveTargetPath: () => null
+        backupsDir: backups.dir
       })
     ).toThrow(/skill not found/)
 
@@ -646,8 +685,7 @@ describe('removeFromRegistry', () => {
 
     const opts = {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir,
-      resolveTargetPath: () => null
+      backupsDir: backups.dir
     }
 
     // 第一次调用成功

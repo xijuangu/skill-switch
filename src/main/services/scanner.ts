@@ -12,6 +12,7 @@ import { runInTransaction } from '../db/database'
 import { upsertSkill } from '../db/dao/skills'
 import { upsertSource } from '../db/dao/skill-sources'
 import { hashDir } from './hash'
+import { validateSkillName } from './path-safety'
 
 /** 从 SKILL.md frontmatter 解析 name;无则回退目录名 */
 function resolveSkillName(skillDir: string): string {
@@ -21,10 +22,10 @@ function resolveSkillName(skillDir: string): string {
     const parsed = matter(content)
     const name = parsed.data.name
     if (typeof name === 'string' && name.trim().length > 0) {
-      return name.trim()
+      return validateSkillName(name)
     }
   }
-  return basename(skillDir)
+  return validateSkillName(basename(skillDir))
 }
 
 /**

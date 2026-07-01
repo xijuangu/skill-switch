@@ -14,6 +14,7 @@ import {
   cpSync,
   existsSync,
   lstatSync,
+  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -80,6 +81,82 @@ function cleanupUnknown(targetPath: string): void {
   } catch {
     // 不存在,无需清理
   }
+}
+
+function cleanupManagedTarget(
+  targetPath: string,
+  recordedMode: DeployMode,
+  skillName: string,
+  targetTool: string,
+  backupsDir: string
+): void {
+  if (
+    (recordedMode === 'symlink' || recordedMode === 'junction') &&
+    pathEntryExists(targetPath) &&
+    !lstatSync(targetPath).isSymbolicLink()
+  ) {
+    // A managed link was replaced with real content. Preserve that content before repair.
+    if (lstatSync(targetPath).isDirectory()) {
+      createBackup({
+        skillName,
+        targetTool,
+        sourcePath: targetPath,
+        backupsDir
+      })
+    }
+    cleanupUnknown(targetPath)
+    return
+  }
+  cleanupByMode(targetPath, recordedMode)
+}
+
+function pathEntryExists(targetPath: string): boolean {
+  try {
+    lstatSync(targetPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function targetMatchesDeployment(
+  targetPath: string,
+  mode: DeployMode,
+  sourcePath: string,
+  sourceHash: string
+): boolean {
+  if (!pathEntryExists(targetPath)) return false
+  try {
+    if (mode === 'copy') {
+      return !lstatSync(targetPath).isSymbolicLink() && hashDir(targetPath) === sourceHash
+    }
+    return (
+      lstatSync(targetPath).isSymbolicLink() &&
+      realpathSync(targetPath) === realpathSync(sourcePath)
+    )
+  } catch {
+    return false
+  }
+}
+
+export type DeployTargetKind =
+  | 'created'
+  | 'managed-update'
+  | 'mode-switch'
+  | 'external-overwrite'
+
+export function inspectDeployTarget(
+  db: DB,
+  skillId: number,
+  targetTool: string,
+  targetPath: string,
+  requestedMode: DeployMode
+): DeployTargetKind {
+  const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
+  if (deployment) {
+    return deployment.mode === requestedMode ? 'managed-update' : 'mode-switch'
+  }
+  return pathEntryExists(targetPath) ? 'external-overwrite' : 'created'
 }
 
 /**
@@ -159,6 +236,19 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
   // Step 3: 查现有部署 + 目标是否存在
   const existing = getDeploymentBySkillAndTool(db, opts.skillId, opts.targetTool)
   const targetExists = existsSync(opts.targetDir)
+  if (
+    existing?.target_path != null &&
+    existing.target_path !== opts.targetDir
+  ) {
+    throw new Error(
+      `skill is already deployed to ${existing.target_path}; undeploy it before choosing another target path`
+    )
+  }
+  if (existing && existing.target_path == null) {
+    throw new Error(
+      'existing deployment target path is unresolved; remove it from the manifest before redeploying'
+    )
+  }
 
   // Step 4: 判断 action 并执行清理(如需)— 基于实际 mode 比较(existing.mode vs actualMode)
   let action: DeployAction
@@ -170,18 +260,41 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
       // 模式切换:按旧 mode 清理,按新 mode 部署
       action = 'mode-switched'
       previousMode = existing.mode
-      cleanupByMode(opts.targetDir, existing.mode)
-    } else if (existing.source_hash_at_deploy === sourceHash) {
-      // 幂等跳过:同 mode + hash 没变,不动文件不动 DB
+      cleanupManagedTarget(
+        opts.targetDir,
+        existing.mode,
+        opts.skillName,
+        opts.targetTool,
+        opts.backupsDir
+      )
+    } else if (
+      existing.source_hash_at_deploy === sourceHash &&
+      targetMatchesDeployment(
+        opts.targetDir,
+        existing.mode,
+        opts.sourcePath,
+        sourceHash
+      )
+    ) {
+      // 幂等跳过:同 mode + source hash 没变 + 目标仍与清单一致
       action = 'skipped'
       needDeploy = false
     } else {
       // 自管覆盖:同 mode + hash 变了,清理旧 target 后重新部署
       action = 'updated'
-      cleanupByMode(opts.targetDir, existing.mode)
+      cleanupManagedTarget(
+        opts.targetDir,
+        existing.mode,
+        opts.skillName,
+        opts.targetTool,
+        opts.backupsDir
+      )
     }
   } else if (targetExists) {
     // 外部 skill:清单无记录但目标存在 → 备份后覆盖
+    if (opts.allowExternalOverwrite !== true) {
+      throw new Error('external skill overwrite requires explicit confirmation')
+    }
     action = 'external-overwritten'
     createBackup({
       skillName: opts.skillName,
@@ -215,7 +328,15 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
     } else {
       deployFiles(actualMode, opts.sourcePath, opts.targetDir)
     }
-    upsertDeployment(db, opts.skillId, opts.targetTool, actualMode, opts.sourcePath, sourceHash)
+    upsertDeployment(
+      db,
+      opts.skillId,
+      opts.targetTool,
+      opts.targetDir,
+      actualMode,
+      opts.sourcePath,
+      sourceHash
+    )
   }
 
   return {
@@ -241,14 +362,18 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
 export function undeploySkill(
   db: DB,
   skillId: number,
-  targetTool: string,
-  targetPath: string
+  targetTool: string
 ): void {
   const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
   if (!deployment) {
     throw new Error('not deployed by this tool, cannot undeploy external skill; please remove it manually')
   }
-  cleanupByMode(targetPath, deployment.mode)
+  if (deployment.target_path == null) {
+    throw new Error(
+      'deployment target path is unresolved; refusing destructive cleanup'
+    )
+  }
+  cleanupByMode(deployment.target_path, deployment.mode)
   deleteDeployment(db, skillId, targetTool)
 }
 
@@ -271,10 +396,12 @@ export function detectDrift(
   targetPath: string
 ): DriftStatus {
   const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
-  const targetExists = existsSync(targetPath)
+  const actualTargetPath = deployment?.target_path ?? targetPath
+  const targetExists = pathEntryExists(actualTargetPath)
 
   let kind: DriftKind
   let currentSourceHash: string | null = null
+  let currentTargetHash: string | null = null
 
   if (deployment == null && targetExists) {
     // 外部 skill:清单无记录但目录存在
@@ -282,6 +409,13 @@ export function detectDrift(
   } else if (deployment == null && !targetExists) {
     // 无部署无文件:正常空位,不算漂移
     kind = 'normal'
+  } else if (deployment != null && deployment.target_path == null) {
+    kind = 'unresolved'
+  } else if (
+    deployment != null &&
+    !existsSync(deployment.source_path)
+  ) {
+    kind = 'source-missing'
   } else if (deployment != null && !targetExists) {
     // 漂移:清单有记录但目录被删了
     kind = 'drift'
@@ -293,14 +427,24 @@ export function detectDrift(
       : null
 
     if (deployment!.mode === 'symlink' || deployment!.mode === 'junction') {
-      // 链接透明:源更新自动生效,不算漂移
-      kind = 'normal'
+      kind = targetMatchesDeployment(
+        actualTargetPath,
+        deployment!.mode,
+        deployment!.source_path,
+        currentSourceHash!
+      )
+        ? 'normal'
+        : 'link-mismatch'
     } else {
-      // copy 模式:对比源 hash
-      if (currentSourceHash != null && currentSourceHash !== deployment!.source_hash_at_deploy) {
+      currentTargetHash = hashDir(actualTargetPath)
+      if (currentTargetHash !== deployment!.source_hash_at_deploy) {
+        kind = 'target-modified'
+      } else if (
+        currentSourceHash != null &&
+        currentSourceHash !== deployment!.source_hash_at_deploy
+      ) {
         kind = 'source-updated'
       } else {
-        // hash 一致 → normal;源被删(currentSourceHash == null)→ normal(部署还在,只是源没了)
         kind = 'normal'
       }
     }
@@ -310,10 +454,11 @@ export function detectDrift(
     skillId,
     skillName,
     targetTool,
-    targetPath,
+    targetPath: actualTargetPath,
     deployment: deployment ?? null,
     targetExists,
     currentSourceHash,
+    currentTargetHash,
     kind
   }
 }
@@ -329,28 +474,33 @@ export function detectDrift(
 export function detectDriftsForTool(
   db: DB,
   targetTool: string,
-  toolSkillDir: string
+  toolSkillDirs: string | string[]
 ): DriftStatus[] {
+  const directories = Array.isArray(toolSkillDirs)
+    ? toolSkillDirs
+    : [toolSkillDirs]
   const deployments = getDeploymentsByTool(db, targetTool)
   const results: DriftStatus[] = []
-  const managedNames = new Set<string>()
+  const managedTargetPaths = new Set<string>()
 
   // 清单中的部署
   for (const dep of deployments) {
     const skill = getSkillById(db, dep.skill_id)
     if (!skill) continue // skill 已删,跳过(防御性)
-    managedNames.add(skill.name)
-    const targetPath = join(toolSkillDir, skill.name)
+    const targetPath =
+      dep.target_path ?? join(directories[0] ?? '', skill.name)
+    managedTargetPaths.add(targetPath)
     results.push(detectDrift(db, dep.skill_id, skill.name, targetTool, targetPath))
   }
 
   // 磁盘上的外部 skill(不在清单中的子目录)
-  if (existsSync(toolSkillDir)) {
+  for (const toolSkillDir of directories) {
+    if (!existsSync(toolSkillDir)) continue
     for (const entry of readdirSync(toolSkillDir, { withFileTypes: true })) {
       // skill 目录可能是真实目录(copy 部署)或符号链接(symlink 部署)
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-      if (managedNames.has(entry.name)) continue
       const targetPath = join(toolSkillDir, entry.name)
+      if (managedTargetPaths.has(targetPath)) continue
       results.push({
         skillId: -1,
         skillName: entry.name,
@@ -359,6 +509,7 @@ export function detectDriftsForTool(
         deployment: null,
         targetExists: true,
         currentSourceHash: null,
+        currentTargetHash: null,
         kind: 'external'
       })
     }

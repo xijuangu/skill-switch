@@ -9,33 +9,23 @@
 // #3: 扫描时跳过 copy 部署的目标目录(副本不该被当成新 source 索引进来)。
 
 import { existsSync } from 'fs'
-import { join } from 'path'
 import type { DB } from '../db/database'
 import type { MultiScanResult, ToolScanResult } from '../types'
 import { scanToolDir } from './scanner'
 import type { ActiveScanDir } from './tools-config'
 import { getDeploymentsByMode } from '../db/dao/deployments'
-import { getSkillById } from '../db/dao/skills'
-import { deleteStaleIndexedSources } from '../db/dao/skill-sources'
+import { reconcileIndexedSources } from './registry'
 
 /**
  * 构建本次扫描要跳过的路径集合(copy 部署的目标目录)。
  * copy 副本不该被当成新 source 索引,否则 scan 后 source 会多出目标目录。
  * symlink/junction 部署不跳过(链接透明,扫描源目录等于扫描链接目标,不产生新 source)。
  */
-function buildSkipPaths(db: DB, tools: ActiveScanDir[]): Set<string> {
+function buildSkipPaths(db: DB): Set<string> {
   const skip = new Set<string>()
   const copyDeployments = getDeploymentsByMode(db, 'copy')
   for (const dep of copyDeployments) {
-    const skill = getSkillById(db, dep.skill_id)
-    if (!skill) continue
-    // 找到该工具的扫描路径(target_tool 对应的 ActiveScanDir)
-    const tool = tools.find((t) => t.key === dep.target_tool)
-    if (!tool) continue
-    // target_path = join(toolDir, skillName)
-    for (const dir of tool.paths) {
-      skip.add(join(dir, skill.name))
-    }
+    if (dep.target_path) skip.add(dep.target_path)
   }
   return skip
 }
@@ -55,9 +45,10 @@ export function scanAllTools(
   let totalUpserted = 0
 
   // #3: 扫描前构建 skipPaths(copy 部署的目标目录)
-  const skipPaths = buildSkipPaths(db, tools)
+  const skipPaths = buildSkipPaths(db)
   // #1: 收集本次扫描实际 upsert 的 source 路径,用于清理失效 source
   const allScannedSourcePaths: string[] = []
+  const successfullyScannedDirs: string[] = []
 
   for (const tool of tools) {
     for (const dir of tool.paths) {
@@ -72,6 +63,7 @@ export function scanAllTools(
         continue
       }
       const r = scanToolDir(db, dir, skipPaths)
+      successfullyScannedDirs.push(dir)
       results.push({
         key: tool.key,
         displayName: tool.displayName,
@@ -91,8 +83,7 @@ export function scanAllTools(
   //   2. path 在本次扫描的某个工具目录下,但不在 allScannedSourcePaths 里
   //      (即该工具目录下已没有这个 skill,如用户改了路径或删了 skill)
   // 不碰不在本次扫描范围内的工具目录下的 source(如分次扫描不同工具)
-  const scannedToolDirs = tools.flatMap((t) => t.paths)
-  deleteStaleIndexedSources(db, scannedToolDirs, allScannedSourcePaths)
+  reconcileIndexedSources(db, successfullyScannedDirs, allScannedSourcePaths)
 
   return {
     tools: results,

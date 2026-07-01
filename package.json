@@ -5,22 +5,33 @@
   "main": "./out/main/index.js",
   "author": "xijuangu",
   "scripts": {
-    "dev": "electron-vite dev",
+    "native:node": "npm rebuild better-sqlite3",
+    "native:electron": "electron-rebuild -f -w better-sqlite3",
+    "postinstall": "electron-builder install-app-deps",
+    "dev": "npm run native:electron && electron-vite dev",
     "build": "electron-vite build",
-    "start": "electron-vite preview",
+    "build:electron": "npm run native:electron && npm run build",
+    "start": "npm run native:electron && electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "rebuild": "electron-rebuild -f -w better-sqlite3"
+    "test": "npm run native:node && vitest run",
+    "test:watch": "npm run native:node && vitest",
+    "verify": "npm run typecheck && npm test && npm run build",
+    "package": "npm run build:electron && electron-builder --publish never",
+    "package:mac": "npm run build:electron && electron-builder --mac --publish never",
+    "package:win": "npm run build:electron && electron-builder --win --publish never",
+    "package:linux": "npm run build:electron && electron-builder --linux --publish never",
+    "rebuild": "npm run native:electron"
   },
   "dependencies": {
+    "adm-zip": "^0.5.18",
     "better-sqlite3": "^11.5.0",
     "gray-matter": "^4.0.3"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
+    "@types/adm-zip": "^0.5.8",
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.48",
@@ -28,6 +39,7 @@
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.16",
     "electron": "^28.2.0",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^2.0.0",
     "postcss": "^8.4.33",
     "react": "^18.2.0",
@@ -36,5 +48,38 @@
     "typescript": "^5.3.3",
     "vite": "^5.0.11",
     "vitest": "^1.1.0"
+  },
+  "build": {
+    "appId": "com.xijuangu.skill-switch",
+    "productName": "skill-switch",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    }
   }
 }

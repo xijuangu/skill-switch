@@ -47,10 +47,10 @@ export default function App() {
       <nav className="w-48 shrink-0 bg-neutral-100 border-r border-neutral-200 p-4">
         <h1 className="font-bold text-lg mb-6">skill-switch</h1>
         <ul className="space-y-1">
-          <NavItem page="skills" current={page} onClick={setPage} label="Skills" />
-          <NavItem page="tools" current={page} onClick={setPage} label="Tools" />
-          <NavItem page="backups" current={page} onClick={setPage} label="Backups" />
-          <NavItem page="settings" current={page} onClick={setPage} label="Settings" />
+          <NavItem page="skills" current={page} onClick={setPage} label="技能" />
+          <NavItem page="tools" current={page} onClick={setPage} label="工具" />
+          <NavItem page="backups" current={page} onClick={setPage} label="备份" />
+          <NavItem page="settings" current={page} onClick={setPage} label="设置" />
         </ul>
       </nav>
 
@@ -160,7 +160,7 @@ function BackupsPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold">Backups</h2>
+        <h2 className="text-xl font-semibold">备份</h2>
         <span className="text-sm text-neutral-500">
           保留数: <span className="font-medium text-neutral-700">{retention}</span>
         </span>
@@ -246,6 +246,9 @@ function SkillsPage({
   const [deployTarget, setDeployTarget] = useState<{ skill: SkillView; sourcePath: string } | null>(null)
   // Install dialog
   const [installOpen, setInstallOpen] = useState(false)
+  const [installInitialTab, setInstallInitialTab] = useState<
+    'github' | 'zip' | 'local-dir'
+  >('github')
   // 反馈消息
   const [feedback, setFeedback] = useState<string | null>(null)
   // #8: 右键上下文菜单
@@ -436,7 +439,7 @@ function SkillsPage({
     <div>
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
-          <h2 className="text-xl font-semibold">Skills</h2>
+          <h2 className="text-xl font-semibold">技能</h2>
           {conflictCount > 0 && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
               {conflictCount} 个冲突
@@ -445,10 +448,22 @@ function SkillsPage({
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setInstallOpen(true)}
+            onClick={() => {
+              setInstallInitialTab('github')
+              setInstallOpen(true)
+            }}
             className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 text-sm font-medium"
           >
             安装
+          </button>
+          <button
+            onClick={() => {
+              setInstallInitialTab('local-dir')
+              setInstallOpen(true)
+            }}
+            className="px-4 py-2 bg-neutral-700 text-white rounded hover:bg-neutral-800 text-sm font-medium"
+          >
+            添加本地
           </button>
           <button
             onClick={onScan}
@@ -519,7 +534,12 @@ function SkillsPage({
         />
       )}
 
-      {installOpen && <InstallDialog onDone={handleInstallDone} />}
+      {installOpen && (
+        <InstallDialog
+          initialTab={installInitialTab}
+          onDone={handleInstallDone}
+        />
+      )}
 
       {/* #8: 右键上下文菜单 — 5 个操作 */}
       {contextMenu && (
@@ -842,6 +862,14 @@ function SkillRow({
           <span className="text-xs text-neutral-400">
             {skill.sources.length} 个 source
           </span>
+          {skill.deployments.length > 0 && (
+            <span className="text-xs text-blue-700">
+              已部署至{' '}
+              {skill.deployments
+                .map((deployment) => deployment.target_tool)
+                .join('、')}
+            </span>
+          )}
           <button
             onClick={onDeploy}
             className="px-3 py-1 bg-neutral-700 text-white rounded text-xs hover:bg-neutral-800"
@@ -1092,6 +1120,7 @@ function DeployDialog({
 }) {
   const [settings, setSettings] = useState<SettingsView | null>(null)
   const [selectedTool, setSelectedTool] = useState<string>('')
+  const [selectedTargetRoot, setSelectedTargetRoot] = useState<string>('')
   const [mode, setMode] = useState<DeployMode>('copy')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1099,15 +1128,42 @@ function DeployDialog({
   useEffect(() => {
     window.api.getSettings().then((s) => {
       setSettings(s)
-      // 默认选第一个 enabled + existing 的工具
-      const first = s.tools.find((t) => t.enabled && t.exists)
-      if (first) setSelectedTool(first.key)
+      const deployedTarget = skill.deployments[0]?.target_path
+      const selected = deployedTarget
+        ? s.tools
+            .flatMap((tool) =>
+              tool.existingPaths.map((path) => ({ tool, path }))
+            )
+            .find(({ path }) => path === deployedTarget)
+        : undefined
+      const firstTool = s.tools.find((tool) => tool.enabled && tool.exists)
+      if (selected) {
+        setSelectedTool(selected.tool.key)
+        setSelectedTargetRoot(selected.path)
+      } else if (firstTool?.existingPaths[0]) {
+        setSelectedTool(firstTool.key)
+        setSelectedTargetRoot(firstTool.existingPaths[0])
+      }
       // 平台支持 symlink 则默认 symlink,否则 copy
       setMode(s.platform.canSymlink ? 'symlink' : 'copy')
     })
   }, [])
 
   const availableTools = settings?.tools.filter((t) => t.enabled && t.exists) ?? []
+  const availableTargets = availableTools
+    .flatMap((tool) => tool.existingPaths.map((path) => ({ tool, path })))
+    .filter(({ tool, path }) => {
+      const existing = skill.deployments.find(
+        (deployment) => deployment.target_tool === tool.key
+      )
+      return !existing || existing.target_path === path
+    })
+  const targetSelectionValid = availableTargets.some(
+    ({ path }) => path === selectedTargetRoot
+  )
+  const selectedDeployment = skill.deployments.find(
+    (deployment) => deployment.target_tool === selectedTool
+  )
   const canSymlink = settings?.platform.canSymlink ?? false
   const canJunction = settings?.platform.canJunction ?? false
   // #9: Windows 普通用户(canSymlink=false + canJunction=true)— symlink 不可用,
@@ -1115,11 +1171,37 @@ function DeployDialog({
   const isWindowsNormalUser = !canSymlink && canJunction
 
   const handleDeploy = async () => {
-    if (!selectedTool) return
+    if (!selectedTool || !selectedTargetRoot || !targetSelectionValid) return
     setBusy(true)
     setError(null)
     try {
-      const result = await window.api.deploy(skill.id, selectedTool, mode, sourcePath)
+      const plan = await window.api.prepareDeploy(
+        skill.id,
+        selectedTool,
+        mode,
+        sourcePath,
+        selectedTargetRoot
+      )
+      let confirmationToken: string | undefined
+      if (plan.kind === 'external-overwrite') {
+        const confirmed = window.confirm(
+          `目标已存在外部 skill「${skill.name}」:\n${plan.targetPath}\n\n` +
+            '覆盖前会自动备份到 ~/.skill-switch/skill-backups/。是否继续?'
+        )
+        if (!confirmed) return
+        if (!plan.confirmationToken) {
+          throw new Error('无法获取外部覆盖确认令牌')
+        }
+        confirmationToken = plan.confirmationToken
+      }
+      const result = await window.api.deploy(
+        skill.id,
+        selectedTool,
+        mode,
+        sourcePath,
+        selectedTargetRoot,
+        confirmationToken
+      )
       onDone(result)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -1154,20 +1236,31 @@ function DeployDialog({
           <div>
             <label className="block text-sm font-medium text-neutral-700 mb-1">目标工具</label>
             <select
-              value={selectedTool}
-              onChange={(e) => setSelectedTool(e.target.value)}
+              value={selectedTargetRoot}
+              onChange={(e) => {
+                const selected = availableTargets.find(
+                  (target) => target.path === e.target.value
+                )
+                setSelectedTargetRoot(e.target.value)
+                setSelectedTool(selected?.tool.key ?? '')
+              }}
               disabled={busy}
               className="w-full border border-neutral-300 rounded px-2 py-1.5 text-sm"
             >
-              {availableTools.length === 0 && (
+              {availableTargets.length === 0 && (
                 <option value="" disabled>无可用工具(请在设置中启用)</option>
               )}
-              {availableTools.map((t) => (
-                <option key={t.key} value={t.key}>
-                  {t.displayName} — {t.existingPaths[0]}
+              {availableTargets.map(({ tool, path }) => (
+                <option key={`${tool.key}:${path}`} value={path}>
+                  {tool.displayName} — {path}
                 </option>
               ))}
             </select>
+            {selectedDeployment && (
+              <p className="text-xs text-neutral-400 mt-1">
+                此工具已有部署，只能更新原目标；如需更换路径，请先卸载。
+              </p>
+            )}
           </div>
 
           <div>
@@ -1234,7 +1327,12 @@ function DeployDialog({
           </button>
           <button
             onClick={handleDeploy}
-            disabled={busy || !selectedTool}
+            disabled={
+              busy ||
+              !selectedTool ||
+              !selectedTargetRoot ||
+              !targetSelectionValid
+            }
             className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {busy ? '部署中…' : '部署'}
@@ -1317,11 +1415,15 @@ function ToolsPage() {
       if (!drift?.deployment) {
         throw new Error('没有可重新部署的部署记录')
       }
+      if (!drift.deployment.target_path) {
+        throw new Error('旧部署缺少目标路径,请先从清单移除后重新部署')
+      }
       await window.api.deploy(
         skillId,
         targetTool,
         drift.deployment.mode,
-        drift.deployment.source_path
+        drift.deployment.source_path,
+        drift.deployment.target_path
       )
       await load()
     } catch (e) {
@@ -1334,7 +1436,7 @@ function ToolsPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold">Tools</h2>
+        <h2 className="text-xl font-semibold">工具</h2>
         <button
           onClick={load}
           className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
@@ -1392,7 +1494,7 @@ function ToolCard({
   // #8: 外部 skill 单独分区 — 不与自管部署混排
   const managed = drifts.filter((d) => d.kind !== 'external')
   const external = drifts.filter((d) => d.kind === 'external')
-  const driftCount = managed.filter((d) => d.kind === 'drift' || d.kind === 'source-updated').length
+  const driftCount = managed.filter((d) => d.kind !== 'normal').length
 
   if (!config.enabled || !config.exists) {
     return (
@@ -1440,9 +1542,13 @@ function ToolCard({
 
       {expanded && (
         <div className="border-t border-neutral-200 bg-neutral-50 p-3">
-          <p className="text-xs text-neutral-400 mb-2">
-            <code>{config.existingPaths[0]}</code>
-          </p>
+          <div className="text-xs text-neutral-400 mb-2 space-y-0.5">
+            {config.existingPaths.map((path) => (
+              <div key={path}>
+                <code>{path}</code>
+              </div>
+            ))}
+          </div>
           {drifts.length === 0 ? (
             <p className="text-xs text-neutral-400">该工具目录下无 skill。</p>
           ) : (
@@ -1516,7 +1622,9 @@ function DriftRow({
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-        {drift.kind === 'drift' && (
+        {(drift.kind === 'drift' ||
+          drift.kind === 'target-modified' ||
+          drift.kind === 'link-mismatch') && (
           <>
             <button
               onClick={onRedeploy}
@@ -1525,14 +1633,15 @@ function DriftRow({
             >
               重新部署
             </button>
-            {/* #8: 从清单移除(目标已不在,只清清单记录) */}
-            <button
-              onClick={onRemoveFromManifest}
-              disabled={busy}
-              className="px-2 py-0.5 bg-neutral-500 text-white rounded text-xs hover:bg-neutral-600 disabled:opacity-50"
-            >
-              从清单移除
-            </button>
+            {drift.kind === 'drift' && (
+              <button
+                onClick={onRemoveFromManifest}
+                disabled={busy}
+                className="px-2 py-0.5 bg-neutral-500 text-white rounded text-xs hover:bg-neutral-600 disabled:opacity-50"
+              >
+                从清单移除
+              </button>
+            )}
           </>
         )}
         {drift.kind === 'source-updated' && (
@@ -1544,7 +1653,18 @@ function DriftRow({
               更新
             </button>
         )}
-        {drift.deployment !== null && drift.kind !== 'drift' && (
+        {drift.kind === 'unresolved' && (
+          <button
+            onClick={onRemoveFromManifest}
+            disabled={busy}
+            className="px-2 py-0.5 bg-neutral-500 text-white rounded text-xs hover:bg-neutral-600 disabled:opacity-50"
+          >
+            从清单移除
+          </button>
+        )}
+        {drift.deployment !== null &&
+          drift.kind !== 'drift' &&
+          drift.kind !== 'unresolved' && (
           <button
             onClick={onUndeploy}
             disabled={busy}
@@ -1564,6 +1684,10 @@ function DriftRow({
 const DRIFT_BADGE: Record<string, { label: string; cls: string }> = {
   normal: { label: '✅', cls: 'bg-green-100 text-green-700' },
   'source-updated': { label: '⚠️ 源已更新', cls: 'bg-amber-100 text-amber-800' },
+  'target-modified': { label: '⚠️ 目标已修改', cls: 'bg-amber-100 text-amber-800' },
+  'link-mismatch': { label: '⚠️ 链接异常', cls: 'bg-red-100 text-red-700' },
+  'source-missing': { label: '⚠️ 源缺失', cls: 'bg-red-100 text-red-700' },
+  unresolved: { label: '⚠️ 目标待确认', cls: 'bg-red-100 text-red-700' },
   drift: { label: '⚠️ 漂移', cls: 'bg-red-100 text-red-700' },
   external: { label: '🆕 外部', cls: 'bg-blue-100 text-blue-700' }
 }
@@ -1571,11 +1695,13 @@ const DRIFT_BADGE: Record<string, { label: string; cls: string }> = {
 // ===== Install 对话框(#7)=====
 
 function InstallDialog({
+  initialTab,
   onDone
 }: {
+  initialTab: 'github' | 'zip' | 'local-dir'
   onDone: (result: InstallResultView | null) => void
 }) {
-  const [tab, setTab] = useState<'github' | 'zip' | 'local-dir'>('github')
+  const [tab, setTab] = useState<'github' | 'zip' | 'local-dir'>(initialTab)
   const [githubUrl, setGithubUrl] = useState('')
   const [zipPath, setZipPath] = useState<string | null>(null)
   const [localPath, setLocalPath] = useState<string | null>(null)
@@ -1659,7 +1785,7 @@ function InstallDialog({
                     : 'border-transparent text-neutral-500 hover:text-neutral-700'
                 }`}
               >
-                {t === 'github' ? 'GitHub URL' : t === 'zip' ? 'ZIP file' : 'Local dir'}
+                {t === 'github' ? 'GitHub URL' : t === 'zip' ? 'ZIP 文件' : '本地目录'}
               </button>
             ))}
           </div>

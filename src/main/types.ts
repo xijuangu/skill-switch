@@ -34,6 +34,8 @@ export interface Deployment {
   id: number
   skill_id: number
   target_tool: string
+  /** Exact deployed destination; null only for pre-migration records. */
+  target_path: string | null
   mode: DeployMode
   source_path: string
   deployed_at: string
@@ -64,6 +66,7 @@ export interface ConflictStatus {
 /** Skills 页展示用:skill + sources + 冲突状态 */
 export interface SkillWithConflict extends SkillWithSources {
   conflict: ConflictStatus
+  deployments: Deployment[]
 }
 
 /** 扫描结果:发现的 skill 数量 + 本次实际 upsert 的 source 路径列表 */
@@ -159,6 +162,8 @@ export interface DeployOptions {
   canSymlink: boolean
   /** 平台能力:能否创建 junction?(仅 Windows = true;其他平台 = false) */
   canJunction: boolean
+  /** Must be true only after an explicit external-overwrite confirmation. */
+  allowExternalOverwrite?: boolean
 }
 
 /** 部署动作类型(用于 UI 反馈与测试断言) */
@@ -190,7 +195,15 @@ export interface DeployResult {
  * - drift:清单有 + 目录无(用户手动删了)
  * - external:清单无 + 目录有(外部 skill)
  */
-export type DriftKind = 'normal' | 'source-updated' | 'drift' | 'external'
+export type DriftKind =
+  | 'normal'
+  | 'source-updated'
+  | 'target-modified'
+  | 'link-mismatch'
+  | 'source-missing'
+  | 'unresolved'
+  | 'drift'
+  | 'external'
 
 /** 单个部署点的漂移检测结果 */
 export interface DriftStatus {
@@ -204,6 +217,8 @@ export interface DriftStatus {
   targetExists: boolean
   /** 当前源目录 hash(从 deployment.source_path 重算;源不存在或无部署记录时为 null) */
   currentSourceHash: string | null
+  /** Current copy target hash; null for links, missing targets, and external entries. */
+  currentTargetHash: string | null
   kind: DriftKind
 }
 
@@ -248,4 +263,3 @@ export interface InstallResult {
   /** 同名 skill 已存在时是否走了备份+覆盖 */
   overwritten: boolean
 }
-

@@ -133,4 +133,17 @@ describe('scanner', () => {
     cleanup()
     cleanupDb()
   })
+
+  test('rejects a frontmatter name that could escape a managed root', () => {
+    const tool = createTempDir('scanner-unsafe-name-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const skillDir = join(tool.dir, 'safe-directory')
+    mkdirSync(skillDir)
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: ../../escape\n---\n')
+
+    expect(() => scanToolDir(db, tool.dir)).toThrow(/invalid skill name/)
+
+    tool.cleanup()
+    cleanupDb()
+  })
 })

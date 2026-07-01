@@ -5,7 +5,9 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
+  unlinkSync,
   writeFileSync
 } from 'fs'
 import { join } from 'path'
@@ -15,6 +17,7 @@ import {
   undeploySkill,
   detectDrift,
   detectDriftsForTool,
+  inspectDeployTarget,
   resolveActualMode
 } from '../src/main/services/deployer'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -30,6 +33,49 @@ function writeSkillDir(parent: string, name: string, content: string): string {
 }
 
 describe('deployer service', () => {
+  test('deploy preflight distinguishes create, managed update, mode switch, and external overwrite', () => {
+    const src = createTempDir('ss-src-')
+    const target = createTempDir('ss-target-')
+    const backups = createTempDir('ss-backups-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const skillDir = writeSkillDir(src.dir, 'planned', 'source')
+    const skillId = upsertSkill(db, 'planned', skillDir)
+    const targetDir = join(target.dir, 'planned')
+
+    expect(
+      inspectDeployTarget(db, skillId, 'codex', targetDir, 'copy')
+    ).toBe('created')
+
+    mkdirSync(targetDir)
+    expect(
+      inspectDeployTarget(db, skillId, 'codex', targetDir, 'copy')
+    ).toBe('external-overwrite')
+    rmSync(targetDir, { recursive: true })
+
+    deploySkill(db, {
+      skillId,
+      skillName: 'planned',
+      targetTool: 'codex',
+      mode: 'copy',
+      sourcePath: skillDir,
+      targetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+    expect(
+      inspectDeployTarget(db, skillId, 'codex', targetDir, 'copy')
+    ).toBe('managed-update')
+    expect(
+      inspectDeployTarget(db, skillId, 'codex', targetDir, 'symlink')
+    ).toBe('mode-switch')
+
+    src.cleanup()
+    target.cleanup()
+    backups.cleanup()
+    cleanupDb()
+  })
+
   describe('deploySkill — 基础部署', () => {
     test('copy 模式:递归复制源目录到目标,源文件不变', () => {
       const src = createTempDir('ss-src-')
@@ -147,6 +193,7 @@ describe('deployer service', () => {
       expect(dep).toBeDefined()
       expect(dep!.skill_id).toBe(skillId)
       expect(dep!.target_tool).toBe('codex')
+      expect(dep!.target_path).toBe(targetDir)
       expect(dep!.mode).toBe('copy')
       expect(dep!.source_path).toBe(skillDir)
       expect(dep!.source_hash_at_deploy).toMatch(/^[0-9a-f]{64}$/)
@@ -190,6 +237,41 @@ describe('deployer service', () => {
   })
 
   describe('deploySkill — 自管更新', () => {
+    test('目标被删除后重新部署不会因 source hash 未变而跳过', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'restore-me', 'same-content')
+      const skillId = upsertSkill(db, 'restore-me', skillDir)
+      const targetDir = join(target.dir, 'restore-me')
+      const options = {
+        skillId,
+        skillName: 'restore-me',
+        targetTool: 'codex',
+        mode: 'copy' as const,
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      }
+
+      deploySkill(db, options)
+      rmSync(targetDir, { recursive: true, force: true })
+      const result = deploySkill(db, options)
+
+      expect(result.action).toBe('updated')
+      expect(readFileSync(join(targetDir, 'SKILL.md'), 'utf-8')).toBe(
+        'same-content'
+      )
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
     test('自管覆盖(已有部署 + hash 变了)→ action=updated,目标内容更新', () => {
       const src = createTempDir('ss-src-')
       const target = createTempDir('ss-target-')
@@ -321,6 +403,24 @@ describe('deployer service', () => {
 
       const beforeBackupCount = listBackups(backups.dir).length
 
+      expect(() =>
+        deploySkill(db, {
+          skillId,
+          skillName: 'grilling',
+          targetTool: 'codex',
+          mode: 'copy',
+          sourcePath: skillDir,
+          targetDir,
+          backupsDir: backups.dir,
+          canSymlink: true,
+          canJunction: false
+        })
+      ).toThrow(/confirmation/)
+      expect(listBackups(backups.dir)).toHaveLength(beforeBackupCount)
+      expect(readFileSync(join(targetDir, 'extra.txt'), 'utf-8')).toBe(
+        'external extra file\n'
+      )
+
       const result = deploySkill(db, {
         skillId,
         skillName: 'grilling',
@@ -330,7 +430,8 @@ describe('deployer service', () => {
         targetDir,
         backupsDir: backups.dir,
         canSymlink: true,
-        canJunction: false
+        canJunction: false,
+        allowExternalOverwrite: true
       })
 
       expect(result.action).toBe('external-overwritten')
@@ -525,6 +626,122 @@ describe('deployer service', () => {
   })
 
   describe('detectDrift', () => {
+    test('copy 目标内容被手工修改时标记 target-modified', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'changed-target', 'source')
+      const skillId = upsertSkill(db, 'changed-target', skillDir)
+      const targetDir = join(target.dir, 'changed-target')
+
+      deploySkill(db, {
+        skillId,
+        skillName: 'changed-target',
+        targetTool: 'codex',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      writeFileSync(join(targetDir, 'SKILL.md'), 'tampered')
+
+      expect(
+        detectDrift(db, skillId, 'changed-target', 'codex', targetDir).kind
+      ).toBe('target-modified')
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('部署源被删除时标记 source-missing', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'missing-source', 'source')
+      const skillId = upsertSkill(db, 'missing-source', skillDir)
+      const targetDir = join(target.dir, 'missing-source')
+      deploySkill(db, {
+        skillId,
+        skillName: 'missing-source',
+        targetTool: 'codex',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+
+      rmSync(skillDir, { recursive: true, force: true })
+
+      expect(
+        detectDrift(db, skillId, 'missing-source', 'codex', targetDir).kind
+      ).toBe('source-missing')
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('symlink 被普通目录替换时标记 link-mismatch', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'bad-link', 'source')
+      const skillId = upsertSkill(db, 'bad-link', skillDir)
+      const targetDir = join(target.dir, 'bad-link')
+      deploySkill(db, {
+        skillId,
+        skillName: 'bad-link',
+        targetTool: 'codex',
+        mode: 'symlink',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+
+      unlinkSync(targetDir)
+      mkdirSync(targetDir)
+
+      expect(
+        detectDrift(db, skillId, 'bad-link', 'codex', targetDir).kind
+      ).toBe('link-mismatch')
+
+      const repaired = deploySkill(db, {
+        skillId,
+        skillName: 'bad-link',
+        targetTool: 'codex',
+        mode: 'symlink',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+
+      expect(repaired.action).toBe('updated')
+      expect(lstatSync(targetDir).isSymbolicLink()).toBe(true)
+      expect(realpathSync(targetDir)).toBe(realpathSync(skillDir))
+      expect(detectDrift(db, skillId, 'bad-link', 'codex', targetDir).kind).toBe(
+        'normal'
+      )
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
     test('正常(copy + hash 一致)→ kind=normal', () => {
       const src = createTempDir('ss-src-')
       const target = createTempDir('ss-target-')
@@ -674,7 +891,7 @@ describe('deployer service', () => {
       })
       expect(existsSync(targetDir)).toBe(true)
 
-      undeploySkill(db, skillId, 'codex', targetDir)
+      undeploySkill(db, skillId, 'codex')
 
       expect(existsSync(targetDir)).toBe(false)
       expect(getDeploymentBySkillAndTool(db, skillId, 'codex')).toBeUndefined()
@@ -707,7 +924,7 @@ describe('deployer service', () => {
         canJunction: false
       })
 
-      undeploySkill(db, skillId, 'codex', targetDir)
+      undeploySkill(db, skillId, 'codex')
 
       // 链接已删
       expect(existsSync(targetDir)).toBe(false)
@@ -722,6 +939,45 @@ describe('deployer service', () => {
       cleanupDb()
     })
 
+    test('工具配置路径变化后仍只删除清单记录的原 target_path', () => {
+      const src = createTempDir('ss-src-')
+      const oldTargetRoot = createTempDir('ss-old-target-')
+      const newTargetRoot = createTempDir('ss-new-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'safe', 'body')
+      const skillId = upsertSkill(db, 'safe', skillDir)
+      const originalTarget = join(oldTargetRoot.dir, 'safe')
+      const unrelatedTarget = join(newTargetRoot.dir, 'safe')
+
+      deploySkill(db, {
+        skillId,
+        skillName: 'safe',
+        targetTool: 'codex',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: originalTarget,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      mkdirSync(unrelatedTarget)
+      writeFileSync(join(unrelatedTarget, 'keep.txt'), 'external')
+
+      undeploySkill(db, skillId, 'codex')
+
+      expect(existsSync(originalTarget)).toBe(false)
+      expect(readFileSync(join(unrelatedTarget, 'keep.txt'), 'utf-8')).toBe(
+        'external'
+      )
+
+      src.cleanup()
+      oldTargetRoot.cleanup()
+      newTargetRoot.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
     test('外部 skill(清单无记录)→ throw,目标不删', () => {
       const target = createTempDir('ss-target-')
       const { db, cleanup: cleanupDb } = createTempDb()
@@ -729,7 +985,7 @@ describe('deployer service', () => {
       const targetDir = join(target.dir, 'mystery')
       mkdirSync(targetDir, { recursive: true })
 
-      expect(() => undeploySkill(db, 9999, 'codex', targetDir)).toThrow(
+      expect(() => undeploySkill(db, 9999, 'codex')).toThrow(
         /not deployed by this tool/
       )
 
@@ -1006,7 +1262,7 @@ describe('deployer service', () => {
       })
       expect(getDeploymentBySkillAndTool(db, skillId, 'codex')!.mode).toBe('junction')
 
-      undeploySkill(db, skillId, 'codex', targetDir)
+      undeploySkill(db, skillId, 'codex')
 
       // 链接已删
       expect(existsSync(targetDir)).toBe(false)

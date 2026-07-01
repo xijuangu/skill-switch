@@ -58,45 +58,16 @@ export function deleteSourcesBySkillId(db: DB, skillId: number): void {
   db.prepare('DELETE FROM skill_sources WHERE skill_id = ?').run(skillId)
 }
 
-/**
- * 删除失效的 indexed source:在 scannedToolDirs 目录下但不在 keepSourcePaths 里的 source。
- * central-repo 的 source 不删(那是用户安装的,与扫描路径无关)。
- * 不在 scannedToolDirs 下的 source 也不删(可能是别的工具的,本次扫描不负责)。
- *
- * @param scannedToolDirs 本次扫描的工具目录列表(确定清理范围)
- * @param keepSourcePaths 本次扫描实际 upsert 的 source 路径(这些保留)
- */
-export function deleteStaleIndexedSources(
-  db: DB,
-  scannedToolDirs: string[],
-  keepSourcePaths: string[]
-): number {
-  if (scannedToolDirs.length === 0) return 0
-  // 构建 OR 条件:source path 在某个 scannedToolDir 下(path LIKE 'dir/%')
-  const scopeClauses = scannedToolDirs.map(() => 'path LIKE ?').join(' OR ')
-  const scopeParams = scannedToolDirs.map((dir) => `${dir}/%`)
-
-  // keepSourcePaths 为空 → 删除范围内的所有 indexed source
-  if (keepSourcePaths.length === 0) {
-    const result = db
-      .prepare(
-        `DELETE FROM skill_sources
-         WHERE source_type = 'indexed'
-           AND (${scopeClauses})`
-      )
-      .run(...scopeParams)
-    return result.changes
-  }
-
-  // 不在 keepSourcePaths 里的 → 删除
-  const keepPlaceholders = keepSourcePaths.map(() => '?').join(',')
-  const result = db
+/** 返回全部 indexed source,由 service 用跨平台路径逻辑决定清理范围。 */
+export function getAllIndexedSources(db: DB): SkillSource[] {
+  return db
     .prepare(
-      `DELETE FROM skill_sources
-       WHERE source_type = 'indexed'
-         AND (${scopeClauses})
-         AND path NOT IN (${keepPlaceholders})`
+      "SELECT * FROM skill_sources WHERE source_type = 'indexed' ORDER BY discovered_at ASC"
     )
-    .run(...scopeParams, ...keepSourcePaths)
-  return result.changes
+    .all() as SkillSource[]
+}
+
+/** 按 id 删除单个 source。 */
+export function deleteSourceById(db: DB, sourceId: number): void {
+  db.prepare('DELETE FROM skill_sources WHERE id = ?').run(sourceId)
 }

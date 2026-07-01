@@ -246,6 +246,31 @@ describe('backup service', () => {
     dest.cleanup()
   })
 
+  test('restoreBackup with retention=1 does not prune the backup being restored', () => {
+    const src = createTempDir('ss-src-')
+    const backups = createTempDir('ss-backups-')
+    const dest = createTempDir('ss-dest-')
+    const skillDir = writeSkillDir(src.dir, 'single', 'wanted')
+    const meta = createBackup({
+      skillName: 'single',
+      targetTool: 'codex',
+      sourcePath: skillDir,
+      backupsDir: backups.dir,
+      retention: 1
+    })
+    const destPath = join(dest.dir, 'single')
+    mkdirSync(destPath)
+    writeFileSync(join(destPath, 'SKILL.md'), 'current')
+
+    restoreBackup(meta.backupId, destPath, backups.dir, 1)
+
+    expect(readFileSync(join(destPath, 'SKILL.md'), 'utf-8')).toBe('wanted')
+
+    src.cleanup()
+    backups.cleanup()
+    dest.cleanup()
+  })
+
   test('deleteBackup removes backup dir and its .meta.json', () => {
     const src = createTempDir('ss-src-')
     const backups = createTempDir('ss-backups-')
@@ -270,6 +295,68 @@ describe('backup service', () => {
     const backups = createTempDir('ss-backups-')
     expect(() => deleteBackup('nonexistent_20260701-120530-123', backups.dir)).not.toThrow()
     backups.cleanup()
+  })
+
+  test('deleteBackup rejects a backup id that escapes the backup root', () => {
+    const root = createTempDir('backup-root-')
+    const backupsDir = join(root.dir, 'backups')
+    const outside = join(root.dir, 'outside')
+    mkdirSync(outside)
+    writeFileSync(join(outside, 'keep.txt'), 'keep')
+
+    expect(() => deleteBackup('../outside', backupsDir)).toThrow(/invalid backup id/)
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf-8')).toBe('keep')
+
+    root.cleanup()
+  })
+
+  test('list/prune ignore metadata whose dirName escapes the backup root', () => {
+    const root = createTempDir('backup-meta-guard-')
+    const backupsDir = join(root.dir, 'backups')
+    const outside = join(root.dir, 'outside')
+    mkdirSync(backupsDir)
+    mkdirSync(outside)
+    writeFileSync(join(outside, 'keep.txt'), 'keep')
+    writeFileSync(
+      join(backupsDir, 'fake.meta.json'),
+      JSON.stringify({
+        backupId: 'fake',
+        dirName: '../outside',
+        skillName: 'fake',
+        targetTool: 'codex',
+        sourcePath: outside,
+        sourceHash: 'abc',
+        backupTime: new Date().toISOString()
+      })
+    )
+
+    expect(listBackups(backupsDir)).toEqual([])
+    expect(pruneBackups(backupsDir, 0)).toBe(0)
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf-8')).toBe('keep')
+
+    root.cleanup()
+  })
+
+  test('listBackups ignores metadata with an invalid backup timestamp', () => {
+    const root = createTempDir('backup-time-guard-')
+    const backupId = 'fake_codex_20260701-120000-000'
+    mkdirSync(join(root.dir, backupId))
+    writeFileSync(
+      join(root.dir, `${backupId}.meta.json`),
+      JSON.stringify({
+        backupId,
+        dirName: backupId,
+        skillName: 'fake',
+        targetTool: 'codex',
+        sourcePath: root.dir,
+        sourceHash: 'abc',
+        backupTime: 'not-a-date'
+      })
+    )
+
+    expect(listBackups(root.dir)).toEqual([])
+
+    root.cleanup()
   })
 
   test('getBackupRetention reads backupRetention from settings.json', () => {
