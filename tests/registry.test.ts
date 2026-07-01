@@ -10,6 +10,20 @@ import { getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sour
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { runInTransaction } from '../src/main/db/database'
 import type { ActiveScanDir } from '../src/main/services/tools-config'
+import type { SkillSource } from '../src/main/types'
+
+/** 测试用:构造完整 SkillSource(repo_url/commit_sha 默认 null) */
+function mkSrc(partial: Partial<SkillSource> & Pick<SkillSource, 'id' | 'path' | 'hash'>): SkillSource {
+  return {
+    skill_id: 7,
+    mtime: 100,
+    source_type: 'indexed',
+    discovered_at: '2026-01-01T00:00:00.000Z',
+    repo_url: null,
+    commit_sha: null,
+    ...partial
+  }
+}
 
 describe('registry service — multi-source identity + conflict detection', () => {
   describe('computeConflict (pure)', () => {
@@ -22,10 +36,7 @@ describe('registry service — multi-source identity + conflict detection', () =
     })
 
     test('single source → no conflict, primarySource = that source', () => {
-      const src = {
-        id: 1, skill_id: 7, path: '/a', hash: 'h1', mtime: 100,
-        source_type: 'indexed' as const, discovered_at: '2026-01-01T00:00:00.000Z'
-      }
+      const src = mkSrc({ id: 1, path: '/a', hash: 'h1' })
       const status = computeConflict([src], 7)
       expect(status.sourceCount).toBe(1)
       expect(status.distinctHashCount).toBe(1)
@@ -34,14 +45,8 @@ describe('registry service — multi-source identity + conflict detection', () =
     })
 
     test('multiple sources same hash → no conflict, primarySource = first', () => {
-      const srcA = {
-        id: 1, skill_id: 7, path: '/a', hash: 'same', mtime: 100,
-        source_type: 'indexed' as const, discovered_at: '2026-01-01T00:00:00.000Z'
-      }
-      const srcB = {
-        id: 2, skill_id: 7, path: '/b', hash: 'same', mtime: 200,
-        source_type: 'indexed' as const, discovered_at: '2026-01-02T00:00:00.000Z'
-      }
+      const srcA = mkSrc({ id: 1, path: '/a', hash: 'same', discovered_at: '2026-01-01T00:00:00.000Z' })
+      const srcB = mkSrc({ id: 2, path: '/b', hash: 'same', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
       const status = computeConflict([srcA, srcB], 7)
       expect(status.sourceCount).toBe(2)
       expect(status.distinctHashCount).toBe(1)
@@ -50,14 +55,8 @@ describe('registry service — multi-source identity + conflict detection', () =
     })
 
     test('multiple sources different hashes → conflict, primarySource undefined', () => {
-      const srcA = {
-        id: 1, skill_id: 7, path: '/a', hash: 'h1', mtime: 100,
-        source_type: 'indexed' as const, discovered_at: '2026-01-01T00:00:00.000Z'
-      }
-      const srcB = {
-        id: 2, skill_id: 7, path: '/b', hash: 'h2', mtime: 200,
-        source_type: 'indexed' as const, discovered_at: '2026-01-02T00:00:00.000Z'
-      }
+      const srcA = mkSrc({ id: 1, path: '/a', hash: 'h1', discovered_at: '2026-01-01T00:00:00.000Z' })
+      const srcB = mkSrc({ id: 2, path: '/b', hash: 'h2', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
       const status = computeConflict([srcA, srcB], 7)
       expect(status.sourceCount).toBe(2)
       expect(status.distinctHashCount).toBe(2)
@@ -66,9 +65,9 @@ describe('registry service — multi-source identity + conflict detection', () =
     })
 
     test('three sources two distinct hashes → conflict', () => {
-      const srcA = { id: 1, skill_id: 7, path: '/a', hash: 'h1', mtime: 100, source_type: 'indexed' as const, discovered_at: '2026-01-01T00:00:00.000Z' }
-      const srcB = { id: 2, skill_id: 7, path: '/b', hash: 'h1', mtime: 200, source_type: 'indexed' as const, discovered_at: '2026-01-02T00:00:00.000Z' }
-      const srcC = { id: 3, skill_id: 7, path: '/c', hash: 'h2', mtime: 300, source_type: 'indexed' as const, discovered_at: '2026-01-03T00:00:00.000Z' }
+      const srcA = mkSrc({ id: 1, path: '/a', hash: 'h1', discovered_at: '2026-01-01T00:00:00.000Z' })
+      const srcB = mkSrc({ id: 2, path: '/b', hash: 'h1', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
+      const srcC = mkSrc({ id: 3, path: '/c', hash: 'h2', mtime: 300, discovered_at: '2026-01-03T00:00:00.000Z' })
       const status = computeConflict([srcA, srcB, srcC], 7)
       expect(status.sourceCount).toBe(3)
       expect(status.distinctHashCount).toBe(2)

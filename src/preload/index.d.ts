@@ -15,6 +15,8 @@ export interface SkillSourceView {
   mtime: number
   source_type: 'indexed' | 'central-repo'
   discovered_at: string
+  repo_url: string | null
+  commit_sha: string | null
 }
 
 export interface ConflictStatusView {
@@ -88,6 +90,65 @@ export interface BackupMetaView {
   dirName: string
 }
 
+// ===== Deploy(#6)=====
+
+export type DeployModeView = 'symlink' | 'junction' | 'copy'
+
+export type DeployActionView =
+  | 'created'
+  | 'updated'
+  | 'skipped'
+  | 'mode-switched'
+  | 'external-overwritten'
+
+export interface DeployResultView {
+  action: DeployActionView
+  mode: DeployModeView
+  targetPath: string
+  sourceHashAtDeploy: string
+  previousMode?: DeployModeView
+}
+
+export interface DeploymentView {
+  id: number
+  skill_id: number
+  target_tool: string
+  mode: DeployModeView
+  source_path: string
+  deployed_at: string
+  source_hash_at_deploy: string
+}
+
+export type DriftKindView = 'normal' | 'source-updated' | 'drift' | 'external'
+
+export interface DriftStatusView {
+  skillId: number
+  skillName: string
+  targetTool: string
+  targetPath: string
+  deployment: DeploymentView | null
+  targetExists: boolean
+  currentSourceHash: string | null
+  kind: DriftKindView
+}
+
+export interface ToolWithDriftsView {
+  config: ToolConfigView
+  drifts: DriftStatusView[]
+}
+
+// ===== Install(#7)=====
+
+export interface InstallResultView {
+  skillName: string
+  skillId: number
+  sourcePath: string
+  sourceType: 'indexed' | 'central-repo'
+  repoUrl: string | null
+  commitSha: string | null
+  overwritten: boolean
+}
+
 declare global {
   interface Window {
     api: {
@@ -102,6 +163,21 @@ declare global {
       listBackups: () => Promise<BackupMetaView[]>
       restoreBackup: (backupId: string) => Promise<void>
       deleteBackup: (backupId: string) => Promise<void>
+      // Deploy
+      deploy: (
+        skillId: number,
+        targetTool: string,
+        mode: DeployModeView,
+        sourcePath: string
+      ) => Promise<DeployResultView>
+      undeploy: (skillId: number, targetTool: string) => Promise<void>
+      getTools: () => Promise<ToolWithDriftsView[]>
+      // Install
+      installFromGitHub: (url: string) => Promise<InstallResultView>
+      installFromZip: (zipPath: string) => Promise<InstallResultView>
+      installFromLocalDir: (localPath: string) => Promise<InstallResultView>
+      selectZipFile: () => Promise<string | null>
+      selectLocalDir: () => Promise<string | null>
     }
   }
 }

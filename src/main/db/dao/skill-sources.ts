@@ -4,7 +4,8 @@ import type { SkillSource, SourceType } from '../../types'
 
 /**
  * Upsert 一个 source:按 (skill_id, path) UNIQUE 约束。
- * 不存在则插入;存在则更新 hash / mtime / source_type / discovered_at。
+ * 不存在则插入;存在则更新 hash / mtime / source_type / discovered_at / repo_url / commit_sha。
+ * repo_url / commit_sha 可选,仅 GitHub 安装的 source 带值;未传时写 null(不覆盖已有 null)。
  */
 export function upsertSource(
   db: DB,
@@ -12,17 +13,30 @@ export function upsertSource(
   path: string,
   hash: string,
   mtime: number,
-  sourceType: SourceType
+  sourceType: SourceType,
+  repoUrl?: string,
+  commitSha?: string
 ): void {
   db.prepare(
-    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, discovered_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, discovered_at, repo_url, commit_sha)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(skill_id, path) DO UPDATE SET
        hash = excluded.hash,
        mtime = excluded.mtime,
        source_type = excluded.source_type,
-       discovered_at = excluded.discovered_at`
-  ).run(skillId, path, hash, mtime, sourceType, new Date().toISOString())
+       discovered_at = excluded.discovered_at,
+       repo_url = excluded.repo_url,
+       commit_sha = excluded.commit_sha`
+  ).run(
+    skillId,
+    path,
+    hash,
+    mtime,
+    sourceType,
+    new Date().toISOString(),
+    repoUrl ?? null,
+    commitSha ?? null
+  )
 }
 
 /** 按 skill_id 查所有 source */

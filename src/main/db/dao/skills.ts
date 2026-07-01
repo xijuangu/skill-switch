@@ -47,6 +47,13 @@ export function getSkillByName(db: DB, name: string): Skill | undefined {
     .get(name) as Skill | undefined
 }
 
+/** 按 id 查 skill */
+export function getSkillById(db: DB, id: number): Skill | undefined {
+  return db
+    .prepare('SELECT * FROM skills WHERE id = ?')
+    .get(id) as Skill | undefined
+}
+
 /** 获取所有 skill(含 sources,按 name 排序) */
 export function getAllSkills(db: DB): SkillWithSources[] {
   const skills = db

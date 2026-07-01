@@ -1,7 +1,6 @@
 // deployments 表 DAO
-// 本切片(walking skeleton)只建表 + 基础查询,部署写入逻辑在切片 #6。
 import type { DB } from '../database'
-import type { Deployment } from '../../types'
+import type { DeployMode, Deployment } from '../../types'
 
 /** 查所有部署记录 */
 export function getAllDeployments(db: DB): Deployment[] {
@@ -20,4 +19,50 @@ export function getDeploymentsBySkillId(db: DB, skillId: number): Deployment[] {
   return db
     .prepare('SELECT * FROM deployments WHERE skill_id = ?')
     .all(skillId) as Deployment[]
+}
+
+/** 按 (skill_id, target_tool) 唯一查部署(用于冲突检测:判断目标是否自管部署) */
+export function getDeploymentBySkillAndTool(
+  db: DB,
+  skillId: number,
+  targetTool: string
+): Deployment | undefined {
+  return db
+    .prepare('SELECT * FROM deployments WHERE skill_id = ? AND target_tool = ?')
+    .get(skillId, targetTool) as Deployment | undefined
+}
+
+/**
+ * Upsert 部署记录:按 (skill_id, target_tool) UNIQUE。
+ * 不存在则插入;存在则更新 mode / source_path / deployed_at / source_hash_at_deploy。
+ */
+export function upsertDeployment(
+  db: DB,
+  skillId: number,
+  targetTool: string,
+  mode: DeployMode,
+  sourcePath: string,
+  sourceHashAtDeploy: string
+): void {
+  db.prepare(
+    `INSERT INTO deployments (skill_id, target_tool, mode, source_path, deployed_at, source_hash_at_deploy)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(skill_id, target_tool) DO UPDATE SET
+       mode = excluded.mode,
+       source_path = excluded.source_path,
+       deployed_at = excluded.deployed_at,
+       source_hash_at_deploy = excluded.source_hash_at_deploy`
+  ).run(skillId, targetTool, mode, sourcePath, new Date().toISOString(), sourceHashAtDeploy)
+}
+
+/** 按 (skill_id, target_tool) 删除部署记录(幂等:不存在不报错) */
+export function deleteDeployment(
+  db: DB,
+  skillId: number,
+  targetTool: string
+): void {
+  db.prepare('DELETE FROM deployments WHERE skill_id = ? AND target_tool = ?').run(
+    skillId,
+    targetTool
+  )
 }

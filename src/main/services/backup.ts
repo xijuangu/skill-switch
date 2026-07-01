@@ -15,7 +15,7 @@ import {
 } from 'fs'
 import { basename, join } from 'path'
 import { homedir } from 'os'
-import { createHash } from 'crypto'
+import { hashDir } from './hash'
 
 /** 备份元数据(同时落盘为 sidecar .meta.json) */
 export interface BackupMeta {
@@ -53,29 +53,6 @@ function formatTimestamp(date: Date): string {
     `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}` +
     `-${pad(date.getMilliseconds(), 3)}`
   )
-}
-
-/** 递归算目录内容 hash(相对路径 + 文件内容,按路径排序)—— 与 scanner.ts 的 hashDir 一致 */
-function hashDir(dir: string): string {
-  const hash = createHash('sha256')
-  const files: string[] = []
-  const walk = (d: string): void => {
-    for (const entry of readdirSync(d, { withFileTypes: true })) {
-      const full = join(d, entry.name)
-      if (entry.isDirectory()) {
-        walk(full)
-      } else if (entry.isFile()) {
-        files.push(full)
-      }
-    }
-  }
-  walk(dir)
-  files.sort()
-  for (const f of files) {
-    hash.update(f.slice(dir.length))
-    hash.update(readFileSync(f))
-  }
-  return hash.digest('hex')
 }
 
 /** 读取备份轮转上限:settings.json 的 backupRetention 字段,缺失/无效 → 20 */

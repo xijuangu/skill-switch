@@ -6,8 +6,13 @@ type SkillSourceView = SkillView['sources'][number]
 type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 type ToolConfigView = SettingsView['tools'][number]
 type BackupView = Awaited<ReturnType<typeof window.api.listBackups>>[number]
+type DeployResultView = Awaited<ReturnType<typeof window.api.deploy>>
+type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
+type DriftStatusView = ToolWithDriftsView['drifts'][number]
+type InstallResultView = Awaited<ReturnType<typeof window.api.installFromGitHub>>
 
 type Page = 'skills' | 'tools' | 'backups' | 'settings'
+type DeployMode = 'copy' | 'symlink'
 
 export default function App() {
   const [page, setPage] = useState<Page>('skills')
@@ -43,7 +48,7 @@ export default function App() {
         <h1 className="font-bold text-lg mb-6">skill-switch</h1>
         <ul className="space-y-1">
           <NavItem page="skills" current={page} onClick={setPage} label="Skills" />
-          <NavItem page="tools" current={page} onClick={setPage} label="Tools" disabled />
+          <NavItem page="tools" current={page} onClick={setPage} label="Tools" />
           <NavItem page="backups" current={page} onClick={setPage} label="Backups" />
           <NavItem page="settings" current={page} onClick={setPage} label="Settings" />
         </ul>
@@ -56,10 +61,11 @@ export default function App() {
             scanning={scanning}
             lastScan={lastScan}
             onScan={handleScan}
+            onRefresh={refresh}
           />
         )}
         {page === 'settings' && <SettingsPage />}
-        {page === 'tools' && <Placeholder label="Tools" />}
+        {page === 'tools' && <ToolsPage />}
         {page === 'backups' && <BackupsPage />}
       </main>
     </div>
@@ -92,15 +98,6 @@ function NavItem({
     >
       {label}
     </li>
-  )
-}
-
-function Placeholder({ label }: { label: string }) {
-  return (
-    <div>
-      <h2 className="text-xl font-semibold mb-4">{label}</h2>
-      <p className="text-neutral-400">{label} 页面将在后续切片实现。</p>
-    </div>
   )
 }
 
@@ -225,23 +222,32 @@ function BackupsPage() {
   )
 }
 
+// ===== Skills 页 =====
+
 function SkillsPage({
   skills,
   scanning,
   lastScan,
-  onScan
+  onScan,
+  onRefresh
 }: {
   skills: SkillView[]
   scanning: boolean
   lastScan: ScanResult | null
   onScan: () => void
+  onRefresh: () => void
 }) {
-  // 展开的 skill id 集合(点击行切换)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
-  // 部署前冲突选择 modal:正在为其选 source 的 skill
+  // 冲突选择 modal
   const [conflictTarget, setConflictTarget] = useState<SkillView | null>(null)
-  // "已选 source,可继续部署" 的提示(skillId → 已选 source path)
-  const [resolved, setResolved] = useState<Record<number, string>>({})
+  // 已选 source 的 skill(冲突解决后或无冲突时直接选 primary)
+  const [resolvedSource, setResolvedSource] = useState<Record<number, string>>({})
+  // Deploy dialog:正在部署的 skill + 已选 source path
+  const [deployTarget, setDeployTarget] = useState<{ skill: SkillView; sourcePath: string } | null>(null)
+  // Install dialog
+  const [installOpen, setInstallOpen] = useState(false)
+  // 反馈消息
+  const [feedback, setFeedback] = useState<string | null>(null)
 
   const toggleExpand = (id: number) => {
     setExpanded((prev) => {
@@ -259,21 +265,44 @@ function SkillsPage({
 
   const handleDeployClick = (skill: SkillView) => {
     if (skill.conflict.hasConflict) {
-      // 多 source 内容冲突 → 弹窗让用户选
       setConflictTarget(skill)
     } else {
-      // 一致或单 source → 默认取 primarySource,不弹窗
       const primary = skill.conflict.primarySource
       if (primary) {
-        setResolved((prev) => ({ ...prev, [skill.id]: primary.path }))
+        setDeployTarget({ skill, sourcePath: primary.path })
       }
     }
   }
 
   const handleConflictConfirm = (source: SkillSourceView) => {
     if (!conflictTarget) return
-    setResolved((prev) => ({ ...prev, [conflictTarget.id]: source.path }))
+    setDeployTarget({ skill: conflictTarget, sourcePath: source.path })
     setConflictTarget(null)
+  }
+
+  const handleDeployDone = async (result: DeployResultView | null) => {
+    setDeployTarget(null)
+    if (result) {
+      const msg =
+        result.action === 'skipped'
+          ? `Skipped — ${result.targetPath} is already up to date.`
+          : `Deployed (${result.action}) to ${result.targetPath}`
+      setFeedback(msg)
+      await onRefresh()
+      setTimeout(() => setFeedback(null), 4000)
+    }
+  }
+
+  const handleInstallDone = async (result: InstallResultView | null) => {
+    setInstallOpen(false)
+    if (result) {
+      const msg = result.overwritten
+        ? `Installed "${result.skillName}" (overwrote existing, backup created).`
+        : `Installed "${result.skillName}".`
+      setFeedback(msg)
+      await onRefresh()
+      setTimeout(() => setFeedback(null), 5000)
+    }
   }
 
   return (
@@ -287,14 +316,28 @@ function SkillsPage({
             </span>
           )}
         </div>
-        <button
-          onClick={onScan}
-          disabled={scanning}
-          className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
-        >
-          {scanning ? 'Scanning…' : 'Scan'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setInstallOpen(true)}
+            className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 text-sm font-medium"
+          >
+            Install
+          </button>
+          <button
+            onClick={onScan}
+            disabled={scanning}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+          >
+            {scanning ? 'Scanning…' : 'Scan'}
+          </button>
+        </div>
       </div>
+
+      {feedback && (
+        <div className="mb-4 px-3 py-2 rounded border border-green-200 bg-green-50 text-green-700 text-sm">
+          {feedback}
+        </div>
+      )}
 
       {lastScan && (
         <div className="text-sm text-neutral-500 mb-4">
@@ -317,7 +360,7 @@ function SkillsPage({
       {skills.length === 0 ? (
         <p className="text-neutral-400">
           No skills indexed yet. Click <span className="font-medium">Scan</span> to discover
-          skills across all enabled tool directories.
+          skills across all enabled tool directories, or <span className="font-medium">Install</span> to add from GitHub / ZIP / local dir.
         </p>
       ) : (
         <ul className="space-y-2">
@@ -328,7 +371,6 @@ function SkillsPage({
               expanded={expanded.has(skill.id)}
               onToggleExpand={() => toggleExpand(skill.id)}
               onDeploy={() => handleDeployClick(skill)}
-              resolvedPath={resolved[skill.id]}
             />
           ))}
         </ul>
@@ -341,6 +383,16 @@ function SkillsPage({
           onConfirm={handleConflictConfirm}
         />
       )}
+
+      {deployTarget && (
+        <DeployDialog
+          skill={deployTarget.skill}
+          sourcePath={deployTarget.sourcePath}
+          onDone={handleDeployDone}
+        />
+      )}
+
+      {installOpen && <InstallDialog onDone={handleInstallDone} />}
     </div>
   )
 }
@@ -349,14 +401,12 @@ function SkillRow({
   skill,
   expanded,
   onToggleExpand,
-  onDeploy,
-  resolvedPath
+  onDeploy
 }: {
   skill: SkillView
   expanded: boolean
   onToggleExpand: () => void
   onDeploy: () => void
-  resolvedPath: string | undefined
 }) {
   const conflict = skill.conflict.hasConflict
   return (
@@ -392,12 +442,6 @@ function SkillRow({
         </div>
       </div>
 
-      {resolvedPath && (
-        <div className="px-3 py-2 bg-green-50 border-t border-green-200 text-xs text-green-800">
-          ✓ Source selected: <code>{resolvedPath}</code> — deploy action will be added in a later slice.
-        </div>
-      )}
-
       {expanded && (
         <div className="border-t border-neutral-200 bg-neutral-50 p-3">
           <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-2">Sources</h4>
@@ -415,6 +459,18 @@ function SkillRow({
                   <span className="text-neutral-700">{new Date(src.mtime).toISOString()}</span>
                   <span className="text-neutral-500">source_type</span>
                   <span className="text-neutral-700">{src.source_type}</span>
+                  {src.repo_url && (
+                    <>
+                      <span className="text-neutral-500">repo</span>
+                      <code className="text-neutral-700 break-all">{src.repo_url}</code>
+                    </>
+                  )}
+                  {src.commit_sha && (
+                    <>
+                      <span className="text-neutral-500">sha</span>
+                      <code className="text-neutral-700">{src.commit_sha.slice(0, 12)}</code>
+                    </>
+                  )}
                   <span className="text-neutral-500">discovered_at</span>
                   <span className="text-neutral-700">{src.discovered_at}</span>
                 </li>
@@ -437,7 +493,6 @@ function ConflictModal({
   onConfirm: (source: SkillSourceView) => void
 }) {
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  // 把相同 hash 归一组,UI 上标"内容一致"
   const hashGroups = new Map<string, SkillSourceView[]>()
   for (const s of skill.sources) {
     const arr = hashGroups.get(s.hash) ?? []
@@ -498,8 +553,6 @@ function ConflictModal({
                       <code className="text-neutral-700 break-all">{src.path}</code>
                       <span className="text-neutral-500">hash</span>
                       <code className="text-neutral-700 break-all">{src.hash}</code>
-                      <span className="text-neutral-500">mtime</span>
-                      <span className="text-neutral-700">{new Date(src.mtime).toISOString()}</span>
                       <span className="text-neutral-500">source_type</span>
                       <span className="text-neutral-700">{src.source_type}</span>
                     </div>
@@ -534,6 +587,599 @@ function ConflictModal({
     </div>
   )
 }
+
+// ===== Deploy 对话框(#6)=====
+
+function DeployDialog({
+  skill,
+  sourcePath,
+  onDone
+}: {
+  skill: SkillView
+  sourcePath: string
+  onDone: (result: DeployResultView | null) => void
+}) {
+  const [settings, setSettings] = useState<SettingsView | null>(null)
+  const [selectedTool, setSelectedTool] = useState<string>('')
+  const [mode, setMode] = useState<DeployMode>('copy')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    window.api.getSettings().then((s) => {
+      setSettings(s)
+      // 默认选第一个 enabled + existing 的工具
+      const first = s.tools.find((t) => t.enabled && t.exists)
+      if (first) setSelectedTool(first.key)
+      // 平台支持 symlink 则默认 symlink,否则 copy
+      setMode(s.platform.canSymlink ? 'symlink' : 'copy')
+    })
+  }, [])
+
+  const availableTools = settings?.tools.filter((t) => t.enabled && t.exists) ?? []
+  const canSymlink = settings?.platform.canSymlink ?? false
+
+  const handleDeploy = async () => {
+    if (!selectedTool) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await window.api.deploy(skill.id, selectedTool, mode, sourcePath)
+      onDone(result)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={() => !busy && onDone(null)}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-neutral-200">
+          <h3 className="text-lg font-semibold">Deploy {skill.name}</h3>
+          <p className="text-sm text-neutral-600 mt-1">
+            Source: <code className="text-xs break-all">{sourcePath}</code>
+          </p>
+        </div>
+
+        <div className="p-4 space-y-4">
+          {error && (
+            <div className="px-3 py-2 rounded border border-red-200 bg-red-50 text-red-700 text-sm">
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1">Target tool</label>
+            <select
+              value={selectedTool}
+              onChange={(e) => setSelectedTool(e.target.value)}
+              disabled={busy}
+              className="w-full border border-neutral-300 rounded px-2 py-1.5 text-sm"
+            >
+              {availableTools.length === 0 && (
+                <option value="" disabled>No tools available (enable in Settings)</option>
+              )}
+              {availableTools.map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.displayName} — {t.existingPaths[0]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1">Mode</label>
+            <div className="flex gap-3">
+              <label className={`flex items-center gap-2 text-sm cursor-pointer ${!canSymlink ? 'opacity-50' : ''}`}>
+                <input
+                  type="radio"
+                  name="deploy-mode"
+                  value="symlink"
+                  checked={mode === 'symlink'}
+                  onChange={() => setMode('symlink')}
+                  disabled={!canSymlink || busy}
+                />
+                <span>
+                  symlink
+                  {!canSymlink && (
+                    <span className="text-xs text-neutral-400 ml-1">(unavailable on this platform)</span>
+                  )}
+                </span>
+              </label>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="radio"
+                  name="deploy-mode"
+                  value="copy"
+                  checked={mode === 'copy'}
+                  onChange={() => setMode('copy')}
+                  disabled={busy}
+                />
+                <span>copy</span>
+              </label>
+            </div>
+            <p className="text-xs text-neutral-400 mt-1">
+              {mode === 'symlink'
+                ? 'Source updates auto-propagate (link is transparent).'
+                : 'Snapshot copy — source updates require manual redeploy.'}
+            </p>
+          </div>
+        </div>
+
+        <div className="p-4 border-t border-neutral-200 flex justify-end gap-2">
+          <button
+            onClick={() => onDone(null)}
+            disabled={busy}
+            className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleDeploy}
+            disabled={busy || !selectedTool}
+            className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy ? 'Deploying…' : 'Deploy'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ===== Tools 页(#6)=====
+
+function ToolsPage() {
+  const [tools, setTools] = useState<ToolWithDriftsView[]>([])
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const result = await window.api.getTools()
+    setTools(result)
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const toggleExpand = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
+      return next
+    })
+  }
+
+  const handleUndeploy = async (skillId: number, targetTool: string, skillName: string) => {
+    if (!window.confirm(`Undeploy "${skillName}" from ${targetTool}?\n\nThis only removes the deployment (link/copy), not the source.`)) {
+      return
+    }
+    setBusy(`${skillId}:${targetTool}`)
+    setError(null)
+    try {
+      await window.api.undeploy(skillId, targetTool)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleRedeploy = async (skillId: number, targetTool: string, skillName: string) => {
+    setBusy(`${skillId}:${targetTool}`)
+    setError(null)
+    try {
+      // 重新部署:用清单记录的 source_path 和 mode
+      const tool = tools.find((t) => t.config.key === targetTool)
+      const drift = tool?.drifts.find((d) => d.skillId === skillId)
+      if (!drift?.deployment) {
+        throw new Error('no deployment record to redeploy from')
+      }
+      await window.api.deploy(
+        skillId,
+        targetTool,
+        drift.deployment.mode,
+        drift.deployment.source_path
+      )
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-semibold">Tools</h2>
+        <button
+          onClick={load}
+          className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-4 px-3 py-2 rounded border border-red-200 bg-red-50 text-red-700 text-sm">
+          {error}
+        </div>
+      )}
+
+      {tools.length === 0 ? (
+        <p className="text-neutral-400">No tools configured. Visit Settings to enable tools.</p>
+      ) : (
+        <ul className="space-y-3">
+          {tools.map((tool) => (
+            <ToolCard
+              key={tool.config.key}
+              tool={tool}
+              expanded={expanded.has(tool.config.key)}
+              onToggleExpand={() => toggleExpand(tool.config.key)}
+              onUndeploy={handleUndeploy}
+              onRedeploy={handleRedeploy}
+              busyKey={busy}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function ToolCard({
+  tool,
+  expanded,
+  onToggleExpand,
+  onUndeploy,
+  onRedeploy,
+  busyKey
+}: {
+  tool: ToolWithDriftsView
+  expanded: boolean
+  onToggleExpand: () => void
+  onUndeploy: (skillId: number, targetTool: string, skillName: string) => void
+  onRedeploy: (skillId: number, targetTool: string, skillName: string) => void
+  busyKey: string | null
+}) {
+  const { config, drifts } = tool
+  const managed = drifts.filter((d) => d.deployment !== null)
+  const external = drifts.filter((d) => d.kind === 'external')
+  const driftCount = drifts.filter((d) => d.kind === 'drift' || d.kind === 'source-updated').length
+
+  if (!config.enabled || !config.exists) {
+    return (
+      <li className={`border rounded-md p-3 ${config.enabled ? 'border-neutral-200' : 'border-neutral-200 bg-neutral-50 opacity-60'}`}>
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{config.displayName}</span>
+          {!config.exists && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-500">missing</span>
+          )}
+          {config.enabled && config.exists && (
+            <span className="text-xs text-neutral-400">no skills dir</span>
+          )}
+        </div>
+      </li>
+    )
+  }
+
+  return (
+    <li className="border border-neutral-200 rounded-md">
+      <div
+        className="flex items-center justify-between p-3 hover:bg-neutral-50 cursor-pointer"
+        onClick={onToggleExpand}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-neutral-400 text-xs select-none">{expanded ? '▼' : '▶'}</span>
+          <span className="font-medium">{config.displayName}</span>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">found</span>
+          {driftCount > 0 && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
+              {driftCount} drift
+            </span>
+          )}
+          {external.length > 0 && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+              {external.length} external
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-neutral-400">
+            {managed.length} deployed · {drifts.length} total
+          </span>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-neutral-200 bg-neutral-50 p-3">
+          <p className="text-xs text-neutral-400 mb-2">
+            <code>{config.existingPaths[0]}</code>
+          </p>
+          {drifts.length === 0 ? (
+            <p className="text-xs text-neutral-400">No skills in this tool directory.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {drifts.map((d) => (
+                <DriftRow
+                  key={`${d.skillId}:${d.skillName}`}
+                  drift={d}
+                  busy={busyKey === `${d.skillId}:${d.targetTool}`}
+                  onUndeploy={() => onUndeploy(d.skillId, d.targetTool, d.skillName)}
+                  onRedeploy={() => onRedeploy(d.skillId, d.targetTool, d.skillName)}
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </li>
+  )
+}
+
+function DriftRow({
+  drift,
+  busy,
+  onUndeploy,
+  onRedeploy
+}: {
+  drift: DriftStatusView
+  busy: boolean
+  onUndeploy: () => void
+  onRedeploy: () => void
+}) {
+  const badge = DRIFT_BADGE[drift.kind]
+  return (
+    <li className="flex items-center justify-between bg-white border border-neutral-200 rounded px-3 py-1.5">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className={`text-xs px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
+        <span className="text-sm font-medium truncate">{drift.skillName}</span>
+        {drift.deployment && (
+          <span className="text-xs text-neutral-400">{drift.deployment.mode}</span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+        {drift.kind === 'drift' && (
+          <>
+            <button
+              onClick={onRedeploy}
+              disabled={busy}
+              className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
+            >
+              Redeploy
+            </button>
+          </>
+        )}
+        {drift.kind === 'source-updated' && (
+          <button
+            onClick={onRedeploy}
+            disabled={busy}
+            className="px-2 py-0.5 bg-amber-600 text-white rounded text-xs hover:bg-amber-700 disabled:opacity-50"
+          >
+            Update
+          </button>
+        )}
+        {drift.deployment !== null && drift.kind !== 'drift' && (
+          <button
+            onClick={onUndeploy}
+            disabled={busy}
+            className="px-2 py-0.5 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50"
+          >
+            Undeploy
+          </button>
+        )}
+        {drift.kind === 'external' && (
+          <span className="text-xs text-neutral-400">not managed</span>
+        )}
+      </div>
+    </li>
+  )
+}
+
+const DRIFT_BADGE: Record<string, { label: string; cls: string }> = {
+  normal: { label: '✅', cls: 'bg-green-100 text-green-700' },
+  'source-updated': { label: '⚠️ source updated', cls: 'bg-amber-100 text-amber-800' },
+  drift: { label: '⚠️ drift', cls: 'bg-red-100 text-red-700' },
+  external: { label: '🆕 external', cls: 'bg-blue-100 text-blue-700' }
+}
+
+// ===== Install 对话框(#7)=====
+
+function InstallDialog({
+  onDone
+}: {
+  onDone: (result: InstallResultView | null) => void
+}) {
+  const [tab, setTab] = useState<'github' | 'zip' | 'local-dir'>('github')
+  const [githubUrl, setGithubUrl] = useState('')
+  const [zipPath, setZipPath] = useState<string | null>(null)
+  const [localPath, setLocalPath] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSelectZip = async () => {
+    const path = await window.api.selectZipFile()
+    if (path) setZipPath(path)
+  }
+
+  const handleSelectDir = async () => {
+    const path = await window.api.selectLocalDir()
+    if (path) setLocalPath(path)
+  }
+
+  const handleInstall = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      let result: InstallResultView
+      if (tab === 'github') {
+        if (!githubUrl.trim()) {
+          setError('Please enter a GitHub URL.')
+          setBusy(false)
+          return
+        }
+        result = await window.api.installFromGitHub(githubUrl.trim())
+      } else if (tab === 'zip') {
+        if (!zipPath) {
+          setError('Please select a ZIP file.')
+          setBusy(false)
+          return
+        }
+        result = await window.api.installFromZip(zipPath)
+      } else {
+        if (!localPath) {
+          setError('Please select a directory.')
+          setBusy(false)
+          return
+        }
+        result = await window.api.installFromLocalDir(localPath)
+      }
+      onDone(result)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={() => !busy && onDone(null)}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-neutral-200">
+          <h3 className="text-lg font-semibold">Install skill</h3>
+        </div>
+
+        <div className="p-4 space-y-4">
+          {error && (
+            <div className="px-3 py-2 rounded border border-red-200 bg-red-50 text-red-700 text-sm">
+              {error}
+            </div>
+          )}
+
+          <div className="flex gap-1 border-b border-neutral-200">
+            {(['github', 'zip', 'local-dir'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                disabled={busy}
+                className={`px-3 py-1.5 text-sm font-medium border-b-2 transition-colors ${
+                  tab === t
+                    ? 'border-blue-600 text-blue-700'
+                    : 'border-transparent text-neutral-500 hover:text-neutral-700'
+                }`}
+              >
+                {t === 'github' ? 'GitHub URL' : t === 'zip' ? 'ZIP file' : 'Local dir'}
+              </button>
+            ))}
+          </div>
+
+          {tab === 'github' && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1">
+                GitHub repository URL
+              </label>
+              <input
+                type="text"
+                value={githubUrl}
+                onChange={(e) => setGithubUrl(e.target.value)}
+                disabled={busy}
+                placeholder="https://github.com/owner/repo[/tree/main/skills/grilling]"
+                className="w-full border border-neutral-300 rounded px-2 py-1.5 text-sm"
+              />
+              <p className="text-xs text-neutral-400 mt-1">
+                Single-skill repo or sub-path (e.g. <code>/tree/main/skills/grilling</code>).
+              </p>
+            </div>
+          )}
+
+          {tab === 'zip' && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1">
+                ZIP file
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleSelectZip}
+                  disabled={busy}
+                  className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
+                >
+                  Select ZIP…
+                </button>
+                {zipPath && (
+                  <code className="text-xs text-neutral-600 truncate">{zipPath}</code>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === 'local-dir' && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-700 mb-1">
+                Local directory (indexed, files not moved)
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleSelectDir}
+                  disabled={busy}
+                  className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
+                >
+                  Select directory…
+                </button>
+                {localPath && (
+                  <code className="text-xs text-neutral-600 truncate">{localPath}</code>
+                )}
+              </div>
+              <p className="text-xs text-neutral-400 mt-1">
+                Registers the directory as an indexed source — files stay in place.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="p-4 border-t border-neutral-200 flex justify-end gap-2">
+          <button
+            onClick={() => onDone(null)}
+            disabled={busy}
+            className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleInstall}
+            disabled={busy}
+            className="px-4 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy ? 'Installing…' : tab === 'local-dir' ? 'Add' : 'Install'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ===== Settings 页 =====
 
 function SettingsPage() {
   const [settings, setSettings] = useState<SettingsView | null>(null)

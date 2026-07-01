@@ -15,7 +15,19 @@ const api = {
   setBackupRetention: (n: number) => ipcRenderer.invoke('setBackupRetention', n),
   listBackups: () => ipcRenderer.invoke('listBackups'),
   restoreBackup: (backupId: string) => ipcRenderer.invoke('restoreBackup', backupId),
-  deleteBackup: (backupId: string) => ipcRenderer.invoke('deleteBackup', backupId)
+  deleteBackup: (backupId: string) => ipcRenderer.invoke('deleteBackup', backupId),
+  // Deploy(#6)
+  deploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction', sourcePath: string) =>
+    ipcRenderer.invoke('deploy', skillId, targetTool, mode, sourcePath),
+  undeploy: (skillId: number, targetTool: string) =>
+    ipcRenderer.invoke('undeploy', skillId, targetTool),
+  getTools: () => ipcRenderer.invoke('getTools'),
+  // Install(#7)
+  installFromGitHub: (url: string) => ipcRenderer.invoke('installFromGitHub', url),
+  installFromZip: (zipPath: string) => ipcRenderer.invoke('installFromZip', zipPath),
+  installFromLocalDir: (localPath: string) => ipcRenderer.invoke('installFromLocalDir', localPath),
+  selectZipFile: () => ipcRenderer.invoke('selectZipFile'),
+  selectLocalDir: () => ipcRenderer.invoke('selectLocalDir')
 }
 
 if (process.contextIsolated) {

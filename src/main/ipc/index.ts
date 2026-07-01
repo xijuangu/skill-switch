@@ -5,11 +5,21 @@
 // 启动序列 runStartupSequence:平台检测 + settings 初始化 + 一次性多工具扫描
 // (覆盖本次启动新出现的工具目录)。
 
-import { ipcMain } from 'electron'
+import { ipcMain, dialog } from 'electron'
 import { homedir, tmpdir } from 'os'
+import { join } from 'path'
 import type { DB } from '../db/database'
-import type { AppSettings, CustomTool, MultiScanResult, PlatformInfo, SkillWithConflict, ToolConfig } from '../types'
-import { SETTINGS_PATH, BACKUPS_DIR } from '../paths'
+import type {
+  AppSettings,
+  CustomTool,
+  DeployMode,
+  DriftStatus,
+  MultiScanResult,
+  PlatformInfo,
+  SkillWithConflict,
+  ToolConfig
+} from '../types'
+import { SETTINGS_PATH, BACKUPS_DIR, SKILLS_DIR } from '../paths'
 import { readSettings, writeSettings } from '../services/settings'
 import { detectPlatform } from '../services/platform'
 import {
@@ -21,9 +31,11 @@ import {
   getActiveScanDirs
 } from '../services/tools-config'
 import { scanAllTools } from '../services/scan-all'
-import { getAllSkills } from '../db/dao/skills'
+import { getAllSkills, getSkillById } from '../db/dao/skills'
 import { computeConflict } from '../services/registry'
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
+import { deploySkill, undeploySkill, detectDriftsForTool } from '../services/deployer'
+import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
 
 /** Settings 页统一视图:解析后的工具列表 + backupRetention + 平台信息 */
 export interface SettingsView {
@@ -32,12 +44,29 @@ export interface SettingsView {
   platform: PlatformInfo
 }
 
+/** Tools 页视图:工具配置 + 漂移状态列表 */
+export interface ToolWithDriftsView {
+  config: ToolConfig
+  drifts: DriftStatus[]
+}
+
 function buildSettingsView(settings: AppSettings): SettingsView {
   return {
     tools: resolveToolConfigs(settings, homedir()),
     backupRetention: settings.backupRetention,
     platform: settings.platform
   }
+}
+
+/** 解析目标工具的第一个存在路径(部署目标目录)。不存在抛错。 */
+function resolveToolSkillDir(targetTool: string): string {
+  const settings = readSettings(SETTINGS_PATH)
+  const configs = resolveToolConfigs(settings, homedir())
+  const tool = configs.find((c) => c.key === targetTool && c.enabled && c.exists)
+  if (!tool || tool.existingPaths.length === 0) {
+    throw new Error(`tool not available: ${targetTool}`)
+  }
+  return tool.existingPaths[0]
 }
 
 export function registerIpcHandlers(db: DB): void {
@@ -115,6 +144,85 @@ export function registerIpcHandlers(db: DB): void {
 
   ipcMain.handle('deleteBackup', async (_e, backupId: string) => {
     deleteBackup(backupId, BACKUPS_DIR)
+  })
+
+  // ===== Deploy(切片 #6)=====
+
+  ipcMain.handle('deploy', async (_e, skillId: number, targetTool: string, mode: DeployMode, sourcePath: string) => {
+    const skill = getSkillById(db, skillId)
+    if (!skill) {
+      throw new Error(`skill not found: ${skillId}`)
+    }
+    const toolSkillDir = resolveToolSkillDir(targetTool)
+    const targetDir = join(toolSkillDir, skill.name)
+    return deploySkill(db, {
+      skillId,
+      skillName: skill.name,
+      targetTool,
+      mode,
+      sourcePath,
+      targetDir,
+      backupsDir: BACKUPS_DIR
+    })
+  })
+
+  ipcMain.handle('undeploy', async (_e, skillId: number, targetTool: string) => {
+    const skill = getSkillById(db, skillId)
+    if (!skill) {
+      throw new Error(`skill not found: ${skillId}`)
+    }
+    const toolSkillDir = resolveToolSkillDir(targetTool)
+    const targetPath = join(toolSkillDir, skill.name)
+    undeploySkill(db, skillId, targetTool, targetPath)
+  })
+
+  ipcMain.handle('getTools', async () => {
+    const settings = readSettings(SETTINGS_PATH)
+    const configs = resolveToolConfigs(settings, homedir())
+    const out: ToolWithDriftsView[] = configs.map((c) => ({
+      config: c,
+      drifts: c.enabled && c.exists ? detectDriftsForTool(db, c.key, c.existingPaths[0]) : []
+    }))
+    return out
+  })
+
+  // ===== Install(切片 #7)=====
+
+  ipcMain.handle('installFromGitHub', async (_e, url: string) => {
+    return installFromGitHub(db, url, {
+      centralSkillsDir: SKILLS_DIR,
+      backupsDir: BACKUPS_DIR
+    })
+  })
+
+  ipcMain.handle('installFromZip', async (_e, zipPath: string) => {
+    return installFromZip(db, zipPath, {
+      centralSkillsDir: SKILLS_DIR,
+      backupsDir: BACKUPS_DIR
+    })
+  })
+
+  ipcMain.handle('installFromLocalDir', async (_e, localPath: string) => {
+    return installFromLocalDir(db, localPath, {
+      centralSkillsDir: SKILLS_DIR,
+      backupsDir: BACKUPS_DIR
+    })
+  })
+
+  // 文件选择对话框(渲染进程无法直接调 electron dialog)
+  ipcMain.handle('selectZipFile', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'ZIP', extensions: ['zip'] }]
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle('selectLocalDir', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory']
+    })
+    return result.canceled ? null : result.filePaths[0]
   })
 }
 

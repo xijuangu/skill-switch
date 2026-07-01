@@ -23,6 +23,10 @@ export interface SkillSource {
   mtime: number
   source_type: SourceType
   discovered_at: string
+  /** GitHub 安装记录的源仓库 URL(仅 central-repo + GitHub 来源有值) */
+  repo_url: string | null
+  /** GitHub 安装记录的 commit SHA(仅 central-repo + GitHub 来源有值) */
+  commit_sha: string | null
 }
 
 /** 部署清单记录 */
@@ -134,3 +138,104 @@ export interface MultiScanResult {
   totalScanned: number
   totalUpserted: number
 }
+
+// ===== Deploy(切片 #6)=====
+
+/** deployer 入参:把 skill 从 sourcePath 部署到 targetDir */
+export interface DeployOptions {
+  skillId: number
+  skillName: string
+  targetTool: string
+  mode: DeployMode
+  /** 源目录绝对路径(多 source 时由 UI 先让用户选;未传则用 primary_source_path) */
+  sourcePath: string
+  /** 目标工具目录绝对路径(如 ~/.codex/skills/grilling) */
+  targetDir: string
+  /** 备份目录绝对路径(覆盖外部 skill 时走 backup 服务) */
+  backupsDir: string
+}
+
+/** 部署动作类型(用于 UI 反馈与测试断言) */
+export type DeployAction =
+  | 'created' // 全新部署(目标不存在)
+  | 'updated' // 自管覆盖(清单有记录,内容/hash 变了)
+  | 'skipped' // 幂等跳过(自管 + hash 未变)
+  | 'mode-switched' // 模式切换(先按旧 mode 清理再按新 mode 部署)
+  | 'external-overwritten' // 外部 skill(清单无记录)备份后覆盖
+
+/** deploySkill 返回结果 */
+export interface DeployResult {
+  action: DeployAction
+  mode: DeployMode
+  targetPath: string
+  sourceHashAtDeploy: string
+  /** 上一份部署的 mode(仅 mode-switched 时有值) */
+  previousMode?: DeployMode
+}
+
+/**
+ * 漂移状态(清单 vs 实际扫描对比)。
+ * - normal:清单有 + 目录有 + hash 一致(copy 模式)
+ * - source-updated:清单有 + 目录有 + 源 hash 变了(copy 模式,"源已更新,可重新部署")
+ * - drift:清单有 + 目录无(用户手动删了)
+ * - external:清单无 + 目录有(外部 skill)
+ */
+export type DriftKind = 'normal' | 'source-updated' | 'drift' | 'external'
+
+/** 单个部署点的漂移检测结果 */
+export interface DriftStatus {
+  skillId: number
+  skillName: string
+  targetTool: string
+  targetPath: string
+  /** 部署清单记录(null 表示外部 skill,清单无记录) */
+  deployment: Deployment | null
+  /** 当前目标路径是否存在 */
+  targetExists: boolean
+  /** 当前源目录 hash(从 deployment.source_path 重算;源不存在或无部署记录时为 null) */
+  currentSourceHash: string | null
+  kind: DriftKind
+}
+
+// ===== Install(切片 #7)=====
+
+/** 安装来源类型 */
+export type InstallSource = 'github' | 'zip' | 'local-dir'
+
+/** 解析后的 GitHub URL:仓库 URL + 可选子路径 + 可选 ref */
+export interface ParsedGitHubUrl {
+  /** 仓库 clone URL(https://github.com/owner/repo.git) */
+  repoUrl: string
+  /** 仓库主页 URL(https://github.com/owner/repo) */
+  repoWebUrl: string
+  owner: string
+  repo: string
+  /** 子路径(如 skills/grilling);无则 null */
+  subPath: string | null
+  /** 分支/tag/commit(如 main);默认 main */
+  ref: string
+}
+
+/** installer 入参基类 */
+export interface InstallOptions {
+  /** 中央仓库 skills 目录绝对路径(~/.skill-switch/skills) */
+  centralSkillsDir: string
+  /** 备份目录绝对路径(同名覆盖时走 backup 服务) */
+  backupsDir: string
+}
+
+/** installSkill 返回结果 */
+export interface InstallResult {
+  skillName: string
+  skillId: number
+  /** 安装后的 source path(centralSkillsDir/{name} 或本地目录原路径) */
+  sourcePath: string
+  sourceType: SourceType
+  /** GitHub 安装记录的源仓库 URL(仅 github 来源) */
+  repoUrl: string | null
+  /** GitHub 安装记录的 commit SHA(仅 github 来源) */
+  commitSha: string | null
+  /** 同名 skill 已存在时是否走了备份+覆盖 */
+  overwritten: boolean
+}
+

@@ -5,13 +5,13 @@
 
 import { readdirSync, readFileSync, existsSync, statSync } from 'fs'
 import { join, basename } from 'path'
-import { createHash } from 'crypto'
 import matter from 'gray-matter'
 import type { DB } from '../db/database'
 import type { ScanResult } from '../types'
 import { runInTransaction } from '../db/database'
 import { upsertSkill } from '../db/dao/skills'
 import { upsertSource } from '../db/dao/skill-sources'
+import { hashDir } from './hash'
 
 /** 从 SKILL.md frontmatter 解析 name;无则回退目录名 */
 function resolveSkillName(skillDir: string): string {
@@ -25,29 +25,6 @@ function resolveSkillName(skillDir: string): string {
     }
   }
   return basename(skillDir)
-}
-
-/** 递归算目录内容 hash(相对路径 + 文件内容,按路径排序保证稳定) */
-function hashDir(dir: string): string {
-  const hash = createHash('sha256')
-  const files: string[] = []
-  const walk = (d: string): void => {
-    for (const entry of readdirSync(d, { withFileTypes: true })) {
-      const full = join(d, entry.name)
-      if (entry.isDirectory()) {
-        walk(full)
-      } else if (entry.isFile()) {
-        files.push(full)
-      }
-    }
-  }
-  walk(dir)
-  files.sort()
-  for (const f of files) {
-    hash.update(f.slice(dir.length))
-    hash.update(readFileSync(f))
-  }
-  return hash.digest('hex')
 }
 
 /**

@@ -5,7 +5,7 @@
 // mutex 保护,作为防御性约束)。DB 本身的原子性靠 transaction 保证。
 
 import Database from 'better-sqlite3'
-import { SCHEMA } from './schema'
+import { SCHEMA, runMigrations } from './schema'
 
 export type DB = Database.Database
 
@@ -33,6 +33,7 @@ export function createDatabase(dbPath: string): DB {
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   db.exec(SCHEMA)
+  runMigrations(db)
   return db
 }
 
