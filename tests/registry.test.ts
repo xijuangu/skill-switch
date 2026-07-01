@@ -1,13 +1,20 @@
 import { test, expect, describe } from 'vitest'
-import { mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
 import { scanToolDir } from '../src/main/services/scanner'
 import { scanAllTools } from '../src/main/services/scan-all'
-import { computeConflict, getConflictStatus, getAllConflicts } from '../src/main/services/registry'
-import { getSkillByName, getAllSkills } from '../src/main/db/dao/skills'
+import {
+  computeConflict,
+  getConflictStatus,
+  getAllConflicts,
+  removeFromRegistry
+} from '../src/main/services/registry'
+import { getSkillByName, getSkillById, getAllSkills, upsertSkill } from '../src/main/db/dao/skills'
 import { getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
-import { upsertSkill } from '../src/main/db/dao/skills'
+import { getDeploymentsBySkillId } from '../src/main/db/dao/deployments'
+import { deploySkill } from '../src/main/services/deployer'
+import { listBackups } from '../src/main/services/backup'
 import { runInTransaction } from '../src/main/db/database'
 import type { ActiveScanDir } from '../src/main/services/tools-config'
 import type { SkillSource } from '../src/main/types'
@@ -399,5 +406,257 @@ describe('registry service — multi-source identity + conflict detection', () =
       cleanup()
       cleanupDb()
     })
+  })
+})
+
+// helper:在 dir 下创建一个含 SKILL.md 的 skill 目录,返回其路径
+function writeSkillDir(parent: string, name: string, content: string): string {
+  const skillDir = join(parent, name)
+  mkdirSync(skillDir, { recursive: true })
+  writeFileSync(join(skillDir, 'SKILL.md'), content)
+  return skillDir
+}
+
+describe('removeFromRegistry', () => {
+  test('removes central-repo entity + all deployments + registry records, with backup', () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const target1 = createTempDir('ss-target1-')
+    const target2 = createTempDir('ss-target2-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+
+    // 中央仓库实体:{centralSkillsDir}/{name}/ 含 SKILL.md
+    const skillName = 'grilling'
+    const centralEntityPath = writeSkillDir(
+      central.dir,
+      skillName,
+      '---\nname: grilling\n---\n# Grilling\n'
+    )
+    const skillId = upsertSkill(db, skillName, centralEntityPath)
+    upsertSource(db, skillId, centralEntityPath, 'somehash', Date.now(), 'central-repo')
+
+    // 部署到两个工具:copy + symlink
+    const copyTargetDir = join(target1.dir, skillName)
+    deploySkill(db, {
+      skillId,
+      skillName,
+      targetTool: 'codex',
+      mode: 'copy',
+      sourcePath: centralEntityPath,
+      targetDir: copyTargetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+    const symlinkTargetDir = join(target2.dir, skillName)
+    deploySkill(db, {
+      skillId,
+      skillName,
+      targetTool: 'agents',
+      mode: 'symlink',
+      sourcePath: centralEntityPath,
+      targetDir: symlinkTargetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+
+    const beforeBackups = listBackups(backups.dir).length
+
+    const result = removeFromRegistry(db, skillId, {
+      centralSkillsDir: central.dir,
+      backupsDir: backups.dir,
+      resolveTargetPath: (tool, name) => {
+        if (tool === 'codex') return join(target1.dir, name)
+        if (tool === 'agents') return join(target2.dir, name)
+        return null
+      }
+    })
+
+    expect(result.skillName).toBe(skillName)
+    expect(result.backedUp).toBe(true)
+    expect([...result.undeployedTools].sort()).toEqual(['agents', 'codex'])
+
+    // 中央实体目录已删
+    expect(existsSync(centralEntityPath)).toBe(false)
+    // 两个工具的目标目录都已清理(卸载)
+    expect(existsSync(copyTargetDir)).toBe(false)
+    expect(existsSync(symlinkTargetDir)).toBe(false)
+    // 备份已创建(多了一份,skillName 匹配,targetTool=registry)
+    const afterBackups = listBackups(backups.dir)
+    expect(afterBackups.length).toBe(beforeBackups + 1)
+    const registryBackup = afterBackups.find(
+      (b) => b.skillName === skillName && b.targetTool === 'registry'
+    )
+    expect(registryBackup).toBeDefined()
+    // skill 已从 DB 删除
+    expect(getSkillById(db, skillId)).toBeUndefined()
+    // skill_sources 已删
+    expect(getSourcesBySkillId(db, skillId)).toHaveLength(0)
+    // deployments 已删
+    expect(getDeploymentsBySkillId(db, skillId)).toHaveLength(0)
+
+    central.cleanup()
+    backups.cleanup()
+    target1.cleanup()
+    target2.cleanup()
+    cleanupDb()
+  })
+
+  test('indexed-only skill (no central entity) skips backup but still removes deployments + records', () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const source = createTempDir('ss-source-')
+    const target = createTempDir('ss-target-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+
+    // indexed-only:source 不在 centralSkillsDir 下,centralSkillsDir 不含 {name}/
+    const skillName = 'indexed-skill'
+    const sourcePath = writeSkillDir(
+      source.dir,
+      skillName,
+      '---\nname: indexed-skill\n---\nbody\n'
+    )
+    const skillId = upsertSkill(db, skillName, sourcePath)
+    upsertSource(db, skillId, sourcePath, 'somehash', Date.now(), 'indexed')
+
+    // 部署到一个工具(copy)
+    const targetDir = join(target.dir, skillName)
+    deploySkill(db, {
+      skillId,
+      skillName,
+      targetTool: 'codex',
+      mode: 'copy',
+      sourcePath,
+      targetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+
+    const beforeBackups = listBackups(backups.dir).length
+
+    const result = removeFromRegistry(db, skillId, {
+      centralSkillsDir: central.dir,
+      backupsDir: backups.dir,
+      resolveTargetPath: (_tool, name) => join(target.dir, name)
+    })
+
+    expect(result.skillName).toBe(skillName)
+    expect(result.backedUp).toBe(false)
+    expect(result.undeployedTools).toEqual(['codex'])
+    // 无新备份(中央实体不存在)
+    expect(listBackups(backups.dir).length).toBe(beforeBackups)
+    // 部署已清理
+    expect(existsSync(targetDir)).toBe(false)
+    expect(getDeploymentsBySkillId(db, skillId)).toHaveLength(0)
+    // skill + sources 已删
+    expect(getSkillById(db, skillId)).toBeUndefined()
+    expect(getSourcesBySkillId(db, skillId)).toHaveLength(0)
+
+    central.cleanup()
+    backups.cleanup()
+    source.cleanup()
+    target.cleanup()
+    cleanupDb()
+  })
+
+  test('tool unavailable (resolveTargetPath returns null) → skip fs cleanup, still delete DB record', () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const target = createTempDir('ss-target-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+
+    const skillName = 'grilling'
+    const centralEntityPath = writeSkillDir(
+      central.dir,
+      skillName,
+      '---\nname: grilling\n---\nbody\n'
+    )
+    const skillId = upsertSkill(db, skillName, centralEntityPath)
+    upsertSource(db, skillId, centralEntityPath, 'somehash', Date.now(), 'central-repo')
+
+    // 部署到 codex(copy 模式,目标为真实目录)
+    const targetDir = join(target.dir, skillName)
+    deploySkill(db, {
+      skillId,
+      skillName,
+      targetTool: 'codex',
+      mode: 'copy',
+      sourcePath: centralEntityPath,
+      targetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+    expect(existsSync(targetDir)).toBe(true)
+
+    // resolveTargetPath 返回 null → 工具不可用
+    const result = removeFromRegistry(db, skillId, {
+      centralSkillsDir: central.dir,
+      backupsDir: backups.dir,
+      resolveTargetPath: () => null
+    })
+
+    expect(result.undeployedTools).toEqual(['codex'])
+    // 部署 DB 记录已删
+    expect(getDeploymentsBySkillId(db, skillId)).toHaveLength(0)
+    // skill 已删
+    expect(getSkillById(db, skillId)).toBeUndefined()
+    // 目标目录未删(无法解析路径,跳过 fs 清理)
+    expect(existsSync(targetDir)).toBe(true)
+
+    central.cleanup()
+    backups.cleanup()
+    target.cleanup()
+    cleanupDb()
+  })
+
+  test('skill not found → throws', () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+
+    expect(() =>
+      removeFromRegistry(db, 99999, {
+        centralSkillsDir: central.dir,
+        backupsDir: backups.dir,
+        resolveTargetPath: () => null
+      })
+    ).toThrow(/skill not found/)
+
+    central.cleanup()
+    backups.cleanup()
+    cleanupDb()
+  })
+
+  test('idempotent: calling again after removal throws (skill already deleted)', () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+
+    const skillName = 'grilling'
+    const centralEntityPath = writeSkillDir(
+      central.dir,
+      skillName,
+      '---\nname: grilling\n---\nbody\n'
+    )
+    const skillId = upsertSkill(db, skillName, centralEntityPath)
+    upsertSource(db, skillId, centralEntityPath, 'somehash', Date.now(), 'central-repo')
+
+    const opts = {
+      centralSkillsDir: central.dir,
+      backupsDir: backups.dir,
+      resolveTargetPath: () => null
+    }
+
+    // 第一次调用成功
+    removeFromRegistry(db, skillId, opts)
+    // 第二次调用抛错(skill 已删)
+    expect(() => removeFromRegistry(db, skillId, opts)).toThrow(/skill not found/)
+
+    central.cleanup()
+    backups.cleanup()
+    cleanupDb()
   })
 })

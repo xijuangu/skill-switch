@@ -107,6 +107,10 @@ export interface DeployResultView {
   targetPath: string
   sourceHashAtDeploy: string
   previousMode?: DeployModeView
+  /** #9: 原始请求 mode,仅当降级(实际 mode ≠ 请求 mode)时设置 */
+  degradedFrom?: DeployModeView
+  /** #9: 降级原因(UI 展示),仅当降级时设置 */
+  degradeReason?: string
 }
 
 export interface DeploymentView {
@@ -172,6 +176,13 @@ declare global {
       ) => Promise<DeployResultView>
       undeploy: (skillId: number, targetTool: string) => Promise<void>
       getTools: () => Promise<ToolWithDriftsView[]>
+      // Drift + Remove from Registry (#8)
+      removeFromManifest: (skillId: number, targetTool: string) => Promise<void>
+      getDeploymentsForSkill: (skillId: number) => Promise<DeploymentView[]>
+      viewSkillMd: (skillId: number) => Promise<{ content: string; path: string } | null>
+      removeFromRegistry: (
+        skillId: number
+      ) => Promise<{ skillName: string; backedUp: boolean; undeployedTools: string[] }>
       // Install
       installFromGitHub: (url: string) => Promise<InstallResultView>
       installFromZip: (zipPath: string) => Promise<InstallResultView>

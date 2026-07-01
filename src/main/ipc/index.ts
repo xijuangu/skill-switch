@@ -8,11 +8,13 @@
 import { ipcMain, dialog } from 'electron'
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
+import { readFileSync } from 'fs'
 import type { DB } from '../db/database'
 import type {
   AppSettings,
   CustomTool,
   DeployMode,
+  Deployment,
   DriftStatus,
   MultiScanResult,
   PlatformInfo,
@@ -32,10 +34,11 @@ import {
 } from '../services/tools-config'
 import { scanAllTools } from '../services/scan-all'
 import { getAllSkills, getSkillById } from '../db/dao/skills'
-import { computeConflict } from '../services/registry'
+import { computeConflict, removeFromRegistry } from '../services/registry'
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 import { deploySkill, undeploySkill, detectDriftsForTool } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
+import { getDeploymentsBySkillId, deleteDeployment } from '../db/dao/deployments'
 
 /** Settings 页统一视图:解析后的工具列表 + backupRetention + 平台信息 */
 export interface SettingsView {
@@ -146,7 +149,7 @@ export function registerIpcHandlers(db: DB): void {
     deleteBackup(backupId, BACKUPS_DIR)
   })
 
-  // ===== Deploy(切片 #6)=====
+  // ===== Deploy(切片 #6 + #9 junction fallback)=====
 
   ipcMain.handle('deploy', async (_e, skillId: number, targetTool: string, mode: DeployMode, sourcePath: string) => {
     const skill = getSkillById(db, skillId)
@@ -155,6 +158,8 @@ export function registerIpcHandlers(db: DB): void {
     }
     const toolSkillDir = resolveToolSkillDir(targetTool)
     const targetDir = join(toolSkillDir, skill.name)
+    // #9: 从 settings 注入平台能力,deployer 据此决定 junction fallback
+    const settings = readSettings(SETTINGS_PATH)
     return deploySkill(db, {
       skillId,
       skillName: skill.name,
@@ -162,7 +167,9 @@ export function registerIpcHandlers(db: DB): void {
       mode,
       sourcePath,
       targetDir,
-      backupsDir: BACKUPS_DIR
+      backupsDir: BACKUPS_DIR,
+      canSymlink: settings.platform.canSymlink,
+      canJunction: settings.platform.canJunction
     })
   })
 
@@ -174,6 +181,61 @@ export function registerIpcHandlers(db: DB): void {
     const toolSkillDir = resolveToolSkillDir(targetTool)
     const targetPath = join(toolSkillDir, skill.name)
     undeploySkill(db, skillId, targetTool, targetPath)
+  })
+
+  // ===== Drift actions(切片 #8)=====
+
+  /**
+   * 从清单移除(仅删 deployments 记录,不碰磁盘)。
+   * 用于 ⚠️drift 状态(目标已被用户手动删了,清单与现实对齐)。
+   * 与 undeploy 的区别:undeploy 同时做 fs 清理 + 删记录;removeFromManifest 只删记录。
+   */
+  ipcMain.handle('removeFromManifest', async (_e, skillId: number, targetTool: string) => {
+    deleteDeployment(db, skillId, targetTool)
+  })
+
+  /**
+   * 查 skill 的所有部署(用于 Skills 页 "Undeploy from..." 子菜单列出目标工具)。
+   */
+  ipcMain.handle('getDeploymentsForSkill', async (_e, skillId: number): Promise<Deployment[]> => {
+    return getDeploymentsBySkillId(db, skillId)
+  })
+
+  /**
+   * 读 skill 的 SKILL.md 原文(Skills 页 "View SKILL.md" 用)。
+   * 优先读 primary_source_path/SKILL.md;不存在则读第一个 source 的 SKILL.md。
+   */
+  ipcMain.handle('viewSkillMd', async (_e, skillId: number): Promise<{ content: string; path: string } | null> => {
+    const skill = getSkillById(db, skillId)
+    if (!skill) return null
+    try {
+      return {
+        content: readFileSync(join(skill.primary_source_path, 'SKILL.md'), 'utf-8'),
+        path: join(skill.primary_source_path, 'SKILL.md')
+      }
+    } catch {
+      return null
+    }
+  })
+
+  /**
+   * Remove from Registry(切片 #8):删中央仓库实体 + 所有部署 + 注册表记录,删前备份。
+   * 与 undeploy 明确分开:undeploy 只删某工具的部署,Remove from Registry 彻底移除 skill。
+   */
+  ipcMain.handle('removeFromRegistry', async (_e, skillId: number) => {
+    return removeFromRegistry(db, skillId, {
+      centralSkillsDir: SKILLS_DIR,
+      backupsDir: BACKUPS_DIR,
+      resolveTargetPath: (targetTool, skillName) => {
+        try {
+          const dir = resolveToolSkillDir(targetTool)
+          return join(dir, skillName)
+        } catch {
+          // 工具不可用 → 跳过 fs 清理,只删 DB 记录
+          return null
+        }
+      }
+    })
   })
 
   ipcMain.handle('getTools', async () => {

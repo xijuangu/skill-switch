@@ -16,12 +16,21 @@ const api = {
   listBackups: () => ipcRenderer.invoke('listBackups'),
   restoreBackup: (backupId: string) => ipcRenderer.invoke('restoreBackup', backupId),
   deleteBackup: (backupId: string) => ipcRenderer.invoke('deleteBackup', backupId),
-  // Deploy(#6)
+  // Deploy(#6 + #9 junction fallback)
   deploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction', sourcePath: string) =>
     ipcRenderer.invoke('deploy', skillId, targetTool, mode, sourcePath),
   undeploy: (skillId: number, targetTool: string) =>
     ipcRenderer.invoke('undeploy', skillId, targetTool),
   getTools: () => ipcRenderer.invoke('getTools'),
+  // Drift + Remove from Registry(#8)
+  removeFromManifest: (skillId: number, targetTool: string) =>
+    ipcRenderer.invoke('removeFromManifest', skillId, targetTool),
+  getDeploymentsForSkill: (skillId: number) =>
+    ipcRenderer.invoke('getDeploymentsForSkill', skillId),
+  viewSkillMd: (skillId: number) =>
+    ipcRenderer.invoke('viewSkillMd', skillId),
+  removeFromRegistry: (skillId: number) =>
+    ipcRenderer.invoke('removeFromRegistry', skillId),
   // Install(#7)
   installFromGitHub: (url: string) => ipcRenderer.invoke('installFromGitHub', url),
   installFromZip: (zipPath: string) => ipcRenderer.invoke('installFromZip', zipPath),

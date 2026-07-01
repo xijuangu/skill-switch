@@ -153,6 +153,10 @@ export interface DeployOptions {
   targetDir: string
   /** 备份目录绝对路径(覆盖外部 skill 时走 backup 服务) */
   backupsDir: string
+  /** 平台能力:能否创建符号链接?(Windows 普通用户 = false;Mac/Linux = true) */
+  canSymlink: boolean
+  /** 平台能力:能否创建 junction?(仅 Windows = true;其他平台 = false) */
+  canJunction: boolean
 }
 
 /** 部署动作类型(用于 UI 反馈与测试断言) */
@@ -171,6 +175,10 @@ export interface DeployResult {
   sourceHashAtDeploy: string
   /** 上一份部署的 mode(仅 mode-switched 时有值) */
   previousMode?: DeployMode
+  /** 原始请求的 mode,仅当发生降级(实际 mode ≠ 请求 mode)时设置,如请求 symlink 实际用 copy。 */
+  degradedFrom?: DeployMode
+  /** 降级原因(供 UI 展示),仅当发生降级时设置。 */
+  degradeReason?: string
 }
 
 /**

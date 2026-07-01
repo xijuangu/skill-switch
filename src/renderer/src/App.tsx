@@ -248,6 +248,16 @@ function SkillsPage({
   const [installOpen, setInstallOpen] = useState(false)
   // 反馈消息
   const [feedback, setFeedback] = useState<string | null>(null)
+  // #8: 右键上下文菜单
+  const [contextMenu, setContextMenu] = useState<{ skill: SkillView; x: number; y: number } | null>(null)
+  // #8: View SKILL.md 弹窗
+  const [viewMdTarget, setViewMdTarget] = useState<{ content: string; path: string; skillName: string } | null>(null)
+  // #8: Undeploy from... 对话框(列出该 skill 已部署到的工具)
+  const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { target_tool: string; mode: string }[] } | null>(null)
+  // #8: Remove from Registry 确认
+  const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
+  // #8: 操作进行中(禁用菜单)
+  const [actionBusy, setActionBusy] = useState(false)
 
   const toggleExpand = (id: number) => {
     setExpanded((prev) => {
@@ -283,13 +293,18 @@ function SkillsPage({
   const handleDeployDone = async (result: DeployResultView | null) => {
     setDeployTarget(null)
     if (result) {
+      // #9: junction fallback / copy 降级时在反馈消息里提示
+      const degradeNote =
+        result.degradedFrom != null
+          ? ` (requested ${result.degradedFrom}, used ${result.mode}: ${result.degradeReason ?? 'fallback applied'})`
+          : ''
       const msg =
         result.action === 'skipped'
           ? `Skipped — ${result.targetPath} is already up to date.`
-          : `Deployed (${result.action}) to ${result.targetPath}`
+          : `Deployed (${result.action}) to ${result.targetPath}${degradeNote}`
       setFeedback(msg)
       await onRefresh()
-      setTimeout(() => setFeedback(null), 4000)
+      setTimeout(() => setFeedback(null), 6000)
     }
   }
 
@@ -302,6 +317,95 @@ function SkillsPage({
       setFeedback(msg)
       await onRefresh()
       setTimeout(() => setFeedback(null), 5000)
+    }
+  }
+
+  // #8: 右键菜单 — 5 个操作
+  const handleContextMenu = (e: React.MouseEvent, skill: SkillView) => {
+    e.preventDefault()
+    setContextMenu({ skill, x: e.clientX, y: e.clientY })
+  }
+
+  // View SKILL.md
+  const handleViewMd = async (skill: SkillView) => {
+    setContextMenu(null)
+    setActionBusy(true)
+    try {
+      const result = await window.api.viewSkillMd(skill.id)
+      if (result) {
+        setViewMdTarget({ ...result, skillName: skill.name })
+      } else {
+        setFeedback(`No SKILL.md found for "${skill.name}".`)
+        setTimeout(() => setFeedback(null), 4000)
+      }
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  // Undeploy from... — 先拉部署列表再弹对话框
+  const handleUndeployFromInit = async (skill: SkillView) => {
+    setContextMenu(null)
+    setActionBusy(true)
+    try {
+      const deployments = await window.api.getDeploymentsForSkill(skill.id)
+      if (deployments.length === 0) {
+        setFeedback(`"${skill.name}" is not deployed to any tool.`)
+        setTimeout(() => setFeedback(null), 4000)
+        return
+      }
+      setUndeployFromTarget({ skill, deployments })
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  // Remove from Registry — 彻底删除(与 Undeploy 明确分开)
+  const handleRemoveFromRegistry = (skill: SkillView) => {
+    setContextMenu(null)
+    setRemoveRegistryTarget(skill)
+  }
+
+  const handleRemoveFromRegistryConfirm = async () => {
+    if (!removeRegistryTarget) return
+    setActionBusy(true)
+    setFeedback(null)
+    try {
+      const result = await window.api.removeFromRegistry(removeRegistryTarget.id)
+      const msg = result.backedUp
+        ? `Removed "${result.skillName}" from registry (backed up, undeployed from ${result.undeployedTools.length} tool(s)).`
+        : `Removed "${result.skillName}" from registry (undeployed from ${result.undeployedTools.length} tool(s), no central entity to back up).`
+      setFeedback(msg)
+      await onRefresh()
+      setTimeout(() => setFeedback(null), 6000)
+    } catch (e) {
+      setFeedback(e instanceof Error ? e.message : String(e))
+      setTimeout(() => setFeedback(null), 6000)
+    } finally {
+      setRemoveRegistryTarget(null)
+      setActionBusy(false)
+    }
+  }
+
+  const handleUndeployFromTool = async (targetTool: string) => {
+    if (!undeployFromTarget) return
+    if (!window.confirm(`Undeploy "${undeployFromTarget.skill.name}" from ${targetTool}?`)) return
+    setActionBusy(true)
+    try {
+      await window.api.undeploy(undeployFromTarget.skill.id, targetTool)
+      // 刷新部署列表(可能还有别的工具)
+      const remaining = await window.api.getDeploymentsForSkill(undeployFromTarget.skill.id)
+      if (remaining.length === 0) {
+        setUndeployFromTarget(null)
+      } else {
+        setUndeployFromTarget({ ...undeployFromTarget, deployments: remaining })
+      }
+      await onRefresh()
+    } catch (e) {
+      setFeedback(e instanceof Error ? e.message : String(e))
+      setTimeout(() => setFeedback(null), 5000)
+    } finally {
+      setActionBusy(false)
     }
   }
 
@@ -371,6 +475,7 @@ function SkillsPage({
               expanded={expanded.has(skill.id)}
               onToggleExpand={() => toggleExpand(skill.id)}
               onDeploy={() => handleDeployClick(skill)}
+              onContextMenu={(e) => handleContextMenu(e, skill)}
             />
           ))}
         </ul>
@@ -393,6 +498,277 @@ function SkillsPage({
       )}
 
       {installOpen && <InstallDialog onDone={handleInstallDone} />}
+
+      {/* #8: 右键上下文菜单 — 5 个操作 */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          busy={actionBusy}
+          onDeploy={() => {
+            const skill = contextMenu.skill
+            setContextMenu(null)
+            handleDeployClick(skill)
+          }}
+          onUndeployFrom={() => handleUndeployFromInit(contextMenu.skill)}
+          onViewSources={() => {
+            toggleExpand(contextMenu.skill.id)
+            setContextMenu(null)
+          }}
+          onViewMd={() => handleViewMd(contextMenu.skill)}
+          onRemoveFromRegistry={() => handleRemoveFromRegistry(contextMenu.skill)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* #8: View SKILL.md 弹窗 */}
+      {viewMdTarget && (
+        <ViewMdModal
+          skillName={viewMdTarget.skillName}
+          content={viewMdTarget.content}
+          path={viewMdTarget.path}
+          onClose={() => setViewMdTarget(null)}
+        />
+      )}
+
+      {/* #8: Undeploy from... 对话框(列出该 skill 已部署到的工具) */}
+      {undeployFromTarget && (
+        <UndeployFromDialog
+          skill={undeployFromTarget.skill}
+          deployments={undeployFromTarget.deployments}
+          busy={actionBusy}
+          onUndeploy={handleUndeployFromTool}
+          onClose={() => setUndeployFromTarget(null)}
+        />
+      )}
+
+      {/* #8: Remove from Registry 确认对话框 */}
+      {removeRegistryTarget && (
+        <RemoveFromRegistryConfirm
+          skill={removeRegistryTarget}
+          busy={actionBusy}
+          onConfirm={handleRemoveFromRegistryConfirm}
+          onCancel={() => setRemoveRegistryTarget(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/** #8: 右键上下文菜单 — 定位的悬浮菜单 + 5 个操作 */
+function ContextMenu({
+  x,
+  y,
+  busy,
+  onDeploy,
+  onUndeployFrom,
+  onViewSources,
+  onViewMd,
+  onRemoveFromRegistry,
+  onClose
+}: {
+  x: number
+  y: number
+  busy: boolean
+  onDeploy: () => void
+  onUndeployFrom: () => void
+  onViewSources: () => void
+  onViewMd: () => void
+  onRemoveFromRegistry: () => void
+  onClose: () => void
+}) {
+  // 点遮罩关闭;点菜单内不关闭(stopPropagation)
+  const items: { label: string; onClick: () => void; danger?: boolean }[] = [
+    { label: 'Deploy to…', onClick: onDeploy },
+    { label: 'Undeploy from…', onClick: onUndeployFrom },
+    { label: 'View Sources', onClick: onViewSources },
+    { label: 'View SKILL.md', onClick: onViewMd },
+    { label: 'Remove from Registry', onClick: onRemoveFromRegistry, danger: true }
+  ]
+  return (
+    <div className="fixed inset-0 z-50" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose() }}>
+      <div
+        className="absolute bg-white border border-neutral-200 rounded-md shadow-lg py-1 min-w-[200px]"
+        style={{ left: x, top: y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {items.map((item) => (
+          <button
+            key={item.label}
+            onClick={item.onClick}
+            disabled={busy}
+            className={`block w-full text-left px-3 py-1.5 text-sm hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed ${
+              item.danger ? 'text-red-600 hover:bg-red-50' : 'text-neutral-700'
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** #8: View SKILL.md 弹窗(展示 SKILL.md 原文 + 文件路径) */
+function ViewMdModal({
+  skillName,
+  content,
+  path,
+  onClose
+}: {
+  skillName: string
+  content: string
+  path: string
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-neutral-200">
+          <h3 className="text-lg font-semibold">{skillName} — SKILL.md</h3>
+          <p className="text-xs text-neutral-500 mt-1 truncate" title={path}>
+            <code>{path}</code>
+          </p>
+        </div>
+        <div className="flex-1 overflow-auto p-4">
+          <pre className="text-sm text-neutral-800 whitespace-pre-wrap break-words font-mono">{content}</pre>
+        </div>
+        <div className="p-4 border-t border-neutral-200 flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** #8: Undeploy from... 对话框(列出该 skill 已部署到的工具,逐个 Undeploy) */
+function UndeployFromDialog({
+  skill,
+  deployments,
+  busy,
+  onUndeploy,
+  onClose
+}: {
+  skill: SkillView
+  deployments: { target_tool: string; mode: string }[]
+  busy: boolean
+  onUndeploy: (targetTool: string) => void
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={() => !busy && onClose()}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-neutral-200">
+          <h3 className="text-lg font-semibold">Undeploy {skill.name} from…</h3>
+          <p className="text-sm text-neutral-600 mt-1">
+            {deployments.length} deployment(s). This only removes the deployment (link/copy), not the source.
+          </p>
+        </div>
+        <div className="p-4 space-y-1.5 max-h-[50vh] overflow-auto">
+          {deployments.map((d) => (
+            <div
+              key={d.target_tool}
+              className="flex items-center justify-between border border-neutral-200 rounded px-3 py-2"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm font-medium">{d.target_tool}</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-700">{d.mode}</span>
+              </div>
+              <button
+                onClick={() => onUndeploy(d.target_tool)}
+                disabled={busy}
+                className="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Undeploy
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="p-4 border-t border-neutral-200 flex justify-end">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** #8: Remove from Registry 确认对话框(彻底移除 skill,删前备份) */
+function RemoveFromRegistryConfirm({
+  skill,
+  busy,
+  onConfirm,
+  onCancel
+}: {
+  skill: SkillView
+  busy: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={() => !busy && onCancel()}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-neutral-200">
+          <h3 className="text-lg font-semibold text-red-700">Remove "{skill.name}" from Registry?</h3>
+        </div>
+        <div className="p-4 space-y-2 text-sm text-neutral-700">
+          <p>
+            This will <span className="font-medium text-red-700">permanently remove</span> the skill from the registry:
+          </p>
+          <ul className="list-disc list-inside space-y-1 text-neutral-600 ml-2">
+            <li>Back up the central repo entity (if any) to the backups directory.</li>
+            <li>Undeploy from all tools ({skill.sources.length} source(s) registered).</li>
+            <li>Delete the skill record and all its sources from the registry.</li>
+          </ul>
+          <p className="text-xs text-neutral-500 mt-2">
+            This cannot be undone. The backup is kept in the Backups page for manual restore.
+          </p>
+        </div>
+        <div className="p-4 border-t border-neutral-200 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy ? 'Removing…' : 'Remove from Registry'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -401,12 +777,14 @@ function SkillRow({
   skill,
   expanded,
   onToggleExpand,
-  onDeploy
+  onDeploy,
+  onContextMenu
 }: {
   skill: SkillView
   expanded: boolean
   onToggleExpand: () => void
   onDeploy: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }) {
   const conflict = skill.conflict.hasConflict
   return (
@@ -414,6 +792,7 @@ function SkillRow({
       <div
         className="flex items-center justify-between p-3 hover:bg-neutral-50 cursor-pointer"
         onClick={onToggleExpand}
+        onContextMenu={onContextMenu}
       >
         <div className="flex items-center gap-2">
           <span className="text-neutral-400 text-xs select-none">{expanded ? '▼' : '▶'}</span>
@@ -618,6 +997,10 @@ function DeployDialog({
 
   const availableTools = settings?.tools.filter((t) => t.enabled && t.exists) ?? []
   const canSymlink = settings?.platform.canSymlink ?? false
+  const canJunction = settings?.platform.canJunction ?? false
+  // #9: Windows 普通用户(canSymlink=false + canJunction=true)— symlink 不可用,
+  //   选 symlink 时 deployer 自动尝试 junction;UI 标灰并提示开发者模式/管理员
+  const isWindowsNormalUser = !canSymlink && canJunction
 
   const handleDeploy = async () => {
     if (!selectedTool) return
@@ -678,19 +1061,32 @@ function DeployDialog({
           <div>
             <label className="block text-sm font-medium text-neutral-700 mb-1">Mode</label>
             <div className="flex gap-3">
-              <label className={`flex items-center gap-2 text-sm cursor-pointer ${!canSymlink ? 'opacity-50' : ''}`}>
+              <label
+                className={`flex items-center gap-2 text-sm cursor-pointer ${!canSymlink ? 'opacity-50' : ''}`}
+                title={
+                  isWindowsNormalUser
+                    ? '需要开启开发者模式或以管理员运行。选择此模式时将自动尝试 junction(仅限目录,同卷)。'
+                    : canSymlink
+                      ? ''
+                      : 'symlink is unavailable on this platform'
+                }
+              >
                 <input
                   type="radio"
                   name="deploy-mode"
                   value="symlink"
                   checked={mode === 'symlink'}
                   onChange={() => setMode('symlink')}
-                  disabled={!canSymlink || busy}
+                  disabled={(!canSymlink && !canJunction) || busy}
                 />
                 <span>
                   symlink
                   {!canSymlink && (
-                    <span className="text-xs text-neutral-400 ml-1">(unavailable on this platform)</span>
+                    <span className="text-xs text-neutral-400 ml-1">
+                      {isWindowsNormalUser
+                        ? '(需要开发者模式/管理员;选此将自动尝试 junction)'
+                        : '(unavailable on this platform)'}
+                    </span>
                   )}
                 </span>
               </label>
@@ -708,7 +1104,9 @@ function DeployDialog({
             </div>
             <p className="text-xs text-neutral-400 mt-1">
               {mode === 'symlink'
-                ? 'Source updates auto-propagate (link is transparent).'
+                ? isWindowsNormalUser
+                  ? 'symlink 不可用 — 将自动尝试 junction(目录场景),失败则降级 copy。'
+                  : 'Source updates auto-propagate (link is transparent).'
                 : 'Snapshot copy — source updates require manual redeploy.'}
             </p>
           </div>
@@ -780,6 +1178,23 @@ function ToolsPage() {
     }
   }
 
+  // #8: 从清单移除(仅删 deployments 记录,不碰磁盘)— 用于 drift 状态(目标已被用户删了)
+  const handleRemoveFromManifest = async (skillId: number, targetTool: string, skillName: string) => {
+    if (!window.confirm(`Remove "${skillName}" from the deployment manifest for ${targetTool}?\n\nThe target is already gone from disk; this only cleans up the manifest record.`)) {
+      return
+    }
+    setBusy(`${skillId}:${targetTool}`)
+    setError(null)
+    try {
+      await window.api.removeFromManifest(skillId, targetTool)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const handleRedeploy = async (skillId: number, targetTool: string, skillName: string) => {
     setBusy(`${skillId}:${targetTool}`)
     setError(null)
@@ -834,6 +1249,7 @@ function ToolsPage() {
               onToggleExpand={() => toggleExpand(tool.config.key)}
               onUndeploy={handleUndeploy}
               onRedeploy={handleRedeploy}
+              onRemoveFromManifest={handleRemoveFromManifest}
               busyKey={busy}
             />
           ))}
@@ -849,6 +1265,7 @@ function ToolCard({
   onToggleExpand,
   onUndeploy,
   onRedeploy,
+  onRemoveFromManifest,
   busyKey
 }: {
   tool: ToolWithDriftsView
@@ -856,12 +1273,14 @@ function ToolCard({
   onToggleExpand: () => void
   onUndeploy: (skillId: number, targetTool: string, skillName: string) => void
   onRedeploy: (skillId: number, targetTool: string, skillName: string) => void
+  onRemoveFromManifest: (skillId: number, targetTool: string, skillName: string) => void
   busyKey: string | null
 }) {
   const { config, drifts } = tool
-  const managed = drifts.filter((d) => d.deployment !== null)
+  // #8: 外部 skill 单独分区 — 不与自管部署混排
+  const managed = drifts.filter((d) => d.kind !== 'external')
   const external = drifts.filter((d) => d.kind === 'external')
-  const driftCount = drifts.filter((d) => d.kind === 'drift' || d.kind === 'source-updated').length
+  const driftCount = managed.filter((d) => d.kind === 'drift' || d.kind === 'source-updated').length
 
   if (!config.enabled || !config.exists) {
     return (
@@ -915,17 +1334,43 @@ function ToolCard({
           {drifts.length === 0 ? (
             <p className="text-xs text-neutral-400">No skills in this tool directory.</p>
           ) : (
-            <ul className="space-y-1.5">
-              {drifts.map((d) => (
-                <DriftRow
-                  key={`${d.skillId}:${d.skillName}`}
-                  drift={d}
-                  busy={busyKey === `${d.skillId}:${d.targetTool}`}
-                  onUndeploy={() => onUndeploy(d.skillId, d.targetTool, d.skillName)}
-                  onRedeploy={() => onRedeploy(d.skillId, d.targetTool, d.skillName)}
-                />
-              ))}
-            </ul>
+            <>
+              {/* 自管部署分区(normal / source-updated / drift) */}
+              {managed.length > 0 && (
+                <ul className="space-y-1.5 mb-3">
+                  {managed.map((d) => (
+                    <DriftRow
+                      key={`${d.skillId}:${d.skillName}`}
+                      drift={d}
+                      busy={busyKey === `${d.skillId}:${d.targetTool}`}
+                      onUndeploy={() => onUndeploy(d.skillId, d.targetTool, d.skillName)}
+                      onRedeploy={() => onRedeploy(d.skillId, d.targetTool, d.skillName)}
+                      onRemoveFromManifest={() => onRemoveFromManifest(d.skillId, d.targetTool, d.skillName)}
+                    />
+                  ))}
+                </ul>
+              )}
+              {/* #8: 外部 skill 单独分区(清单无记录,不自动纳入管理) */}
+              {external.length > 0 && (
+                <div className="border-t border-dashed border-neutral-300 pt-2">
+                  <p className="text-xs font-semibold text-neutral-500 uppercase mb-1.5">
+                    External skills (not managed by skill-switch)
+                  </p>
+                  <ul className="space-y-1.5">
+                    {external.map((d) => (
+                      <DriftRow
+                        key={`ext:${d.skillName}`}
+                        drift={d}
+                        busy={false}
+                        onUndeploy={() => {}}
+                        onRedeploy={() => {}}
+                        onRemoveFromManifest={() => {}}
+                      />
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -937,16 +1382,20 @@ function DriftRow({
   drift,
   busy,
   onUndeploy,
-  onRedeploy
+  onRedeploy,
+  onRemoveFromManifest
 }: {
   drift: DriftStatusView
   busy: boolean
   onUndeploy: () => void
   onRedeploy: () => void
+  onRemoveFromManifest: () => void
 }) {
   const badge = DRIFT_BADGE[drift.kind]
+  // #8: drift 状态标灰(目标已被用户删了,清单与现实不一致)
+  const isDrift = drift.kind === 'drift'
   return (
-    <li className="flex items-center justify-between bg-white border border-neutral-200 rounded px-3 py-1.5">
+    <li className={`flex items-center justify-between bg-white border border-neutral-200 rounded px-3 py-1.5 ${isDrift ? 'opacity-50' : ''}`}>
       <div className="flex items-center gap-2 min-w-0">
         <span className={`text-xs px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
         <span className="text-sm font-medium truncate">{drift.skillName}</span>
@@ -963,6 +1412,14 @@ function DriftRow({
               className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
             >
               Redeploy
+            </button>
+            {/* #8: 从清单移除(目标已不在,只清清单记录) */}
+            <button
+              onClick={onRemoveFromManifest}
+              disabled={busy}
+              className="px-2 py-0.5 bg-neutral-500 text-white rounded text-xs hover:bg-neutral-600 disabled:opacity-50"
+            >
+              Remove from manifest
             </button>
           </>
         )}

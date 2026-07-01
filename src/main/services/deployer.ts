@@ -101,6 +101,38 @@ function deployFiles(mode: DeployMode, sourcePath: string, targetDir: string): v
 }
 
 /**
+ * 解析实际部署 mode(issue #9 junction fallback 决策,纯函数)。
+ *
+ * 当请求 symlink 但平台无法创建 symlink(Windows 普通用户 canSymlink=false):
+ * - canJunction=true 且 source 是目录 → 尝试 junction(junction 成功不算降级,
+ *   它是 symlink 不可用时的预期回退;失败再降级 copy,由 deploySkill 的 try/catch 处理)。
+ * - canJunction=false 或 source 不是目录 → 直接降级 copy。
+ * 其余情况(非 symlink 请求,或 canSymlink=true)按请求 mode 原样使用。
+ */
+export function resolveActualMode(
+  requested: DeployMode,
+  canSymlink: boolean,
+  canJunction: boolean,
+  sourceIsDir: boolean
+): { actualMode: DeployMode; degradedFrom?: DeployMode; degradeReason?: string } {
+  if (requested !== 'symlink' || canSymlink) {
+    // 非 symlink 请求,或 symlink 可用 → 原样使用
+    return { actualMode: requested }
+  }
+  // 请求 symlink 但 canSymlink=false(Windows 普通用户)
+  if (canJunction && sourceIsDir) {
+    // 尝试 junction;实际成功/失败由 deploySkill 调用 symlinkSync 时判定
+    return { actualMode: 'junction' }
+  }
+  // 无法 junction → 降级 copy
+  return {
+    actualMode: 'copy',
+    degradedFrom: 'symlink',
+    degradeReason: 'symlink is unavailable on this platform; used copy instead.'
+  }
+}
+
+/**
  * 把 skill 从 opts.sourcePath 部署到 opts.targetDir。
  *
  * 五种 action:
@@ -111,20 +143,30 @@ function deployFiles(mode: DeployMode, sourcePath: string, targetDir: string): v
  * - external-overwritten:外部 skill 覆盖(清单无记录但目标存在,先备份再覆盖)
  */
 export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
-  // Step 1: 算源 hash
+  // Step 1: 算源 hash(源不存在则抛错,与原行为一致)
   const sourceHash = hashDir(opts.sourcePath)
 
-  // Step 2: 查现有部署 + 目标是否存在
+  // Step 2: 解析实际 mode(junction fallback, issue #9)
+  //   canSymlink=false + canJunction=true + source 是目录 → 尝试 junction
+  //   canSymlink=false + (canJunction=false 或 source 不是目录) → 降级 copy
+  //   其他 → 用 requested mode
+  const sourceIsDir = lstatSync(opts.sourcePath).isDirectory()
+  const resolved = resolveActualMode(opts.mode, opts.canSymlink, opts.canJunction, sourceIsDir)
+  let actualMode = resolved.actualMode
+  let degradedFrom = resolved.degradedFrom
+  let degradeReason = resolved.degradeReason
+
+  // Step 3: 查现有部署 + 目标是否存在
   const existing = getDeploymentBySkillAndTool(db, opts.skillId, opts.targetTool)
   const targetExists = existsSync(opts.targetDir)
 
-  // Step 3: 判断 action 并执行清理(如需)
+  // Step 4: 判断 action 并执行清理(如需)— 基于实际 mode 比较(existing.mode vs actualMode)
   let action: DeployAction
   let previousMode: DeployMode | undefined
   let needDeploy = true
 
   if (existing) {
-    if (existing.mode !== opts.mode) {
+    if (existing.mode !== actualMode) {
       // 模式切换:按旧 mode 清理,按新 mode 部署
       action = 'mode-switched'
       previousMode = existing.mode
@@ -153,18 +195,37 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
     action = 'created'
   }
 
-  // Step 4 + 5: 部署文件 + 记录清单(skipped 不执行)
+  // Step 5: 部署文件 + 记录清单(skipped 不执行)
   if (needDeploy) {
-    deployFiles(opts.mode, opts.sourcePath, opts.targetDir)
-    upsertDeployment(db, opts.skillId, opts.targetTool, opts.mode, opts.sourcePath, sourceHash)
+    if (actualMode === 'junction' && opts.mode === 'symlink' && !opts.canSymlink) {
+      // junction fallback(issue #9):symlink 不可用 → 尝试 junction,失败则降级 copy。
+      // 注:junction 创建失败(如跨卷)→catch→copy 的路径在 Mac 上无法可靠触发
+      // (symlinkSync(...,'junction') 在非 Windows 退化为普通 symlink,总是成功)。
+      // 该降级路径由 resolveActualMode 纯函数测试 + 此处 try/catch 保证逻辑正确。
+      try {
+        deployFiles('junction', opts.sourcePath, opts.targetDir)
+      } catch {
+        // junction 创建失败(如跨卷)→ 清理半成品后降级 copy
+        cleanupUnknown(opts.targetDir)
+        deployFiles('copy', opts.sourcePath, opts.targetDir)
+        actualMode = 'copy'
+        degradedFrom = 'symlink'
+        degradeReason = 'junction creation failed (possibly cross-volume); used copy instead.'
+      }
+    } else {
+      deployFiles(actualMode, opts.sourcePath, opts.targetDir)
+    }
+    upsertDeployment(db, opts.skillId, opts.targetTool, actualMode, opts.sourcePath, sourceHash)
   }
 
   return {
     action,
-    mode: opts.mode,
+    mode: actualMode,
     targetPath: opts.targetDir,
     sourceHashAtDeploy: sourceHash,
-    ...(previousMode !== undefined ? { previousMode } : {})
+    ...(previousMode !== undefined ? { previousMode } : {}),
+    ...(degradedFrom !== undefined ? { degradedFrom } : {}),
+    ...(degradeReason !== undefined ? { degradeReason } : {})
   }
 }
 
@@ -185,7 +246,7 @@ export function undeploySkill(
 ): void {
   const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
   if (!deployment) {
-    throw new Error('not deployed by this tool, cannot undeploy external skill')
+    throw new Error('not deployed by this tool, cannot undeploy external skill; please remove it manually')
   }
   cleanupByMode(targetPath, deployment.mode)
   deleteDeployment(db, skillId, targetTool)

@@ -14,7 +14,8 @@ import {
   deploySkill,
   undeploySkill,
   detectDrift,
-  detectDriftsForTool
+  detectDriftsForTool,
+  resolveActualMode
 } from '../src/main/services/deployer'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { getDeploymentBySkillAndTool } from '../src/main/db/dao/deployments'
@@ -47,7 +48,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('created')
@@ -89,7 +92,9 @@ describe('deployer service', () => {
         mode: 'symlink',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('created')
@@ -133,7 +138,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       const dep = getDeploymentBySkillAndTool(db, skillId, 'codex')
@@ -167,7 +174,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('created')
@@ -199,7 +208,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       // 改源内容(hash 变了)
@@ -213,7 +224,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('updated')
@@ -251,7 +264,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
       expect(first.action).toBe('created')
 
@@ -267,7 +282,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('skipped')
@@ -311,7 +328,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('external-overwritten')
@@ -360,7 +379,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
       expect(lstatSync(targetDir).isDirectory()).toBe(true)
       expect(lstatSync(targetDir).isSymbolicLink()).toBe(false)
@@ -373,7 +394,9 @@ describe('deployer service', () => {
         mode: 'symlink',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('mode-switched')
@@ -406,7 +429,9 @@ describe('deployer service', () => {
         mode: 'symlink',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
       expect(lstatSync(targetDir).isSymbolicLink()).toBe(true)
 
@@ -418,7 +443,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       expect(result.action).toBe('mode-switched')
@@ -460,7 +487,9 @@ describe('deployer service', () => {
         mode: 'symlink',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       // mode-switch 到 copy:清理旧 symlink 时必须 unlinkSync,不能 rmSync 跟随链接
@@ -471,7 +500,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       // 关键安全断言:源目录内容完好无损
@@ -511,7 +542,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       const status = detectDrift(db, skillId, 'grilling', 'codex', targetDir)
@@ -543,7 +576,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       // 改源内容(hash 变了,但没重新部署)
@@ -576,7 +611,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       // 用户手动删了 targetDir
@@ -631,7 +668,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
       expect(existsSync(targetDir)).toBe(true)
 
@@ -663,7 +702,9 @@ describe('deployer service', () => {
         mode: 'symlink',
         sourcePath: skillDir,
         targetDir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       undeploySkill(db, skillId, 'codex', targetDir)
@@ -717,7 +758,9 @@ describe('deployer service', () => {
         mode: 'copy',
         sourcePath: skillDir1,
         targetDir: join(toolSkills.dir, 'managed'),
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
       })
 
       // 在工具目录下放一个外部 skill(清单无记录)
@@ -741,6 +784,239 @@ describe('deployer service', () => {
 
       src.cleanup()
       toolSkills.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+  })
+
+  // ===== issue #9:junction fallback 服务层测试 =====
+  describe('junction fallback (issue #9)', () => {
+    describe('resolveActualMode (纯函数,覆盖所有分支)', () => {
+      test('(a) canSymlink=true + 请求 symlink → symlink,无降级', () => {
+        const r = resolveActualMode('symlink', true, false, true)
+        expect(r.actualMode).toBe('symlink')
+        expect(r.degradedFrom).toBeUndefined()
+        expect(r.degradeReason).toBeUndefined()
+      })
+
+      test('(b) canSymlink=false + canJunction=true + isDir → junction,无降级(成功回退)', () => {
+        const r = resolveActualMode('symlink', false, true, true)
+        expect(r.actualMode).toBe('junction')
+        expect(r.degradedFrom).toBeUndefined()
+        expect(r.degradeReason).toBeUndefined()
+      })
+
+      test('(c) canSymlink=false + canJunction=true + !isDir → copy,从 symlink 降级', () => {
+        const r = resolveActualMode('symlink', false, true, false)
+        expect(r.actualMode).toBe('copy')
+        expect(r.degradedFrom).toBe('symlink')
+        expect(r.degradeReason).toBeTruthy()
+      })
+
+      test('(d) canSymlink=false + canJunction=false → copy,从 symlink 降级', () => {
+        const r = resolveActualMode('symlink', false, false, true)
+        expect(r.actualMode).toBe('copy')
+        expect(r.degradedFrom).toBe('symlink')
+        expect(r.degradeReason).toBeTruthy()
+      })
+
+      test('(e) 请求 copy → copy,无降级(与平台能力无关)', () => {
+        const r = resolveActualMode('copy', false, false, true)
+        expect(r.actualMode).toBe('copy')
+        expect(r.degradedFrom).toBeUndefined()
+        expect(r.degradeReason).toBeUndefined()
+      })
+
+      test('(f) 请求 junction → junction,无降级', () => {
+        const r = resolveActualMode('junction', false, true, true)
+        expect(r.actualMode).toBe('junction')
+        expect(r.degradedFrom).toBeUndefined()
+        expect(r.degradeReason).toBeUndefined()
+      })
+    })
+
+    test('canSymlink=true (Mac) + 请求 symlink → 用 symlink,无降级', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'grilling', '---\nname: grilling\n---\nv1\n')
+      const skillId = upsertSkill(db, 'grilling', skillDir)
+      const targetDir = join(target.dir, 'grilling')
+
+      const result = deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'codex',
+        mode: 'symlink',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+
+      expect(result.mode).toBe('symlink')
+      expect(result.degradedFrom).toBeUndefined()
+      expect(result.degradeReason).toBeUndefined()
+      expect(lstatSync(targetDir).isSymbolicLink()).toBe(true)
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')!.mode).toBe('symlink')
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('canSymlink=false + canJunction=true + source 是目录 → 用 junction,无降级', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'grilling', '---\nname: grilling\n---\nbody\n')
+      const skillId = upsertSkill(db, 'grilling', skillDir)
+      const targetDir = join(target.dir, 'grilling')
+
+      const result = deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'codex',
+        mode: 'symlink',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: false,
+        canJunction: true
+      })
+
+      // junction 成功:不算降级(junction 是 symlink 不可用时的预期回退)
+      expect(result.mode).toBe('junction')
+      expect(result.degradedFrom).toBeUndefined()
+      expect(result.degradeReason).toBeUndefined()
+      // Mac 上 symlinkSync(...,'junction') 退化为普通 symlink
+      expect(lstatSync(targetDir).isSymbolicLink()).toBe(true)
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')!.mode).toBe('junction')
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('canSymlink=false + canJunction=true + source 是文件 → 降级 copy', () => {
+      // skills 实际总是目录;此处用文件 source 覆盖 "source 不是目录 → 无法 junction → copy" 分支
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillFile = join(src.dir, 'grilling.md')
+      writeFileSync(skillFile, '---\nname: grilling\n---\nbody\n')
+      const skillId = upsertSkill(db, 'grilling', skillFile)
+      const targetDir = join(target.dir, 'grilling')
+
+      const result = deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'codex',
+        mode: 'symlink',
+        sourcePath: skillFile,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: false,
+        canJunction: true
+      })
+
+      // source 不是目录 → 无法 junction → 降级 copy
+      expect(result.mode).toBe('copy')
+      expect(result.degradedFrom).toBe('symlink')
+      expect(result.degradeReason).toBeTruthy()
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')!.mode).toBe('copy')
+      // target 是真实文件拷贝
+      expect(existsSync(targetDir)).toBe(true)
+      expect(readFileSync(targetDir, 'utf-8')).toBe('---\nname: grilling\n---\nbody\n')
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('canSymlink=false + canJunction=false + 请求 symlink → 降级 copy', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'grilling', '---\nname: grilling\n---\nbody\n')
+      const skillId = upsertSkill(db, 'grilling', skillDir)
+      const targetDir = join(target.dir, 'grilling')
+
+      const result = deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'codex',
+        mode: 'symlink',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: false,
+        canJunction: false
+      })
+
+      expect(result.mode).toBe('copy')
+      expect(result.degradedFrom).toBe('symlink')
+      expect(result.degradeReason).toBeTruthy()
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')!.mode).toBe('copy')
+      // target 是真实目录拷贝
+      expect(lstatSync(targetDir).isDirectory()).toBe(true)
+      expect(readFileSync(join(targetDir, 'SKILL.md'), 'utf-8')).toBe(
+        '---\nname: grilling\n---\nbody\n'
+      )
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('undeploy 遵循实际 mode(junction 记录 → 卸载时 unlink,不删源)', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'grilling', '---\nname: grilling\n---\nbody\n')
+      const skillId = upsertSkill(db, 'grilling', skillDir)
+      const targetDir = join(target.dir, 'grilling')
+
+      // 请求 symlink + Windows 能力 → 实际记录 junction
+      deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'codex',
+        mode: 'symlink',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: false,
+        canJunction: true
+      })
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')!.mode).toBe('junction')
+
+      undeploySkill(db, skillId, 'codex', targetDir)
+
+      // 链接已删
+      expect(existsSync(targetDir)).toBe(false)
+      // 源目录完好(没被误删)
+      expect(existsSync(join(skillDir, 'SKILL.md'))).toBe(true)
+      // 清单记录已删
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')).toBeUndefined()
+
+      src.cleanup()
+      target.cleanup()
       backups.cleanup()
       cleanupDb()
     })
