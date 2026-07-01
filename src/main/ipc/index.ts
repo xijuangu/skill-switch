@@ -8,8 +8,8 @@
 import { ipcMain } from 'electron'
 import { homedir, tmpdir } from 'os'
 import type { DB } from '../db/database'
-import type { AppSettings, CustomTool, MultiScanResult, PlatformInfo, ToolConfig } from '../types'
-import { SETTINGS_PATH } from '../paths'
+import type { AppSettings, CustomTool, MultiScanResult, PlatformInfo, SkillWithConflict, ToolConfig } from '../types'
+import { SETTINGS_PATH, BACKUPS_DIR } from '../paths'
 import { readSettings, writeSettings } from '../services/settings'
 import { detectPlatform } from '../services/platform'
 import {
@@ -22,6 +22,8 @@ import {
 } from '../services/tools-config'
 import { scanAllTools } from '../services/scan-all'
 import { getAllSkills } from '../db/dao/skills'
+import { computeConflict } from '../services/registry'
+import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 
 /** Settings 页统一视图:解析后的工具列表 + backupRetention + 平台信息 */
 export interface SettingsView {
@@ -47,7 +49,13 @@ export function registerIpcHandlers(db: DB): void {
   })
 
   ipcMain.handle('getSkills', async () => {
-    return getAllSkills(db)
+    // 在 IPC 边界把 sources 折算成冲突状态,UI 只读不计算
+    const skills = getAllSkills(db)
+    const out: SkillWithConflict[] = skills.map((s) => ({
+      ...s,
+      conflict: computeConflict(s.sources, s.id)
+    }))
+    return out
   })
 
   ipcMain.handle('getSettings', async () => {
@@ -88,6 +96,25 @@ export function registerIpcHandlers(db: DB): void {
     const updated: AppSettings = { ...settings, backupRetention: n }
     writeSettings(SETTINGS_PATH, updated)
     return buildSettingsView(updated)
+  })
+
+  // Backups 页:listBackups(按 backupTime DESC)/ restoreBackup(恢复到原 sourcePath)/ deleteBackup
+  ipcMain.handle('listBackups', async () => {
+    return listBackups(BACKUPS_DIR)
+  })
+
+  ipcMain.handle('restoreBackup', async (_e, backupId: string) => {
+    // 恢复到备份元数据记录的原 sourcePath;若该路径已有内容,service 内部先建 safety-net 备份
+    const metas = listBackups(BACKUPS_DIR)
+    const meta = metas.find((m) => m.backupId === backupId)
+    if (!meta) {
+      throw new Error(`backup not found: ${backupId}`)
+    }
+    restoreBackup(backupId, meta.sourcePath, BACKUPS_DIR)
+  })
+
+  ipcMain.handle('deleteBackup', async (_e, backupId: string) => {
+    deleteBackup(backupId, BACKUPS_DIR)
   })
 }
 

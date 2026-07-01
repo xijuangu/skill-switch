@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 
 type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
+type SkillSourceView = SkillView['sources'][number]
 type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 type ToolConfigView = SettingsView['tools'][number]
 
@@ -113,10 +114,57 @@ function SkillsPage({
   lastScan: ScanResult | null
   onScan: () => void
 }) {
+  // 展开的 skill id 集合(点击行切换)
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  // 部署前冲突选择 modal:正在为其选 source 的 skill
+  const [conflictTarget, setConflictTarget] = useState<SkillView | null>(null)
+  // "已选 source,可继续部署" 的提示(skillId → 已选 source path)
+  const [resolved, setResolved] = useState<Record<number, string>>({})
+
+  const toggleExpand = (id: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const conflictCount = skills.filter((s) => s.conflict.hasConflict).length
+
+  const handleDeployClick = (skill: SkillView) => {
+    if (skill.conflict.hasConflict) {
+      // 多 source 内容冲突 → 弹窗让用户选
+      setConflictTarget(skill)
+    } else {
+      // 一致或单 source → 默认取 primarySource,不弹窗
+      const primary = skill.conflict.primarySource
+      if (primary) {
+        setResolved((prev) => ({ ...prev, [skill.id]: primary.path }))
+      }
+    }
+  }
+
+  const handleConflictConfirm = (source: SkillSourceView) => {
+    if (!conflictTarget) return
+    setResolved((prev) => ({ ...prev, [conflictTarget.id]: source.path }))
+    setConflictTarget(null)
+  }
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold">Skills</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-xl font-semibold">Skills</h2>
+          {conflictCount > 0 && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
+              {conflictCount} conflict{conflictCount > 1 ? 's' : ''}
+            </span>
+          )}
+        </div>
         <button
           onClick={onScan}
           disabled={scanning}
@@ -152,25 +200,215 @@ function SkillsPage({
       ) : (
         <ul className="space-y-2">
           {skills.map((skill) => (
-            <li
+            <SkillRow
               key={skill.id}
-              className="border border-neutral-200 rounded-md p-3 flex items-center justify-between hover:bg-neutral-50"
-            >
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{skill.name}</span>
-                {skill.sources[0] && (
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-700">
-                    {skill.sources[0].source_type}
-                  </span>
-                )}
-              </div>
-              <span className="text-xs text-neutral-400">
-                {skill.sources.length} source(s)
-              </span>
-            </li>
+              skill={skill}
+              expanded={expanded.has(skill.id)}
+              onToggleExpand={() => toggleExpand(skill.id)}
+              onDeploy={() => handleDeployClick(skill)}
+              resolvedPath={resolved[skill.id]}
+            />
           ))}
         </ul>
       )}
+
+      {conflictTarget && (
+        <ConflictModal
+          skill={conflictTarget}
+          onCancel={() => setConflictTarget(null)}
+          onConfirm={handleConflictConfirm}
+        />
+      )}
+    </div>
+  )
+}
+
+function SkillRow({
+  skill,
+  expanded,
+  onToggleExpand,
+  onDeploy,
+  resolvedPath
+}: {
+  skill: SkillView
+  expanded: boolean
+  onToggleExpand: () => void
+  onDeploy: () => void
+  resolvedPath: string | undefined
+}) {
+  const conflict = skill.conflict.hasConflict
+  return (
+    <li className="border border-neutral-200 rounded-md">
+      <div
+        className="flex items-center justify-between p-3 hover:bg-neutral-50 cursor-pointer"
+        onClick={onToggleExpand}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-neutral-400 text-xs select-none">{expanded ? '▼' : '▶'}</span>
+          <span className="font-medium">{skill.name}</span>
+          {skill.sources[0] && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-700">
+              {skill.sources[0].source_type}
+            </span>
+          )}
+          {conflict && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
+              conflict
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+          <span className="text-xs text-neutral-400">
+            {skill.sources.length} source(s)
+          </span>
+          <button
+            onClick={onDeploy}
+            className="px-3 py-1 bg-neutral-700 text-white rounded text-xs hover:bg-neutral-800"
+          >
+            Deploy to…
+          </button>
+        </div>
+      </div>
+
+      {resolvedPath && (
+        <div className="px-3 py-2 bg-green-50 border-t border-green-200 text-xs text-green-800">
+          ✓ Source selected: <code>{resolvedPath}</code> — deploy action will be added in a later slice.
+        </div>
+      )}
+
+      {expanded && (
+        <div className="border-t border-neutral-200 bg-neutral-50 p-3">
+          <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-2">Sources</h4>
+          {skill.sources.length === 0 ? (
+            <p className="text-xs text-neutral-400">No sources registered.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {skill.sources.map((src) => (
+                <li key={src.id} className="text-xs grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 items-start">
+                  <span className="text-neutral-500">path</span>
+                  <code className="text-neutral-700 break-all">{src.path}</code>
+                  <span className="text-neutral-500">hash</span>
+                  <code className="text-neutral-700 break-all">{src.hash}</code>
+                  <span className="text-neutral-500">mtime</span>
+                  <span className="text-neutral-700">{new Date(src.mtime).toISOString()}</span>
+                  <span className="text-neutral-500">source_type</span>
+                  <span className="text-neutral-700">{src.source_type}</span>
+                  <span className="text-neutral-500">discovered_at</span>
+                  <span className="text-neutral-700">{src.discovered_at}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </li>
+  )
+}
+
+function ConflictModal({
+  skill,
+  onCancel,
+  onConfirm
+}: {
+  skill: SkillView
+  onCancel: () => void
+  onConfirm: (source: SkillSourceView) => void
+}) {
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  // 把相同 hash 归一组,UI 上标"内容一致"
+  const hashGroups = new Map<string, SkillSourceView[]>()
+  for (const s of skill.sources) {
+    const arr = hashGroups.get(s.hash) ?? []
+    arr.push(s)
+    hashGroups.set(s.hash, arr)
+  }
+  const distinctVersions = hashGroups.size
+
+  const handleConfirm = () => {
+    const picked = skill.sources.find((s) => s.id === selectedId)
+    if (picked) onConfirm(picked)
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-neutral-200">
+          <h3 className="text-lg font-semibold">Resolve source conflict</h3>
+          <p className="text-sm text-neutral-600 mt-1">
+            检测到 {distinctVersions} 个版本的 <span className="font-medium">{skill.name}</span>
+            ,请选择使用哪个版本。
+          </p>
+          <p className="text-xs text-neutral-400 mt-1">
+            共 {skill.sources.length} 个 source path,{skill.conflict.distinctHashCount} 种不同内容(hash)。
+          </p>
+        </div>
+
+        <div className="p-4 space-y-2">
+          {skill.sources.map((src) => {
+            const sameHashCount = hashGroups.get(src.hash)?.length ?? 1
+            return (
+              <label
+                key={src.id}
+                className={`block border rounded-md p-3 cursor-pointer transition-colors ${
+                  selectedId === src.id
+                    ? 'border-blue-500 bg-blue-50'
+                    : 'border-neutral-200 hover:bg-neutral-50'
+                }`}
+              >
+                <div className="flex items-start gap-2">
+                  <input
+                    type="radio"
+                    name="conflict-source"
+                    value={src.id}
+                    checked={selectedId === src.id}
+                    onChange={() => setSelectedId(src.id)}
+                    className="mt-1"
+                  />
+                  <div className="flex-1 min-w-0 text-xs">
+                    <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+                      <span className="text-neutral-500">path</span>
+                      <code className="text-neutral-700 break-all">{src.path}</code>
+                      <span className="text-neutral-500">hash</span>
+                      <code className="text-neutral-700 break-all">{src.hash}</code>
+                      <span className="text-neutral-500">mtime</span>
+                      <span className="text-neutral-700">{new Date(src.mtime).toISOString()}</span>
+                      <span className="text-neutral-500">source_type</span>
+                      <span className="text-neutral-700">{src.source_type}</span>
+                    </div>
+                    {sameHashCount > 1 && (
+                      <p className="mt-1 text-neutral-400">
+                        (内容与另外 {sameHashCount - 1} 个 source 一致)
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </label>
+            )
+          })}
+        </div>
+
+        <div className="p-4 border-t border-neutral-200 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={selectedId === null}
+            className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Use this source
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

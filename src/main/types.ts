@@ -41,6 +41,27 @@ export interface SkillWithSources extends Skill {
   sources: SkillSource[]
 }
 
+/**
+ * 多 source 冲突检测结果。
+ * - sourceCount == 0:无 source(理论不发生,skill 总有至少一个 source)
+ * - sourceCount == 1:单 source,无冲突,primarySource = sources[0]
+ * - sourceCount > 1 + distinctHashCount == 1:多 source 内容一致,无冲突,primarySource = sources[0](第一个发现的)
+ * - sourceCount > 1 + distinctHashCount > 1:多 source 内容冲突,hasConflict = true,primarySource = null(必须由 UI 选)
+ */
+export interface ConflictStatus {
+  skillId: number
+  sourceCount: number
+  distinctHashCount: number
+  hasConflict: boolean
+  /** 无冲突时为第一个 source(按 discovered_at ASC);冲突或无 source 时为 null */
+  primarySource: SkillSource | null
+}
+
+/** Skills 页展示用:skill + sources + 冲突状态 */
+export interface SkillWithConflict extends SkillWithSources {
+  conflict: ConflictStatus
+}
+
 /** 扫描结果:发现的 skill 数量 */
 export interface ScanResult {
   scanned: number

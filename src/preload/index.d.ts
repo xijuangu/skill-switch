@@ -17,12 +17,22 @@ export interface SkillSourceView {
   discovered_at: string
 }
 
-export interface SkillWithSourcesView {
+export interface ConflictStatusView {
+  skillId: number
+  sourceCount: number
+  distinctHashCount: number
+  hasConflict: boolean
+  /** 无冲突时为第一个 source(按 discovered_at ASC);冲突或无 source 时为 null */
+  primarySource: SkillSourceView | null
+}
+
+export interface SkillWithConflictView {
   id: number
   name: string
   primary_source_path: string
   created_at: string
   sources: SkillSourceView[]
+  conflict: ConflictStatusView
 }
 
 export interface ToolScanResultView {
@@ -71,7 +81,7 @@ declare global {
   interface Window {
     api: {
       scan: () => Promise<MultiScanResultView>
-      getSkills: () => Promise<SkillWithSourcesView[]>
+      getSkills: () => Promise<SkillWithConflictView[]>
       getSettings: () => Promise<SettingsView>
       setPresetEnabled: (key: string, enabled: boolean) => Promise<SettingsView>
       setPresetPaths: (key: string, paths: string[]) => Promise<SettingsView>
