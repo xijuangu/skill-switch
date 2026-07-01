@@ -12,7 +12,10 @@ const api = {
   addCustomTool: (tool: { key: string; displayName: string; paths: string[] }) =>
     ipcRenderer.invoke('addCustomTool', tool),
   removeCustomTool: (key: string) => ipcRenderer.invoke('removeCustomTool', key),
-  setBackupRetention: (n: number) => ipcRenderer.invoke('setBackupRetention', n)
+  setBackupRetention: (n: number) => ipcRenderer.invoke('setBackupRetention', n),
+  listBackups: () => ipcRenderer.invoke('listBackups'),
+  restoreBackup: (backupId: string) => ipcRenderer.invoke('restoreBackup', backupId),
+  deleteBackup: (backupId: string) => ipcRenderer.invoke('deleteBackup', backupId)
 }
 
 if (process.contextIsolated) {

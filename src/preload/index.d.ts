@@ -77,6 +77,17 @@ export interface CustomToolInput {
   paths: string[]
 }
 
+/** 备份元数据视图(对应 main/services/backup.ts 的 BackupMeta) */
+export interface BackupMetaView {
+  backupId: string
+  skillName: string
+  targetTool: string
+  sourcePath: string
+  sourceHash: string
+  backupTime: string
+  dirName: string
+}
+
 declare global {
   interface Window {
     api: {
@@ -88,6 +99,9 @@ declare global {
       addCustomTool: (tool: CustomToolInput) => Promise<SettingsView>
       removeCustomTool: (key: string) => Promise<SettingsView>
       setBackupRetention: (n: number) => Promise<SettingsView>
+      listBackups: () => Promise<BackupMetaView[]>
+      restoreBackup: (backupId: string) => Promise<void>
+      deleteBackup: (backupId: string) => Promise<void>
     }
   }
 }

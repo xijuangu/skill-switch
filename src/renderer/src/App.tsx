@@ -5,6 +5,7 @@ type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
 type SkillSourceView = SkillView['sources'][number]
 type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 type ToolConfigView = SettingsView['tools'][number]
+type BackupView = Awaited<ReturnType<typeof window.api.listBackups>>[number]
 
 type Page = 'skills' | 'tools' | 'backups' | 'settings'
 
@@ -43,7 +44,7 @@ export default function App() {
         <ul className="space-y-1">
           <NavItem page="skills" current={page} onClick={setPage} label="Skills" />
           <NavItem page="tools" current={page} onClick={setPage} label="Tools" disabled />
-          <NavItem page="backups" current={page} onClick={setPage} label="Backups" disabled />
+          <NavItem page="backups" current={page} onClick={setPage} label="Backups" />
           <NavItem page="settings" current={page} onClick={setPage} label="Settings" />
         </ul>
       </nav>
@@ -59,7 +60,7 @@ export default function App() {
         )}
         {page === 'settings' && <SettingsPage />}
         {page === 'tools' && <Placeholder label="Tools" />}
-        {page === 'backups' && <Placeholder label="Backups" />}
+        {page === 'backups' && <BackupsPage />}
       </main>
     </div>
   )
@@ -99,6 +100,127 @@ function Placeholder({ label }: { label: string }) {
     <div>
       <h2 className="text-xl font-semibold mb-4">{label}</h2>
       <p className="text-neutral-400">{label} 页面将在后续切片实现。</p>
+    </div>
+  )
+}
+
+function BackupsPage() {
+  const [backups, setBackups] = useState<BackupView[]>([])
+  const [retention, setRetention] = useState<number>(20)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    const [list, settings] = await Promise.all([
+      window.api.listBackups(),
+      window.api.getSettings()
+    ])
+    setBackups(list)
+    setRetention(settings.backupRetention)
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const handleRestore = async (backupId: string, skillName: string) => {
+    if (
+      !window.confirm(
+        `Restore backup "${skillName}" to its original path?\n\n` +
+          'If the target path already has content, a safety-net backup will be created first, then the target will be overwritten.'
+      )
+    ) {
+      return
+    }
+    setBusyId(backupId)
+    setError(null)
+    try {
+      await window.api.restoreBackup(backupId)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleDelete = async (backupId: string, skillName: string) => {
+    if (!window.confirm(`Delete backup "${skillName}"? This cannot be undone.`)) {
+      return
+    }
+    setBusyId(backupId)
+    setError(null)
+    try {
+      await window.api.deleteBackup(backupId)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-semibold">Backups</h2>
+        <span className="text-sm text-neutral-500">
+          Retention: <span className="font-medium text-neutral-700">{retention}</span>
+        </span>
+      </div>
+
+      {error && (
+        <div className="mb-4 px-3 py-2 rounded border border-red-200 bg-red-50 text-red-700 text-sm">
+          {error}
+        </div>
+      )}
+
+      {backups.length === 0 ? (
+        <p className="text-neutral-400">暂无备份,覆盖部署或删除 skill 时会自动备份。</p>
+      ) : (
+        <ul className="space-y-2">
+          {backups.map((b) => (
+            <li
+              key={b.backupId}
+              className="border border-neutral-200 rounded-md p-3 flex items-center justify-between hover:bg-neutral-50"
+            >
+              <div className="flex flex-col gap-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{b.skillName}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-700">
+                    {b.targetTool}
+                  </span>
+                </div>
+                <div className="text-xs text-neutral-500 flex items-center gap-3">
+                  <span>{new Date(b.backupTime).toLocaleString()}</span>
+                  <code className="text-neutral-400" title={b.sourceHash}>
+                    {b.sourceHash.slice(0, 8)}
+                  </code>
+                </div>
+                <div className="text-xs text-neutral-400 truncate" title={b.sourcePath}>
+                  {b.sourcePath}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 ml-3">
+                <button
+                  onClick={() => handleRestore(b.backupId, b.skillName)}
+                  disabled={busyId !== null}
+                  className="px-3 py-1 bg-neutral-700 text-white rounded text-xs hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Restore
+                </button>
+                <button
+                  onClick={() => handleDelete(b.backupId, b.skillName)}
+                  disabled={busyId !== null}
+                  className="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Delete
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
