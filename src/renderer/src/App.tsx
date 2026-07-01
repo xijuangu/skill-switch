@@ -66,6 +66,7 @@ export default function App() {
         {page === 'skills' && (
           <SkillsPage
             skills={skills}
+            tools={tools}
             scanning={scanning}
             lastScan={lastScan}
             onScan={handleScan}
@@ -236,12 +237,14 @@ function BackupsPage() {
 
 function SkillsPage({
   skills,
+  tools,
   scanning,
   lastScan,
   onScan,
   onRefresh
 }: {
   skills: SkillView[]
+  tools: ToolWithDriftsView[]
   scanning: boolean
   lastScan: ScanResult | null
   onScan: () => void
@@ -523,6 +526,7 @@ function SkillsPage({
             <SkillRow
               key={skill.id}
               skill={skill}
+              tools={tools}
               expanded={expanded.has(skill.id)}
               onToggleExpand={() => toggleExpand(skill.id)}
               onDeploy={() => handleDeployClick(skill)}
@@ -837,14 +841,43 @@ function RemoveFromRegistryConfirm({
   )
 }
 
+/**
+ * issue #23:推断 source 的人类可读来源类型标签。
+ * - central-repo + repo_url → "GitHub 安装"
+ * - central-repo 无 repo_url → "ZIP 安装"
+ * - indexed + 路径在某个工具配置的 paths 下 → "扫描发现"
+ * - indexed + 路径不在任何工具配置下 → "添加本地"(用户主动登记)
+ */
+function sourceKindLabel(
+  src: SkillSourceView,
+  toolConfigs: ToolConfigView[]
+): string {
+  if (src.source_type === 'central-repo') {
+    return src.repo_url ? 'GitHub 安装' : 'ZIP 安装'
+  }
+  // indexed:检查路径是否落在某个工具配置的 paths 下
+  const sep = '/'
+  const norm = (p: string) => (p.endsWith(sep) ? p.slice(0, -1) : p)
+  const srcPath = norm(src.path)
+  const underTool = toolConfigs.some((tc) =>
+    tc.paths.some((p) => {
+      const root = norm(p)
+      return srcPath === root || srcPath.startsWith(root + sep)
+    })
+  )
+  return underTool ? '扫描发现' : '添加本地'
+}
+
 function SkillRow({
   skill,
+  tools,
   expanded,
   onToggleExpand,
   onDeploy,
   onContextMenu
 }: {
   skill: SkillView
+  tools: ToolWithDriftsView[]
   expanded: boolean
   onToggleExpand: () => void
   onDeploy: () => void
@@ -907,14 +940,17 @@ function SkillRow({
               <ul className="space-y-1.5">
                 {skill.sources.map((src) => (
                   <li key={src.id} className="text-xs grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 items-start">
+                    <span className="text-neutral-500">类型</span>
+                    <span className="text-neutral-700 font-medium">
+                      {sourceKindLabel(src, tools.map((t) => t.config))}
+                      <span className="text-neutral-400 ml-1">({src.source_type})</span>
+                    </span>
                     <span className="text-neutral-500">path</span>
                     <code className="text-neutral-700 break-all">{src.path}</code>
                     <span className="text-neutral-500">hash</span>
                     <code className="text-neutral-700 break-all">{src.hash}</code>
                     <span className="text-neutral-500">mtime</span>
                     <span className="text-neutral-700">{new Date(src.mtime).toISOString()}</span>
-                    <span className="text-neutral-500">source_type</span>
-                    <span className="text-neutral-700">{src.source_type}</span>
                     {src.repo_url && (
                       <>
                         <span className="text-neutral-500">repo</span>
@@ -935,7 +971,7 @@ function SkillRow({
             )}
           </div>
 
-          {/* issue #23: 部署列表 — 工具 / target_path / mode / 部署时间 */}
+          {/* issue #23: 部署列表 — 工具 / target_path / mode / 当前状态 / 部署时间 */}
           <div>
             <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-1">部署 (Deployment)</h4>
             <p className="text-xs text-neutral-400 mb-2">
@@ -956,6 +992,8 @@ function SkillRow({
                     <code className="text-neutral-700 break-all">{dep.target_path}</code>
                     <span className="text-neutral-500">mode</span>
                     <span className="text-neutral-700">{dep.mode}</span>
+                    <span className="text-neutral-500">状态</span>
+                    <span className="text-neutral-700">{dep.status}</span>
                     <span className="text-neutral-500">deployed_at</span>
                     <span className="text-neutral-700">{dep.deployed_at}</span>
                   </li>

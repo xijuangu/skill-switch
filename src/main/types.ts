@@ -66,7 +66,12 @@ export interface ConflictStatus {
 /** Skills 页展示用:skill + sources + 冲突状态 */
 export interface SkillWithConflict extends SkillWithSources {
   conflict: ConflictStatus
-  deployments: Deployment[]
+  /**
+   * issue #23:展开视图用的部署列表,每条附带"当前状态"。
+   * status 值:目标存在(目标在磁盘上)/ 目标缺失(被手动删)/ 链接断裂(symlink 源缺失)。
+   * 详细漂移(kind)见工具页 detectDriftsForTool,这里只做轻量存在性检查。
+   */
+  deployments: (Deployment & { status: string })[]
 }
 
 /** 扫描结果:发现的 skill 数量 + 本次实际 upsert 的 source 路径列表 */

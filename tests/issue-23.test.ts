@@ -1,24 +1,38 @@
-// issue #23:验证 getSkills 返回的 deployment 列表区分 source 与部署目标。
+// issue #23:验证 getSkills 返回的 deployment 列表区分 source 与部署目标,
+// 每条 deployment 附带"当前状态",且 source 类型可辨(GitHub/ZIP/扫描发现/添加本地)。
 //
 // Skills 页展开视图需要分别展示 source(权威内容来源)和 deployment(派生目标)。
-// deployment 数据来自 deployments 表,由 getSkills IPC handler 通过
-// getDeploymentsBySkillId 附加到每个 skill。本测试验证该数据契约:
-// - 一个 skill 部署到多个工具 → getSkills 返回全部 deployment
-// - 每个 deployment 含 target_tool / target_path / mode / deployed_at
+// issue #21 把读逻辑抽到 readSkillsView 纯函数,本测试直接调用真实函数验证数据契约:
+// - 一个 skill 部署到多个工具 → readSkillsView 返回全部 deployment
+// - 每个 deployment 含 target_tool / target_path / mode / deployed_at / status
 // - copy / symlink / junction 三种 mode 信息结构一致
+// - status 反映目标存在性(目标存在/缺失/链接断裂)
 
 import { test, expect, describe } from 'vitest'
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
-import { upsertSkill, getAllSkills } from '../src/main/db/dao/skills'
+import { upsertSkill } from '../src/main/db/dao/skills'
 import { upsertSource } from '../src/main/db/dao/skill-sources'
-import { getDeploymentsBySkillId } from '../src/main/db/dao/deployments'
 import { deploySkill } from '../src/main/services/deployer'
-import type { Deployment } from '../src/main/types'
+import { readSkillsView } from '../src/main/ipc/index'
+import type { ToolConfig } from '../src/main/types'
 
-describe('issue #23: getSkills 返回的 deployment 区分 source 与部署目标', () => {
-  test('一个 skill 部署到多个工具 → 返回全部 deployment,含 tool/path/mode', () => {
+/** 构造测试用 ToolConfig */
+function mkTool(key: string, paths: string[], enabled = true): ToolConfig {
+  return {
+    key,
+    displayName: key,
+    enabled,
+    paths,
+    existingPaths: paths,
+    isCustom: false,
+    exists: true
+  }
+}
+
+describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态', () => {
+  test('一个 skill 部署到多个工具 → 返回全部 deployment,含 tool/path/mode/status', () => {
     const source = createTempDir('iss23-src-')
     const codexTarget = createTempDir('iss23-codex-')
     const agentsTarget = createTempDir('iss23-agents-')
@@ -58,27 +72,31 @@ describe('issue #23: getSkills 返回的 deployment 区分 source 与部署目�
       canJunction: false
     })
 
-    // getSkills 返回的 deployment 列表(模拟 IPC handler 的 getDeploymentsBySkillId)
-    const skills = getAllSkills(db)
-    const skill = skills.find((s) => s.id === skillId)!
-    const deployments: Deployment[] = getDeploymentsBySkillId(db, skillId)
+    // readSkillsView(真实函数)返回含 status 的 deployment
+    const toolConfigs = [
+      mkTool('codex', [codexTarget.dir]),
+      mkTool('agents', [agentsTarget.dir])
+    ]
+    const view = readSkillsView(db, toolConfigs)
+    const skill = view.find((s) => s.id === skillId)!
+    expect(skill).toBeDefined()
+    expect(skill.deployments).toHaveLength(2)
 
-    expect(deployments).toHaveLength(2)
-    expect(skills.find((s) => s.name === skillName)).toBeDefined()
-
-    // codex 部署:copy mode + 精确 target_path
-    const codexDep = deployments.find((d) => d.target_tool === 'codex')!
+    // codex 部署:copy mode + 精确 target_path + status
+    const codexDep = skill.deployments.find((d) => d.target_tool === 'codex')!
     expect(codexDep.mode).toBe('copy')
     expect(codexDep.target_path).toBe(codexTargetDir)
     expect(codexDep.source_path).toBe(skillDir)
     expect(typeof codexDep.deployed_at).toBe('string')
     expect(codexDep.source_hash_at_deploy).toHaveLength(64)
+    expect(codexDep.status).toBe('目标存在(副本)')
 
-    // agents 部署:symlink mode + 精确 target_path
-    const agentsDep = deployments.find((d) => d.target_tool === 'agents')!
+    // agents 部署:symlink mode + 精确 target_path + status
+    const agentsDep = skill.deployments.find((d) => d.target_tool === 'agents')!
     expect(agentsDep.mode).toBe('symlink')
     expect(agentsDep.target_path).toBe(agentsTargetDir)
     expect(agentsDep.source_path).toBe(skillDir)
+    expect(agentsDep.status).toBe('目标存在(链接)')
 
     // source 与 deployment 路径不重叠(部署目标不是 source)
     const sourcePaths = skill.sources.map((s) => s.path)
@@ -119,19 +137,19 @@ describe('issue #23: getSkills 返回的 deployment 区分 source 与部署目�
       canJunction: false
     })
 
-    const skills = getAllSkills(db)
-    const skill = skills.find((s) => s.id === skillId)!
-    const deployments = getDeploymentsBySkillId(db, skillId)
+    const view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    const skill = view.find((s) => s.id === skillId)!
 
     // source 是 central-repo 类型,路径在中央仓库
     expect(skill.sources).toHaveLength(1)
     expect(skill.sources[0].source_type).toBe('central-repo')
     expect(skill.sources[0].path).toBe(skillDir)
 
-    // deployment 目标路径在工具目录下,与 source 不同
-    expect(deployments).toHaveLength(1)
-    expect(deployments[0].target_path).toBe(targetDir)
-    expect(deployments[0].target_path).not.toBe(skillDir)
+    // deployment 目标路径在工具目录下,与 source 不同;status 反映链接存在
+    expect(skill.deployments).toHaveLength(1)
+    expect(skill.deployments[0].target_path).toBe(targetDir)
+    expect(skill.deployments[0].target_path).not.toBe(skillDir)
+    expect(skill.deployments[0].status).toBe('目标存在(链接)')
 
     central.cleanup()
     target.cleanup()
@@ -150,10 +168,94 @@ describe('issue #23: getSkills 返回的 deployment 区分 source 与部署目�
     const skillId = upsertSkill(db, skillName, skillDir)
     upsertSource(db, skillId, skillDir, 'somehash', Date.now(), 'indexed')
 
-    const deployments = getDeploymentsBySkillId(db, skillId)
-    expect(deployments).toHaveLength(0)
+    const view = readSkillsView(db, [])
+    const skill = view.find((s) => s.id === skillId)!
+    expect(skill.deployments).toHaveLength(0)
 
     source.cleanup()
+    cleanup()
+  })
+
+  test('删除 copy 目标后 status 变为"目标缺失"', () => {
+    // issue #23 验收:每条 deployment 至少展示工具、实际 target_path、mode 和当前状态
+    const source = createTempDir('iss23-src-')
+    const target = createTempDir('iss23-tgt-')
+    const backups = createTempDir('iss23-bak-')
+    const { db, cleanup } = createTempDb()
+
+    const skillName = 'gone'
+    const skillDir = join(source.dir, skillName)
+    mkdirSync(skillDir)
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: gone\n---\nbody\n')
+    const skillId = upsertSkill(db, skillName, skillDir)
+    upsertSource(db, skillId, skillDir, 'somehash', Date.now(), 'indexed')
+
+    const targetDir = join(target.dir, skillName)
+    deploySkill(db, {
+      skillId,
+      skillName,
+      targetTool: 'codex',
+      mode: 'copy',
+      sourcePath: skillDir,
+      targetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+
+    // 部署后 status = 目标存在(副本)
+    let view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    expect(view[0].deployments[0].status).toBe('目标存在(副本)')
+
+    // 删 target → status 变为 目标缺失
+    rmSync(targetDir, { recursive: true, force: true })
+    view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    expect(view[0].deployments[0].status).toBe('目标缺失')
+
+    source.cleanup()
+    target.cleanup()
+    backups.cleanup()
+    cleanup()
+  })
+
+  test('symlink 源被删后 status 变为"链接断裂"', () => {
+    const source = createTempDir('iss23-src-')
+    const target = createTempDir('iss23-tgt-')
+    const backups = createTempDir('iss23-bak-')
+    const { db, cleanup } = createTempDb()
+
+    const skillName = 'broken'
+    const skillDir = join(source.dir, skillName)
+    mkdirSync(skillDir)
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: broken\n---\nbody\n')
+    const skillId = upsertSkill(db, skillName, skillDir)
+    upsertSource(db, skillId, skillDir, 'somehash', Date.now(), 'indexed')
+
+    const targetDir = join(target.dir, skillName)
+    deploySkill(db, {
+      skillId,
+      skillName,
+      targetTool: 'codex',
+      mode: 'symlink',
+      sourcePath: skillDir,
+      targetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+
+    // 部署后 status = 目标存在(链接)
+    let view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    expect(view[0].deployments[0].status).toBe('目标存在(链接)')
+
+    // 删源 → symlink 断裂 → status = 链接断裂
+    rmSync(skillDir, { recursive: true, force: true })
+    view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    expect(view[0].deployments[0].status).toBe('链接断裂')
+
+    source.cleanup()
+    target.cleanup()
+    backups.cleanup()
     cleanup()
   })
 })

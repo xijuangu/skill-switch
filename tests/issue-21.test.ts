@@ -1,9 +1,9 @@
 // issue #21:验证 mutation 后 getSkills / getTools 等读操作返回一致的权威状态。
 //
 // renderer 的统一 refresh 机制在每次 deploy / undeploy / remove 后调用 getSkills +
-// getTools 重读 DB。这些 IPC handler 是薄传透,实际数据来自 service + DAO。
-// 本测试在 service 层模拟完整的 mutation → read 周期,确保 refresh 读到的状态
-// 与 mutation 结果一致(不依赖全量磁盘扫描)。
+// getTools 重读 DB。issue #21 把 IPC handler 的读逻辑抽成 readSkillsView /
+// readToolsView 纯函数,本测试直接调用真实函数(不再是本地重实现的模拟),
+// 覆盖部署 / 卸载 / 移除 / 失败场景的 mutation → read 一致性。
 
 import { test, expect, describe } from 'vitest'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
@@ -12,41 +12,16 @@ import { createTempDir, createTempDb } from './helpers/temp'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { upsertSource } from '../src/main/db/dao/skill-sources'
 import { getDeploymentsBySkillId, getDeploymentsByTool } from '../src/main/db/dao/deployments'
-import { getAllSkills } from '../src/main/db/dao/skills'
-import { computeConflict, filterSourcesByEnabledTools, removeFromRegistry } from '../src/main/services/registry'
+import { removeFromRegistry } from '../src/main/services/registry'
 import {
   deploySkill,
   undeploySkill,
-  detectDriftsForTool,
   redeploySkill
 } from '../src/main/services/deployer'
 import { deleteDeployment } from '../src/main/db/dao/deployments'
+// issue #21: 直接 import IPC 层抽出的真实读函数,不再本地重实现
+import { readSkillsView, readToolsView } from '../src/main/ipc/index'
 import type { ToolConfig } from '../src/main/types'
-
-/** 模拟 getSkills IPC handler 的核心读逻辑(含 issue #20 source 过滤) */
-function readSkillsView(db: ReturnType<typeof createTempDb>['db'], toolConfigs: ToolConfig[]) {
-  const skills = getAllSkills(db)
-  return skills
-    .map((s) => {
-      const visible = filterSourcesByEnabledTools(s.sources, toolConfigs)
-      return {
-        ...s,
-        sources: visible,
-        conflict: computeConflict(visible, s.id),
-        deployments: getDeploymentsBySkillId(db, s.id)
-      }
-    })
-    .filter((s) => s.sources.length > 0)
-}
-
-/** 模拟 getTools IPC handler 的核心读逻辑(detectDriftsForTool) */
-function readToolsView(
-  db: ReturnType<typeof createTempDb>['db'],
-  toolKey: string,
-  toolSkillDirs: string[]
-) {
-  return detectDriftsForTool(db, toolKey, toolSkillDirs)
-}
 
 /** 构造测试用 ToolConfig */
 function mkTool(key: string, paths: string[], enabled = true): ToolConfig {
@@ -81,7 +56,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     // 部署前:getSkills 无部署,getTools 无 managed drift
     let skillsView = readSkillsView(db, toolConfigs)
     expect(skillsView[0].deployments).toHaveLength(0)
-    let toolsView = readToolsView(db, 'codex', [target.dir])
+    let toolsView = readToolsView(db, toolConfigs).flatMap((t) => t.drifts)
     expect(toolsView.filter((d) => d.deployment !== null)).toHaveLength(0)
 
     // deploy
@@ -101,7 +76,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     skillsView = readSkillsView(db, toolConfigs)
     expect(skillsView[0].deployments).toHaveLength(1)
     expect(skillsView[0].deployments[0].target_tool).toBe('codex')
-    toolsView = readToolsView(db, 'codex', [target.dir])
+    toolsView = readToolsView(db, toolConfigs).flatMap((t) => t.drifts)
     const managed = toolsView.filter((d) => d.deployment !== null)
     expect(managed).toHaveLength(1)
     expect(managed[0].kind).toBe('normal')
@@ -145,7 +120,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     // 卸载后:getSkills 无部署,getTools 无 managed drift
     const skillsView = readSkillsView(db, toolConfigs)
     expect(skillsView[0].deployments).toHaveLength(0)
-    const toolsView = readToolsView(db, 'codex', [target.dir])
+    const toolsView = readToolsView(db, toolConfigs).flatMap((t) => t.drifts)
     expect(toolsView.filter((d) => d.deployment !== null)).toHaveLength(0)
 
     source.cleanup()
@@ -186,7 +161,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
 
     const skillsView = readSkillsView(db, toolConfigs)
     expect(skillsView[0].deployments).toHaveLength(0)
-    const toolsView = readToolsView(db, 'codex', [target.dir])
+    const toolsView = readToolsView(db, toolConfigs).flatMap((t) => t.drifts)
     // 磁盘上 target 仍存在,但清单无记录 → external
     const external = toolsView.filter((d) => d.kind === 'external')
     expect(external).toHaveLength(1)
@@ -235,7 +210,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     const skillsView = readSkillsView(db, toolConfigs)
     expect(skillsView.find((s) => s.name === skillName)).toBeUndefined()
     // getTools 无 managed drift(target 已被清理)
-    const toolsView = readToolsView(db, 'codex', [target.dir])
+    const toolsView = readToolsView(db, toolConfigs).flatMap((t) => t.drifts)
     expect(toolsView.filter((d) => d.deployment !== null)).toHaveLength(0)
 
     central.cleanup()
@@ -274,7 +249,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     // 模拟 drift:删除 target 目录
     rmSync(targetDir, { recursive: true, force: true })
 
-    let toolsView = readToolsView(db, 'codex', [target.dir])
+    let toolsView = readToolsView(db, toolConfigs).flatMap((t) => t.drifts)
     const driftBefore = toolsView.find((d) => d.skillId === skillId)
     expect(driftBefore?.kind).toBe('drift')
 
@@ -287,7 +262,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
       canJunction: false
     })
 
-    toolsView = readToolsView(db, 'codex', [target.dir])
+    toolsView = readToolsView(db, toolConfigs).flatMap((t) => t.drifts)
     const driftAfter = toolsView.find((d) => d.skillId === skillId)
     expect(driftAfter?.kind).toBe('normal')
 

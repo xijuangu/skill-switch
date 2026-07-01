@@ -35,7 +35,13 @@ export interface SkillWithConflictView {
   created_at: string
   sources: SkillSourceView[]
   conflict: ConflictStatusView
-  deployments: DeploymentView[]
+  /** issue #23:每条 deployment 附带轻量"当前状态" */
+  deployments: SkillDeploymentView[]
+}
+
+/** issue #23:Skills 页展开视图用,DeploymentView + 当前状态描述 */
+export interface SkillDeploymentView extends DeploymentView {
+  status: string
 }
 
 export interface ToolScanResultView {

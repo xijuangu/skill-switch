@@ -1,5 +1,6 @@
 import { test, expect, describe } from 'vitest'
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -1787,6 +1788,58 @@ describe('deployer service', () => {
       const depAfter = getDeploymentBySkillAndTool(db, skillId, 'trae')!
       expect(depAfter.deployed_at).toBe(depBefore.deployed_at)
       expect(depAfter.source_hash_at_deploy).toBe(depBefore.source_hash_at_deploy)
+
+      src.cleanup()
+      pathA.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('目标父目录不可写 → throw,deployment 清单不变(deployFiles 在 upsert 之前抛错)', () => {
+      // issue #22 验收:source 缺失、目标父目录不可写等失败不修改 deployment 清单
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'locked-parent', 'body')
+      const skillId = upsertSkill(db, 'locked-parent', skillDir)
+      const targetA = join(pathA.dir, 'locked-parent')
+      // 首次部署成功(此时 targetA 不存在,pathA 可写)
+      deploySkill(db, {
+        skillId,
+        skillName: 'locked-parent',
+        targetTool: 'trae',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      const depBefore = getDeploymentBySkillAndTool(db, skillId, 'trae')!
+      // 删 target 模拟 drift,然后锁死父目录 pathA 使其不可写
+      rmSync(targetA, { recursive: true, force: true })
+      chmodSync(pathA.dir, 0o555) // r-xr-xr-x:不可写,无法在其中创建子目录
+
+      try {
+        expect(() =>
+          redeploySkill(db, skillId, 'trae', {
+            skillName: 'locked-parent',
+            mode: 'copy',
+            backupsDir: backups.dir,
+            canSymlink: true,
+            canJunction: false
+          })
+        ).toThrow()
+
+        // 清单未改:deployFiles 抛错在 upsertDeployment 之前
+        const depAfter = getDeploymentBySkillAndTool(db, skillId, 'trae')!
+        expect(depAfter.deployed_at).toBe(depBefore.deployed_at)
+        expect(depAfter.source_hash_at_deploy).toBe(depBefore.source_hash_at_deploy)
+      } finally {
+        // 恢复可写以便 cleanup 删除目录
+        chmodSync(pathA.dir, 0o755)
+      }
 
       src.cleanup()
       pathA.cleanup()

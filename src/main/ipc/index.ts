@@ -44,6 +44,7 @@ import {
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 import {
   deploySkill,
+  describeDeploymentStatus,
   detectDriftsForTool,
   inspectDeployTarget,
   redeploySkill,
@@ -70,6 +71,55 @@ export interface SettingsView {
 export interface ToolWithDriftsView {
   config: ToolConfig
   drifts: DriftStatus[]
+}
+
+/**
+ * issue #21:抽取出 getSkills IPC handler 的纯读逻辑,使其可独立测试。
+ * 输入 db + 已解析的 toolConfigs,返回 Skills 页权威视图(含 issue #20 source 过滤)。
+ * 不读 settings、不碰磁盘扫描,只读 DB — 对应 renderer refresh 的数据契约。
+ * issue #23:每条 deployment 附带轻量"当前状态"(describeDeploymentStatus)。
+ */
+export function readSkillsView(
+  db: DB,
+  toolConfigs: ToolConfig[]
+): SkillWithConflict[] {
+  const skills = getAllSkills(db)
+  const out: SkillWithConflict[] = []
+  for (const s of skills) {
+    const visibleSources = filterSourcesByEnabledTools(s.sources, toolConfigs)
+    if (visibleSources.length === 0) continue
+    out.push({
+      ...s,
+      sources: visibleSources,
+      conflict: computeConflict(visibleSources, s.id),
+      deployments: getDeploymentsBySkillId(db, s.id).map((d) => ({
+        ...d,
+        status: describeDeploymentStatus(d.target_path, d.mode)
+      }))
+    })
+  }
+  return out
+}
+
+/**
+ * issue #21:抽取出 getTools IPC handler 的纯读逻辑,使其可独立测试。
+ * 输入 db + 已解析的 toolConfigs,返回 Tools 页权威视图(含 drift 检测)。
+ * detectDriftsForTool 会读磁盘判断 target 状态,但这是 drift 检测的固有职责,
+ * 不是全量 skill 扫描 — refresh 调用此函数不会触发 scanAllTools。
+ */
+export function readToolsView(
+  db: DB,
+  toolConfigs: ToolConfig[]
+): ToolWithDriftsView[] {
+  return toolConfigs
+    .filter((config) => config.enabled)
+    .map((config) => ({
+      config,
+      drifts:
+        config.enabled && config.exists
+          ? detectDriftsForTool(db, config.key, config.existingPaths)
+          : []
+    }))
 }
 
 function buildSettingsView(settings: AppSettings): SettingsView {
@@ -183,26 +233,11 @@ export function registerIpcHandlers(db: DB): void {
   })
 
   ipcMain.handle('getSkills', async () => {
-    // issue #20:禁用预设工具后,技能页应隐藏仅来自该工具配置路径的 source,
-    // 并基于过滤后的 source 重算冲突状态。DB 记录保留,重新启用工具并扫描后
-    // source 自然恢复显示(过滤是只读的,不删 DB)。
-    //
-    // 一个 skill 的所有 source 都来自已禁用工具时,不再作为当前可部署 skill 展示。
+    // issue #21: 读逻辑抽到 readSkillsView,与测试共用同一函数(不再本地重实现)。
+    // issue #20: 禁用工具后 source 过滤逻辑在 readSkillsView 内执行。
     const settings = readSettings(SETTINGS_PATH)
     const toolConfigs = resolveToolConfigs(settings, homedir())
-    const skills = getAllSkills(db)
-    const out: SkillWithConflict[] = []
-    for (const s of skills) {
-      const visibleSources = filterSourcesByEnabledTools(s.sources, toolConfigs)
-      if (visibleSources.length === 0) continue
-      out.push({
-        ...s,
-        sources: visibleSources,
-        conflict: computeConflict(visibleSources, s.id),
-        deployments: getDeploymentsBySkillId(db, s.id)
-      })
-    }
-    return out
+    return readSkillsView(db, toolConfigs)
   })
 
   ipcMain.handle('getSettings', async () => {
@@ -478,18 +513,10 @@ export function registerIpcHandlers(db: DB): void {
   })
 
   ipcMain.handle('getTools', async () => {
+    // issue #21: 读逻辑抽到 readToolsView,与测试共用同一函数。
     const settings = readSettings(SETTINGS_PATH)
-    const configs = resolveToolConfigs(settings, homedir()).filter(
-      (config) => config.enabled
-    )
-    const out: ToolWithDriftsView[] = configs.map((c) => ({
-      config: c,
-      drifts:
-        c.enabled && c.exists
-          ? detectDriftsForTool(db, c.key, c.existingPaths)
-          : []
-    }))
-    return out
+    const toolConfigs = resolveToolConfigs(settings, homedir())
+    return readToolsView(db, toolConfigs)
   })
 
   // ===== Install(切片 #7)=====
