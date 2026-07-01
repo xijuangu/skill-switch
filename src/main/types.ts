@@ -66,10 +66,12 @@ export interface SkillWithConflict extends SkillWithSources {
   conflict: ConflictStatus
 }
 
-/** 扫描结果:发现的 skill 数量 */
+/** 扫描结果:发现的 skill 数量 + 本次实际 upsert 的 source 路径列表 */
 export interface ScanResult {
   scanned: number
   upserted: number
+  /** 本次扫描 upsert 的 source 路径列表(用于清理失效 source) */
+  scannedPaths: string[]
 }
 
 /** 内置工具预设(代码内固定,displayName + internal key + 默认路径) */

@@ -21,6 +21,13 @@ export function getDeploymentsBySkillId(db: DB, skillId: number): Deployment[] {
     .all(skillId) as Deployment[]
 }
 
+/** 按 mode 查部署(用于扫描时构建 skipPaths:copy 部署的目标目录要跳过) */
+export function getDeploymentsByMode(db: DB, mode: DeployMode): Deployment[] {
+  return db
+    .prepare('SELECT * FROM deployments WHERE mode = ?')
+    .all(mode) as Deployment[]
+}
+
 /** 按 (skill_id, target_tool) 唯一查部署(用于冲突检测:判断目标是否自管部署) */
 export function getDeploymentBySkillAndTool(
   db: DB,

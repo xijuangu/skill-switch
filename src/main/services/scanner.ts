@@ -30,14 +30,20 @@ function resolveSkillName(skillDir: string): string {
 /**
  * 扫描工具目录,把每个子目录登记为 skill(索引模式,不搬文件)。
  * 重复扫描幂等:(skill_id, path) 唯一约束 + ON CONFLICT 更新 hash/mtime。
+ *
+ * @param skipPaths 要跳过的子目录绝对路径集合(如 copy 部署的目标目录,
+ *                  避免副本被当成新 source 索引进来)。默认空集合。
  */
-export function scanToolDir(db: DB, toolDir: string): ScanResult {
+export function scanToolDir(db: DB, toolDir: string, skipPaths: Set<string> = new Set()): ScanResult {
   const entries = readdirSync(toolDir, { withFileTypes: true })
   const skillDirs = entries
     .filter((e) => e.isDirectory())
     .map((e) => join(toolDir, e.name))
+    // #3: 跳过 copy 部署的目标目录(副本不该被当成新 source)
+    .filter((dir) => !skipPaths.has(dir))
 
   let upserted = 0
+  const scannedPaths: string[] = []
   for (const skillDir of skillDirs) {
     const name = resolveSkillName(skillDir)
     const hash = hashDir(skillDir)
@@ -47,7 +53,8 @@ export function scanToolDir(db: DB, toolDir: string): ScanResult {
       upsertSource(db, skillId, skillDir, hash, mtime, 'indexed')
       upserted++
     })
+    scannedPaths.push(skillDir)
   }
 
-  return { scanned: skillDirs.length, upserted }
+  return { scanned: skillDirs.length, upserted, scannedPaths }
 }

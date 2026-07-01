@@ -179,7 +179,7 @@ declare global {
       // Drift + Remove from Registry (#8)
       removeFromManifest: (skillId: number, targetTool: string) => Promise<void>
       getDeploymentsForSkill: (skillId: number) => Promise<DeploymentView[]>
-      viewSkillMd: (skillId: number) => Promise<{ content: string; path: string } | null>
+      viewSkillMd: (skillId: number, sourcePath?: string) => Promise<{ content: string; path: string } | null>
       removeFromRegistry: (
         skillId: number
       ) => Promise<{ skillName: string; backedUp: boolean; undeployedTools: string[] }>

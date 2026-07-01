@@ -203,15 +203,20 @@ export function registerIpcHandlers(db: DB): void {
 
   /**
    * 读 skill 的 SKILL.md 原文(Skills 页 "View SKILL.md" 用)。
-   * 优先读 primary_source_path/SKILL.md;不存在则读第一个 source 的 SKILL.md。
+   * @param skillId skill id
+   * @param sourcePath 可选,指定从哪个 source path 读 SKILL.md。
+   *                   未传则用 primary_source_path。
+   *                   conflict 时 UI 先让用户选 source,再把选中的 path 传进来。
    */
-  ipcMain.handle('viewSkillMd', async (_e, skillId: number): Promise<{ content: string; path: string } | null> => {
+  ipcMain.handle('viewSkillMd', async (_e, skillId: number, sourcePath?: string): Promise<{ content: string; path: string } | null> => {
     const skill = getSkillById(db, skillId)
     if (!skill) return null
+    const baseDir = sourcePath ?? skill.primary_source_path
+    if (!baseDir) return null
     try {
       return {
-        content: readFileSync(join(skill.primary_source_path, 'SKILL.md'), 'utf-8'),
-        path: join(skill.primary_source_path, 'SKILL.md')
+        content: readFileSync(join(baseDir, 'SKILL.md'), 'utf-8'),
+        path: join(baseDir, 'SKILL.md')
       }
     } catch {
       return null

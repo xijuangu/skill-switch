@@ -123,8 +123,8 @@ function BackupsPage() {
   const handleRestore = async (backupId: string, skillName: string) => {
     if (
       !window.confirm(
-        `Restore backup "${skillName}" to its original path?\n\n` +
-          'If the target path already has content, a safety-net backup will be created first, then the target will be overwritten.'
+        `将备份「${skillName}」恢复到原路径?\n\n` +
+          '如果目标路径已有内容,会先创建一份安全网备份,再覆盖目标。'
       )
     ) {
       return
@@ -142,7 +142,7 @@ function BackupsPage() {
   }
 
   const handleDelete = async (backupId: string, skillName: string) => {
-    if (!window.confirm(`Delete backup "${skillName}"? This cannot be undone.`)) {
+    if (!window.confirm(`删除备份「${skillName}」?此操作不可撤销。`)) {
       return
     }
     setBusyId(backupId)
@@ -162,7 +162,7 @@ function BackupsPage() {
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-semibold">Backups</h2>
         <span className="text-sm text-neutral-500">
-          Retention: <span className="font-medium text-neutral-700">{retention}</span>
+          保留数: <span className="font-medium text-neutral-700">{retention}</span>
         </span>
       </div>
 
@@ -204,14 +204,14 @@ function BackupsPage() {
                   disabled={busyId !== null}
                   className="px-3 py-1 bg-neutral-700 text-white rounded text-xs hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Restore
+                  恢复
                 </button>
                 <button
                   onClick={() => handleDelete(b.backupId, b.skillName)}
                   disabled={busyId !== null}
                   className="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Delete
+                  删除
                 </button>
               </div>
             </li>
@@ -252,6 +252,7 @@ function SkillsPage({
   const [contextMenu, setContextMenu] = useState<{ skill: SkillView; x: number; y: number } | null>(null)
   // #8: View SKILL.md 弹窗
   const [viewMdTarget, setViewMdTarget] = useState<{ content: string; path: string; skillName: string } | null>(null)
+  const [viewMdSourcePicker, setViewMdSourcePicker] = useState<SkillView | null>(null)
   // #8: Undeploy from... 对话框(列出该 skill 已部署到的工具)
   const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { target_tool: string; mode: string }[] } | null>(null)
   // #8: Remove from Registry 确认
@@ -296,12 +297,12 @@ function SkillsPage({
       // #9: junction fallback / copy 降级时在反馈消息里提示
       const degradeNote =
         result.degradedFrom != null
-          ? ` (requested ${result.degradedFrom}, used ${result.mode}: ${result.degradeReason ?? 'fallback applied'})`
+          ? ` (请求 ${result.degradedFrom},使用 ${result.mode}: ${result.degradeReason ?? '已降级'})`
           : ''
       const msg =
         result.action === 'skipped'
-          ? `Skipped — ${result.targetPath} is already up to date.`
-          : `Deployed (${result.action}) to ${result.targetPath}${degradeNote}`
+          ? `跳过 — ${result.targetPath} 已是最新。`
+          : `已部署(${result.action})到 ${result.targetPath}${degradeNote}`
       setFeedback(msg)
       await onRefresh()
       setTimeout(() => setFeedback(null), 6000)
@@ -312,8 +313,8 @@ function SkillsPage({
     setInstallOpen(false)
     if (result) {
       const msg = result.overwritten
-        ? `Installed "${result.skillName}" (overwrote existing, backup created).`
-        : `Installed "${result.skillName}".`
+        ? `已安装「${result.skillName}」(覆盖了已有版本,已创建备份)。`
+        : `已安装「${result.skillName}」。`
       setFeedback(msg)
       await onRefresh()
       setTimeout(() => setFeedback(null), 5000)
@@ -329,13 +330,35 @@ function SkillsPage({
   // View SKILL.md
   const handleViewMd = async (skill: SkillView) => {
     setContextMenu(null)
+    if (skill.conflict.hasConflict) {
+      setViewMdSourcePicker(skill)
+      return
+    }
     setActionBusy(true)
     try {
       const result = await window.api.viewSkillMd(skill.id)
       if (result) {
         setViewMdTarget({ ...result, skillName: skill.name })
       } else {
-        setFeedback(`No SKILL.md found for "${skill.name}".`)
+        setFeedback(`未找到「${skill.name}」的 SKILL.md。`)
+        setTimeout(() => setFeedback(null), 4000)
+      }
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleViewMdPickSource = async (source: SkillSourceView) => {
+    if (!viewMdSourcePicker) return
+    const skill = viewMdSourcePicker
+    setViewMdSourcePicker(null)
+    setActionBusy(true)
+    try {
+      const result = await window.api.viewSkillMd(skill.id, source.path)
+      if (result) {
+        setViewMdTarget({ ...result, skillName: skill.name })
+      } else {
+        setFeedback(`未找到「${skill.name}」的 SKILL.md。`)
         setTimeout(() => setFeedback(null), 4000)
       }
     } finally {
@@ -350,7 +373,7 @@ function SkillsPage({
     try {
       const deployments = await window.api.getDeploymentsForSkill(skill.id)
       if (deployments.length === 0) {
-        setFeedback(`"${skill.name}" is not deployed to any tool.`)
+        setFeedback(`「${skill.name}」未部署到任何工具。`)
         setTimeout(() => setFeedback(null), 4000)
         return
       }
@@ -373,8 +396,8 @@ function SkillsPage({
     try {
       const result = await window.api.removeFromRegistry(removeRegistryTarget.id)
       const msg = result.backedUp
-        ? `Removed "${result.skillName}" from registry (backed up, undeployed from ${result.undeployedTools.length} tool(s)).`
-        : `Removed "${result.skillName}" from registry (undeployed from ${result.undeployedTools.length} tool(s), no central entity to back up).`
+        ? `已从注册表移除「${result.skillName}」(已备份,从 ${result.undeployedTools.length} 个工具卸载)。`
+        : `已从注册表移除「${result.skillName}」(从 ${result.undeployedTools.length} 个工具卸载,无中央实体可备份)。`
       setFeedback(msg)
       await onRefresh()
       setTimeout(() => setFeedback(null), 6000)
@@ -389,7 +412,7 @@ function SkillsPage({
 
   const handleUndeployFromTool = async (targetTool: string) => {
     if (!undeployFromTarget) return
-    if (!window.confirm(`Undeploy "${undeployFromTarget.skill.name}" from ${targetTool}?`)) return
+    if (!window.confirm(`从 ${targetTool} 卸载「${undeployFromTarget.skill.name}」?`)) return
     setActionBusy(true)
     try {
       await window.api.undeploy(undeployFromTarget.skill.id, targetTool)
@@ -416,7 +439,7 @@ function SkillsPage({
           <h2 className="text-xl font-semibold">Skills</h2>
           {conflictCount > 0 && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
-              {conflictCount} conflict{conflictCount > 1 ? 's' : ''}
+              {conflictCount} 个冲突
             </span>
           )}
         </div>
@@ -425,14 +448,14 @@ function SkillsPage({
             onClick={() => setInstallOpen(true)}
             className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 text-sm font-medium"
           >
-            Install
+            安装
           </button>
           <button
             onClick={onScan}
             disabled={scanning}
             className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
           >
-            {scanning ? 'Scanning…' : 'Scan'}
+            {scanning ? '扫描中…' : '扫描'}
           </button>
         </div>
       </div>
@@ -446,14 +469,14 @@ function SkillsPage({
       {lastScan && (
         <div className="text-sm text-neutral-500 mb-4">
           <p>
-            Scanned {lastScan.totalScanned} skill(s), upserted {lastScan.totalUpserted}.
+            已扫描 {lastScan.totalScanned} 个 skill,登记 {lastScan.totalUpserted} 个。
           </p>
           {lastScan.tools.length > 0 && (
             <ul className="mt-1 space-y-0.5">
               {lastScan.tools.map((t) => (
                 <li key={`${t.key}:${t.path}`} className="text-xs">
                   <span className="font-medium">{t.displayName}</span>{' '}
-                  <code className="text-neutral-500">{t.path}</code> — {t.scanned} scanned
+                  <code className="text-neutral-500">{t.path}</code> — 扫描 {t.scanned} 个
                 </li>
               ))}
             </ul>
@@ -463,8 +486,7 @@ function SkillsPage({
 
       {skills.length === 0 ? (
         <p className="text-neutral-400">
-          No skills indexed yet. Click <span className="font-medium">Scan</span> to discover
-          skills across all enabled tool directories, or <span className="font-medium">Install</span> to add from GitHub / ZIP / local dir.
+          尚未索引任何 skill。点击<span className="font-medium">扫描</span>发现所有已启用工具目录下的 skill,或点击<span className="font-medium">安装</span>从 GitHub / ZIP / 本地目录添加。
         </p>
       ) : (
         <ul className="space-y-2">
@@ -531,6 +553,14 @@ function SkillsPage({
         />
       )}
 
+      {viewMdSourcePicker && (
+        <ViewMdSourcePickerModal
+          skill={viewMdSourcePicker}
+          onPick={handleViewMdPickSource}
+          onCancel={() => setViewMdSourcePicker(null)}
+        />
+      )}
+
       {/* #8: Undeploy from... 对话框(列出该 skill 已部署到的工具) */}
       {undeployFromTarget && (
         <UndeployFromDialog
@@ -579,11 +609,11 @@ function ContextMenu({
 }) {
   // 点遮罩关闭;点菜单内不关闭(stopPropagation)
   const items: { label: string; onClick: () => void; danger?: boolean }[] = [
-    { label: 'Deploy to…', onClick: onDeploy },
-    { label: 'Undeploy from…', onClick: onUndeployFrom },
-    { label: 'View Sources', onClick: onViewSources },
+    { label: '部署到…', onClick: onDeploy },
+    { label: '从…卸载', onClick: onUndeployFrom },
+    { label: '查看 Source', onClick: onViewSources },
     { label: 'View SKILL.md', onClick: onViewMd },
-    { label: 'Remove from Registry', onClick: onRemoveFromRegistry, danger: true }
+    { label: '从注册表移除', onClick: onRemoveFromRegistry, danger: true }
   ]
   return (
     <div className="fixed inset-0 z-50" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose() }}>
@@ -644,7 +674,7 @@ function ViewMdModal({
             onClick={onClose}
             className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded"
           >
-            Close
+            关闭
           </button>
         </div>
       </div>
@@ -676,9 +706,9 @@ function UndeployFromDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-4 border-b border-neutral-200">
-          <h3 className="text-lg font-semibold">Undeploy {skill.name} from…</h3>
+          <h3 className="text-lg font-semibold">从…卸载 {skill.name}</h3>
           <p className="text-sm text-neutral-600 mt-1">
-            {deployments.length} deployment(s). This only removes the deployment (link/copy), not the source.
+            {deployments.length} 个部署。此操作只移除部署(链接/副本),不删源文件。
           </p>
         </div>
         <div className="p-4 space-y-1.5 max-h-[50vh] overflow-auto">
@@ -696,7 +726,7 @@ function UndeployFromDialog({
                 disabled={busy}
                 className="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Undeploy
+                卸载
               </button>
             </div>
           ))}
@@ -707,7 +737,7 @@ function UndeployFromDialog({
             disabled={busy}
             className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
           >
-            Close
+            关闭
           </button>
         </div>
       </div>
@@ -737,19 +767,19 @@ function RemoveFromRegistryConfirm({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-4 border-b border-neutral-200">
-          <h3 className="text-lg font-semibold text-red-700">Remove "{skill.name}" from Registry?</h3>
+          <h3 className="text-lg font-semibold text-red-700">从注册表移除「{skill.name}」?</h3>
         </div>
         <div className="p-4 space-y-2 text-sm text-neutral-700">
           <p>
-            This will <span className="font-medium text-red-700">permanently remove</span> the skill from the registry:
+            此操作将<span className="font-medium text-red-700">永久</span>从注册表移除该 skill:
           </p>
           <ul className="list-disc list-inside space-y-1 text-neutral-600 ml-2">
-            <li>Back up the central repo entity (if any) to the backups directory.</li>
-            <li>Undeploy from all tools ({skill.sources.length} source(s) registered).</li>
-            <li>Delete the skill record and all its sources from the registry.</li>
+            <li>将中央仓库实体(如有)备份到备份目录。</li>
+            <li>从所有工具卸载(已登记 {skill.sources.length} 个 source)。</li>
+            <li>从注册表删除 skill 记录及其所有 source。</li>
           </ul>
           <p className="text-xs text-neutral-500 mt-2">
-            This cannot be undone. The backup is kept in the Backups page for manual restore.
+            此操作不可撤销。备份保留在 Backups 页,可手动恢复。
           </p>
         </div>
         <div className="p-4 border-t border-neutral-200 flex justify-end gap-2">
@@ -758,14 +788,14 @@ function RemoveFromRegistryConfirm({
             disabled={busy}
             className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
           >
-            Cancel
+            取消
           </button>
           <button
             onClick={onConfirm}
             disabled={busy}
             className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {busy ? 'Removing…' : 'Remove from Registry'}
+            {busy ? '移除中…' : '从注册表移除'}
           </button>
         </div>
       </div>
@@ -804,28 +834,28 @@ function SkillRow({
           )}
           {conflict && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
-              conflict
+              冲突
             </span>
           )}
         </div>
         <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
           <span className="text-xs text-neutral-400">
-            {skill.sources.length} source(s)
+            {skill.sources.length} 个 source
           </span>
           <button
             onClick={onDeploy}
             className="px-3 py-1 bg-neutral-700 text-white rounded text-xs hover:bg-neutral-800"
           >
-            Deploy to…
+            部署到…
           </button>
         </div>
       </div>
 
       {expanded && (
         <div className="border-t border-neutral-200 bg-neutral-50 p-3">
-          <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-2">Sources</h4>
+          <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-2">Source</h4>
           {skill.sources.length === 0 ? (
-            <p className="text-xs text-neutral-400">No sources registered.</p>
+            <p className="text-xs text-neutral-400">未登记任何 source。</p>
           ) : (
             <ul className="space-y-1.5">
               {skill.sources.map((src) => (
@@ -895,7 +925,7 @@ function ConflictModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-4 border-b border-neutral-200">
-          <h3 className="text-lg font-semibold">Resolve source conflict</h3>
+          <h3 className="text-lg font-semibold">解决 source 冲突</h3>
           <p className="text-sm text-neutral-600 mt-1">
             检测到 {distinctVersions} 个版本的 <span className="font-medium">{skill.name}</span>
             ,请选择使用哪个版本。
@@ -952,14 +982,14 @@ function ConflictModal({
             onClick={onCancel}
             className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded"
           >
-            Cancel
+            取消
           </button>
           <button
             onClick={handleConfirm}
             disabled={selectedId === null}
             className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Use this source
+            使用此 source
           </button>
         </div>
       </div>
@@ -968,6 +998,88 @@ function ConflictModal({
 }
 
 // ===== Deploy 对话框(#6)=====
+
+function ViewMdSourcePickerModal({
+  skill,
+  onPick,
+  onCancel
+}: {
+  skill: SkillView
+  onPick: (source: SkillSourceView) => void
+  onCancel: () => void
+}) {
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const handleConfirm = () => {
+    const picked = skill.sources.find((s) => s.id === selectedId)
+    if (picked) onPick(picked)
+  }
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-neutral-200">
+          <h3 className="text-lg font-semibold">选择要查看的 source</h3>
+          <p className="text-sm text-neutral-600 mt-1">
+            <span className="font-medium">{skill.name}</span> 存在多个 source,请选择要查看 SKILL.md 的 source。
+          </p>
+        </div>
+        <div className="p-4 space-y-2">
+          {skill.sources.map((src) => (
+            <label
+              key={src.id}
+              className={`block border rounded-md p-3 cursor-pointer transition-colors ${
+                selectedId === src.id
+                  ? 'border-blue-500 bg-blue-50'
+                  : 'border-neutral-200 hover:bg-neutral-50'
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="viewmd-source"
+                  value={src.id}
+                  checked={selectedId === src.id}
+                  onChange={() => setSelectedId(src.id)}
+                  className="mt-1"
+                />
+                <div className="flex-1 min-w-0 text-xs">
+                  <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+                    <span className="text-neutral-500">path</span>
+                    <code className="text-neutral-700 break-all">{src.path}</code>
+                    <span className="text-neutral-500">hash</span>
+                    <code className="text-neutral-700 break-all">{src.hash}</code>
+                    <span className="text-neutral-500">source_type</span>
+                    <span className="text-neutral-700">{src.source_type}</span>
+                  </div>
+                </div>
+              </div>
+            </label>
+          ))}
+        </div>
+        <div className="p-4 border-t border-neutral-200 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded"
+          >
+            取消
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={selectedId === null}
+            className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            查看
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function DeployDialog({
   skill,
@@ -1026,7 +1138,7 @@ function DeployDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-4 border-b border-neutral-200">
-          <h3 className="text-lg font-semibold">Deploy {skill.name}</h3>
+          <h3 className="text-lg font-semibold">部署 {skill.name}</h3>
           <p className="text-sm text-neutral-600 mt-1">
             Source: <code className="text-xs break-all">{sourcePath}</code>
           </p>
@@ -1040,7 +1152,7 @@ function DeployDialog({
           )}
 
           <div>
-            <label className="block text-sm font-medium text-neutral-700 mb-1">Target tool</label>
+            <label className="block text-sm font-medium text-neutral-700 mb-1">目标工具</label>
             <select
               value={selectedTool}
               onChange={(e) => setSelectedTool(e.target.value)}
@@ -1048,7 +1160,7 @@ function DeployDialog({
               className="w-full border border-neutral-300 rounded px-2 py-1.5 text-sm"
             >
               {availableTools.length === 0 && (
-                <option value="" disabled>No tools available (enable in Settings)</option>
+                <option value="" disabled>无可用工具(请在设置中启用)</option>
               )}
               {availableTools.map((t) => (
                 <option key={t.key} value={t.key}>
@@ -1059,7 +1171,7 @@ function DeployDialog({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-neutral-700 mb-1">Mode</label>
+            <label className="block text-sm font-medium text-neutral-700 mb-1">模式</label>
             <div className="flex gap-3">
               <label
                 className={`flex items-center gap-2 text-sm cursor-pointer ${!canSymlink ? 'opacity-50' : ''}`}
@@ -1068,7 +1180,7 @@ function DeployDialog({
                     ? '需要开启开发者模式或以管理员运行。选择此模式时将自动尝试 junction(仅限目录,同卷)。'
                     : canSymlink
                       ? ''
-                      : 'symlink is unavailable on this platform'
+                      : '此平台不支持 symlink'
                 }
               >
                 <input
@@ -1085,7 +1197,7 @@ function DeployDialog({
                     <span className="text-xs text-neutral-400 ml-1">
                       {isWindowsNormalUser
                         ? '(需要开发者模式/管理员;选此将自动尝试 junction)'
-                        : '(unavailable on this platform)'}
+                        : '(此平台不支持)'}
                     </span>
                   )}
                 </span>
@@ -1106,8 +1218,8 @@ function DeployDialog({
               {mode === 'symlink'
                 ? isWindowsNormalUser
                   ? 'symlink 不可用 — 将自动尝试 junction(目录场景),失败则降级 copy。'
-                  : 'Source updates auto-propagate (link is transparent).'
-                : 'Snapshot copy — source updates require manual redeploy.'}
+                  : '源更新自动生效(链接透明)。'
+                : '快照副本 — 源更新需手动重新部署。'}
             </p>
           </div>
         </div>
@@ -1118,14 +1230,14 @@ function DeployDialog({
             disabled={busy}
             className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
           >
-            Cancel
+            取消
           </button>
           <button
             onClick={handleDeploy}
             disabled={busy || !selectedTool}
             className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {busy ? 'Deploying…' : 'Deploy'}
+            {busy ? '部署中…' : '部署'}
           </button>
         </div>
       </div>
@@ -1163,7 +1275,7 @@ function ToolsPage() {
   }
 
   const handleUndeploy = async (skillId: number, targetTool: string, skillName: string) => {
-    if (!window.confirm(`Undeploy "${skillName}" from ${targetTool}?\n\nThis only removes the deployment (link/copy), not the source.`)) {
+    if (!window.confirm(`从 ${targetTool} 卸载「${skillName}」?\n\n此操作只移除部署(链接/副本),不删源文件。`)) {
       return
     }
     setBusy(`${skillId}:${targetTool}`)
@@ -1180,7 +1292,7 @@ function ToolsPage() {
 
   // #8: 从清单移除(仅删 deployments 记录,不碰磁盘)— 用于 drift 状态(目标已被用户删了)
   const handleRemoveFromManifest = async (skillId: number, targetTool: string, skillName: string) => {
-    if (!window.confirm(`Remove "${skillName}" from the deployment manifest for ${targetTool}?\n\nThe target is already gone from disk; this only cleans up the manifest record.`)) {
+    if (!window.confirm(`从 ${targetTool} 的部署清单移除「${skillName}」?\n\n目标已从磁盘移除,此操作只清理清单记录。`)) {
       return
     }
     setBusy(`${skillId}:${targetTool}`)
@@ -1203,7 +1315,7 @@ function ToolsPage() {
       const tool = tools.find((t) => t.config.key === targetTool)
       const drift = tool?.drifts.find((d) => d.skillId === skillId)
       if (!drift?.deployment) {
-        throw new Error('no deployment record to redeploy from')
+        throw new Error('没有可重新部署的部署记录')
       }
       await window.api.deploy(
         skillId,
@@ -1227,7 +1339,7 @@ function ToolsPage() {
           onClick={load}
           className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
         >
-          Refresh
+          刷新
         </button>
       </div>
 
@@ -1238,7 +1350,7 @@ function ToolsPage() {
       )}
 
       {tools.length === 0 ? (
-        <p className="text-neutral-400">No tools configured. Visit Settings to enable tools.</p>
+        <p className="text-neutral-400">未配置任何工具。请到设置中启用工具。</p>
       ) : (
         <ul className="space-y-3">
           {tools.map((tool) => (
@@ -1288,10 +1400,10 @@ function ToolCard({
         <div className="flex items-center gap-2">
           <span className="font-medium">{config.displayName}</span>
           {!config.exists && (
-            <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-500">missing</span>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-500">缺失</span>
           )}
           {config.enabled && config.exists && (
-            <span className="text-xs text-neutral-400">no skills dir</span>
+            <span className="text-xs text-neutral-400">无 skill 目录</span>
           )}
         </div>
       </li>
@@ -1307,21 +1419,21 @@ function ToolCard({
         <div className="flex items-center gap-2">
           <span className="text-neutral-400 text-xs select-none">{expanded ? '▼' : '▶'}</span>
           <span className="font-medium">{config.displayName}</span>
-          <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">found</span>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">已发现</span>
           {driftCount > 0 && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
-              {driftCount} drift
+              {driftCount} 个漂移
             </span>
           )}
           {external.length > 0 && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
-              {external.length} external
+              {external.length} 个外部
             </span>
           )}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-neutral-400">
-            {managed.length} deployed · {drifts.length} total
+            已部署 {managed.length} · 共 {drifts.length}
           </span>
         </div>
       </div>
@@ -1332,7 +1444,7 @@ function ToolCard({
             <code>{config.existingPaths[0]}</code>
           </p>
           {drifts.length === 0 ? (
-            <p className="text-xs text-neutral-400">No skills in this tool directory.</p>
+            <p className="text-xs text-neutral-400">该工具目录下无 skill。</p>
           ) : (
             <>
               {/* 自管部署分区(normal / source-updated / drift) */}
@@ -1354,7 +1466,7 @@ function ToolCard({
               {external.length > 0 && (
                 <div className="border-t border-dashed border-neutral-300 pt-2">
                   <p className="text-xs font-semibold text-neutral-500 uppercase mb-1.5">
-                    External skills (not managed by skill-switch)
+                    外部 skill(skill-switch 未管理)
                   </p>
                   <ul className="space-y-1.5">
                     {external.map((d) => (
@@ -1411,7 +1523,7 @@ function DriftRow({
               disabled={busy}
               className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
             >
-              Redeploy
+              重新部署
             </button>
             {/* #8: 从清单移除(目标已不在,只清清单记录) */}
             <button
@@ -1419,18 +1531,18 @@ function DriftRow({
               disabled={busy}
               className="px-2 py-0.5 bg-neutral-500 text-white rounded text-xs hover:bg-neutral-600 disabled:opacity-50"
             >
-              Remove from manifest
+              从清单移除
             </button>
           </>
         )}
         {drift.kind === 'source-updated' && (
           <button
-            onClick={onRedeploy}
-            disabled={busy}
-            className="px-2 py-0.5 bg-amber-600 text-white rounded text-xs hover:bg-amber-700 disabled:opacity-50"
-          >
-            Update
-          </button>
+              onClick={onRedeploy}
+              disabled={busy}
+              className="px-2 py-0.5 bg-amber-600 text-white rounded text-xs hover:bg-amber-700 disabled:opacity-50"
+            >
+              更新
+            </button>
         )}
         {drift.deployment !== null && drift.kind !== 'drift' && (
           <button
@@ -1438,11 +1550,11 @@ function DriftRow({
             disabled={busy}
             className="px-2 py-0.5 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50"
           >
-            Undeploy
+            卸载
           </button>
         )}
         {drift.kind === 'external' && (
-          <span className="text-xs text-neutral-400">not managed</span>
+          <span className="text-xs text-neutral-400">未管理</span>
         )}
       </div>
     </li>
@@ -1451,9 +1563,9 @@ function DriftRow({
 
 const DRIFT_BADGE: Record<string, { label: string; cls: string }> = {
   normal: { label: '✅', cls: 'bg-green-100 text-green-700' },
-  'source-updated': { label: '⚠️ source updated', cls: 'bg-amber-100 text-amber-800' },
-  drift: { label: '⚠️ drift', cls: 'bg-red-100 text-red-700' },
-  external: { label: '🆕 external', cls: 'bg-blue-100 text-blue-700' }
+  'source-updated': { label: '⚠️ 源已更新', cls: 'bg-amber-100 text-amber-800' },
+  drift: { label: '⚠️ 漂移', cls: 'bg-red-100 text-red-700' },
+  external: { label: '🆕 外部', cls: 'bg-blue-100 text-blue-700' }
 }
 
 // ===== Install 对话框(#7)=====
@@ -1487,21 +1599,21 @@ function InstallDialog({
       let result: InstallResultView
       if (tab === 'github') {
         if (!githubUrl.trim()) {
-          setError('Please enter a GitHub URL.')
+          setError('请输入 GitHub URL。')
           setBusy(false)
           return
         }
         result = await window.api.installFromGitHub(githubUrl.trim())
       } else if (tab === 'zip') {
         if (!zipPath) {
-          setError('Please select a ZIP file.')
+          setError('请选择 ZIP 文件。')
           setBusy(false)
           return
         }
         result = await window.api.installFromZip(zipPath)
       } else {
         if (!localPath) {
-          setError('Please select a directory.')
+          setError('请选择目录。')
           setBusy(false)
           return
         }
@@ -1525,7 +1637,7 @@ function InstallDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-4 border-b border-neutral-200">
-          <h3 className="text-lg font-semibold">Install skill</h3>
+          <h3 className="text-lg font-semibold">安装 skill</h3>
         </div>
 
         <div className="p-4 space-y-4">
@@ -1555,7 +1667,7 @@ function InstallDialog({
           {tab === 'github' && (
             <div>
               <label className="block text-sm font-medium text-neutral-700 mb-1">
-                GitHub repository URL
+                GitHub 仓库 URL
               </label>
               <input
                 type="text"
@@ -1566,7 +1678,7 @@ function InstallDialog({
                 className="w-full border border-neutral-300 rounded px-2 py-1.5 text-sm"
               />
               <p className="text-xs text-neutral-400 mt-1">
-                Single-skill repo or sub-path (e.g. <code>/tree/main/skills/grilling</code>).
+                单 skill 仓库或子路径(如 <code>/tree/main/skills/grilling</code>)。
               </p>
             </div>
           )}
@@ -1574,7 +1686,7 @@ function InstallDialog({
           {tab === 'zip' && (
             <div>
               <label className="block text-sm font-medium text-neutral-700 mb-1">
-                ZIP file
+                ZIP 文件
               </label>
               <div className="flex items-center gap-2">
                 <button
@@ -1582,7 +1694,7 @@ function InstallDialog({
                   disabled={busy}
                   className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
                 >
-                  Select ZIP…
+                  选择 ZIP…
                 </button>
                 {zipPath && (
                   <code className="text-xs text-neutral-600 truncate">{zipPath}</code>
@@ -1594,7 +1706,7 @@ function InstallDialog({
           {tab === 'local-dir' && (
             <div>
               <label className="block text-sm font-medium text-neutral-700 mb-1">
-                Local directory (indexed, files not moved)
+                本地目录(索引模式,不搬文件)
               </label>
               <div className="flex items-center gap-2">
                 <button
@@ -1602,14 +1714,14 @@ function InstallDialog({
                   disabled={busy}
                   className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
                 >
-                  Select directory…
+                  选择目录…
                 </button>
                 {localPath && (
                   <code className="text-xs text-neutral-600 truncate">{localPath}</code>
                 )}
               </div>
               <p className="text-xs text-neutral-400 mt-1">
-                Registers the directory as an indexed source — files stay in place.
+                将目录登记为索引 source — 文件保留在原位。
               </p>
             </div>
           )}
@@ -1621,14 +1733,14 @@ function InstallDialog({
             disabled={busy}
             className="px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100 rounded disabled:opacity-50"
           >
-            Cancel
+            取消
           </button>
           <button
             onClick={handleInstall}
             disabled={busy}
             className="px-4 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {busy ? 'Installing…' : tab === 'local-dir' ? 'Add' : 'Install'}
+            {busy ? '安装中…' : tab === 'local-dir' ? '添加' : '安装'}
           </button>
         </div>
       </div>
@@ -1710,13 +1822,13 @@ function SettingsPage() {
     run(() => window.api.setBackupRetention(retention))
 
   if (!settings) {
-    return <p className="text-neutral-400">Loading settings…</p>
+    return <p className="text-neutral-400">加载设置中…</p>
   }
 
   return (
     <div className="space-y-6 max-w-3xl">
       <div>
-        <h2 className="text-xl font-semibold mb-4">Tools</h2>
+        <h2 className="text-xl font-semibold mb-4">工具</h2>
         <ul className="space-y-3">
           {settings.tools.map((tool) => (
             <ToolPanel
@@ -1735,17 +1847,17 @@ function SettingsPage() {
         </ul>
 
         <div className="mt-4 border border-dashed border-neutral-300 rounded-md p-3">
-          <h3 className="font-medium mb-2 text-sm">Add custom tool</h3>
+          <h3 className="font-medium mb-2 text-sm">添加自定义工具</h3>
           <div className="grid grid-cols-2 gap-2 mb-2">
             <input
               className="border border-neutral-300 rounded px-2 py-1 text-sm"
-              placeholder="key (e.g. mytool)"
+              placeholder="key(如 mytool)"
               value={newTool.key}
               onChange={(e) => setNewTool({ ...newTool, key: e.target.value })}
             />
             <input
               className="border border-neutral-300 rounded px-2 py-1 text-sm"
-              placeholder="Display name"
+              placeholder="显示名"
               value={newTool.displayName}
               onChange={(e) => setNewTool({ ...newTool, displayName: e.target.value })}
             />
@@ -1753,7 +1865,7 @@ function SettingsPage() {
           <textarea
             className="w-full border border-neutral-300 rounded px-2 py-1 text-sm mb-2"
             rows={2}
-            placeholder="Absolute path(s), one per line"
+            placeholder="绝对路径,每行一个"
             value={newTool.paths}
             onChange={(e) => setNewTool({ ...newTool, paths: e.target.value })}
           />
@@ -1762,15 +1874,15 @@ function SettingsPage() {
             disabled={busy}
             className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
           >
-            Add
+            添加
           </button>
         </div>
       </div>
 
       <div>
-        <h2 className="text-xl font-semibold mb-4">Backup</h2>
+        <h2 className="text-xl font-semibold mb-4">备份</h2>
         <label className="block text-sm text-neutral-600 mb-1">
-          Backup retention (number of backups to keep)
+          备份保留数(保留的备份数量)
         </label>
         <div className="flex items-center gap-2">
           <input
@@ -1785,13 +1897,13 @@ function SettingsPage() {
             disabled={busy}
             className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50"
           >
-            Save
+            保存
           </button>
         </div>
       </div>
 
       <div>
-        <h2 className="text-xl font-semibold mb-4">Platform capability</h2>
+        <h2 className="text-xl font-semibold mb-4">平台能力</h2>
         <div className="border border-neutral-200 rounded-md p-3 text-sm space-y-1">
           <div>
             <span className="text-neutral-500">platform:</span>{' '}
@@ -1843,7 +1955,7 @@ function ToolPanel({
           <span className="font-medium">{tool.displayName}</span>
           {tool.isCustom && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
-              custom
+              自定义
             </span>
           )}
           <span
@@ -1853,7 +1965,7 @@ function ToolPanel({
                 : 'bg-neutral-200 text-neutral-500'
             }`}
           >
-            {tool.exists ? 'found' : 'missing'}
+            {tool.exists ? '已发现' : '缺失'}
           </span>
         </div>
         {!tool.isCustom && (
@@ -1864,7 +1976,7 @@ function ToolPanel({
               onChange={(e) => onToggle(tool.key, e.target.checked)}
               disabled={busy}
             />
-            <span>{tool.enabled ? 'enabled' : 'disabled'}</span>
+            <span>{tool.enabled ? '已启用' : '已禁用'}</span>
           </label>
         )}
       </div>
@@ -1880,7 +1992,7 @@ function ToolPanel({
           disabled={busy}
           className="px-3 py-1 bg-neutral-700 text-white rounded text-xs hover:bg-neutral-800 disabled:opacity-50"
         >
-          Save paths
+          保存路径
         </button>
         {tool.isCustom && (
           <button
@@ -1888,7 +2000,7 @@ function ToolPanel({
             disabled={busy}
             className="px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 disabled:opacity-50"
           >
-            Remove
+            移除
           </button>
         )}
       </div>

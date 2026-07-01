@@ -543,10 +543,10 @@ describe('removeFromRegistry', () => {
     })
 
     expect(result.skillName).toBe(skillName)
-    expect(result.backedUp).toBe(false)
+    expect(result.backedUp).toBe(true)
     expect(result.undeployedTools).toEqual(['codex'])
-    // 无新备份(中央实体不存在)
-    expect(listBackups(backups.dir).length).toBe(beforeBackups)
+    // 无中央实体 → 备份 primary source(新版行为:Fix #5)
+    expect(listBackups(backups.dir).length).toBe(beforeBackups + 1)
     // 部署已清理
     expect(existsSync(targetDir)).toBe(false)
     expect(getDeploymentsBySkillId(db, skillId)).toHaveLength(0)

@@ -116,13 +116,19 @@ export function removeFromRegistry(
   const centralEntityPath = join(opts.centralSkillsDir, skill.name)
   const centralEntityExists = existsSync(centralEntityPath)
 
-  // Step 2 (事务外):中央实体存在 → 备份(拷贝,不动原目录)
+  // Step 2 (事务外):备份 skill 内容
+  // - 中央实体存在 → 备份中央实体(常规场景)
+  // - 中央实体不存在 → 备份 primary source(从外部索引的 skill,无中央实体)
+  //   保证无论 skill 来自哪里,Remove from Registry 前都有备份兜底
   let backedUp = false
-  if (centralEntityExists) {
+  const backupSourcePath = centralEntityExists
+    ? centralEntityPath
+    : skill.primary_source_path
+  if (backupSourcePath && existsSync(backupSourcePath)) {
     createBackup({
       skillName: skill.name,
       targetTool: 'registry',
-      sourcePath: centralEntityPath,
+      sourcePath: backupSourcePath,
       backupsDir: opts.backupsDir
     })
     backedUp = true

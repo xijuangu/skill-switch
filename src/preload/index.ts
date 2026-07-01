@@ -27,8 +27,8 @@ const api = {
     ipcRenderer.invoke('removeFromManifest', skillId, targetTool),
   getDeploymentsForSkill: (skillId: number) =>
     ipcRenderer.invoke('getDeploymentsForSkill', skillId),
-  viewSkillMd: (skillId: number) =>
-    ipcRenderer.invoke('viewSkillMd', skillId),
+  viewSkillMd: (skillId: number, sourcePath?: string) =>
+    ipcRenderer.invoke('viewSkillMd', skillId, sourcePath),
   removeFromRegistry: (skillId: number) =>
     ipcRenderer.invoke('removeFromRegistry', skillId),
   // Install(#7)
