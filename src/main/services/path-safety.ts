@@ -1,4 +1,5 @@
-import { isAbsolute, posix, relative, resolve, sep, win32 } from 'path'
+import { lstatSync, realpathSync } from 'fs'
+import { isAbsolute, join, posix, relative, resolve, sep, win32 } from 'path'
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
 const PATH_SEPARATORS = /[\\/]/
@@ -75,4 +76,99 @@ export function isPathWithin(root: string, candidate: string): boolean {
   const pathApi = usesWindowsSyntax ? win32 : posix
   const rel = pathApi.relative(pathApi.resolve(root), pathApi.resolve(candidate))
   return rel.length > 0 && rel !== '..' && !rel.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(rel)
+}
+
+/**
+ * Normalize a path for safety comparison: resolve lexically, then resolve
+ * symlinks if the path exists on disk. Non-existent paths (e.g. a fresh
+ * deploy target that hasn't been created yet) fall back to resolving the
+ * longest existing ancestor's realpath and re-appending the non-existent
+ * tail — this matters on macOS where `tmpdir()` lives under `/var/folders`
+ * (a symlink to `/private/var/folders`), so a fresh target `/var/.../child`
+ * must normalize to `/private/var/.../child` to stay consistent with its
+ * existing source parent.
+ */
+function normalizeForCompare(p: string): string {
+  const resolved = resolve(p)
+  try {
+    return realpathSync(resolved)
+  } catch {
+    return resolveRealpathPrefix(resolved)
+  }
+}
+
+/**
+ * Walk up `resolved` to the longest existing ancestor, realpath *that*
+ * (resolving symlinked prefixes like macOS `/var` → `/private/var`), then
+ * re-append the non-existent tail. If no ancestor exists at all, return the
+ * lexical resolution unchanged — the comparison still works lexically.
+ */
+function resolveRealpathPrefix(resolved: string): string {
+  let existing = resolved
+  const tail: string[] = []
+  while (existing.length > 1) {
+    try {
+      lstatSync(existing)
+      break
+    } catch {
+      const idx = existing.lastIndexOf(sep)
+      if (idx <= 0) return resolved // reached root without an existing ancestor
+      tail.unshift(existing.slice(idx + 1))
+      existing = existing.slice(0, idx)
+    }
+  }
+  let base: string
+  try {
+    base = realpathSync(existing)
+  } catch {
+    base = existing
+  }
+  return tail.length === 0 ? base : join(base, ...tail)
+}
+
+/**
+ * issue #24: Assert that deploying from sourcePath to targetPath is safe —
+ * no self-deploy and no dangerous directory overlap that could delete source
+ * contents during backup/cleanup.
+ *
+ * MUST run before any backup, target cleanup, or deployment write. Rejects:
+ * 1. source === target (lexical) — literal self-deploy
+ * 2. source === target (realpath, e.g. symlink alias to source) — unless
+ *    `allowExistingSymlinkToSource` is set, which means the target is an
+ *    existing managed symlink/junction deployment pointing back to the
+ *    source and the caller is doing a legit update / mode-switch (cleanup
+ *    unlinks the link safely before re-deploying).
+ * 3. target inside source — recursive copy / cleanup deletes source contents
+ * 4. source inside target — cleanup of target would delete the source
+ *
+ * The realpath check resolves symlinks so a symlink alias to the source is
+ * still rejected on fresh deploy / external overwrite. copy / symlink /
+ * junction and external-overwrite paths all go through this guard.
+ */
+export function assertSafeDeployTarget(
+  sourcePath: string,
+  targetPath: string,
+  options?: { allowExistingSymlinkToSource?: boolean }
+): void {
+  // Lexical self-deploy: always reject, regardless of existing deployments.
+  if (resolve(sourcePath) === resolve(targetPath)) {
+    throw new Error('cannot deploy skill to its own source path')
+  }
+  const src = normalizeForCompare(sourcePath)
+  const tgt = normalizeForCompare(targetPath)
+  // Realpath self-deploy (symlink alias to source): reject unless the caller
+  // confirmed the target is an existing managed symlink/junction deployment.
+  if (src === tgt && !options?.allowExistingSymlinkToSource) {
+    throw new Error('cannot deploy skill to its own source path')
+  }
+  if (isPathWithin(src, tgt)) {
+    throw new Error(
+      'target path is inside source path; deployment would recurse into source'
+    )
+  }
+  if (isPathWithin(tgt, src)) {
+    throw new Error(
+      'source path is inside target path; cleanup would delete source'
+    )
+  }
 }

@@ -39,6 +39,7 @@ import {
 import { getSkillById } from '../db/dao/skills'
 import { hashDir } from './hash'
 import { createBackup } from './backup'
+import { assertAbsolutePath, assertSafeDeployTarget } from './path-safety'
 
 /**
  * 按已知 mode 清理 targetPath。
@@ -220,6 +221,23 @@ export function resolveActualMode(
  * - external-overwritten:外部 skill 覆盖(清单无记录但目标存在,先备份再覆盖)
  */
 export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
+  // Step 0 (issue #24): 拒绝自部署 / 父子目录重叠,在任何备份、清理、清单写入之前。
+  // 该校验由主进程 service 强制执行,不依赖 UI。
+  //
+  // 先查现有部署记录:若存在 managed symlink/junction 部署,target 的 realpath
+  // 合法地等于 source(链接就是指向源的)。此时 mode-switch / 更新是合法操作
+  // (cleanup 会先 unlink 旧链接,不会删源),因此传 allowExistingSymlinkToSource
+  // 跳过 realpath-自部署 检查。lexical 包含检查始终执行。
+  const existing = getDeploymentBySkillAndTool(db, opts.skillId, opts.targetTool)
+  assertSafeDeployTarget(opts.sourcePath, opts.targetDir, {
+    // 仅当现有部署是 symlink/junction 时,target 的 realpath 才合法地等于源
+    // (链接指向源);copy 模式的 target 是独立目录,realpath 不同于源,无需豁免,
+    // 且不应豁免以保持语义精确。
+    allowExistingSymlinkToSource:
+      existing != null &&
+      (existing.mode === 'symlink' || existing.mode === 'junction')
+  })
+
   // Step 1: 算源 hash(源不存在则抛错,与原行为一致)
   const sourceHash = hashDir(opts.sourcePath)
 
@@ -233,8 +251,7 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
   let degradedFrom = resolved.degradedFrom
   let degradeReason = resolved.degradeReason
 
-  // Step 3: 查现有部署 + 目标是否存在
-  const existing = getDeploymentBySkillAndTool(db, opts.skillId, opts.targetTool)
+  // Step 3: 目标是否存在(existing 已在 Step 0 查过)
   const targetExists = existsSync(opts.targetDir)
   if (
     existing?.target_path != null &&
@@ -348,6 +365,64 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
     ...(degradedFrom !== undefined ? { degradedFrom } : {}),
     ...(degradeReason !== undefined ? { degradeReason } : {})
   }
+}
+
+/**
+ * issue #22:漂移"重新部署"——从 deployment 清单读取精确 target_path 与
+ * source_path,直接在原位置重建,不依赖当前工具配置重新推导,也不信任
+ * renderer 提供的任意路径。
+ *
+ * 与 `deploySkill` 的区别:`deploy` 接收 renderer 传入的 targetRoot(工具根
+ * 目录),由主进程拼接 skill name 得到 target_path;`redeploySkill` 完全不
+ * 接收路径参数,target_path / source_path 均来自清单(首次部署时由主进程
+ * 写入,是 trust anchor)。
+ *
+ * 失败语义(满足 issue #22 验收):source 缺失、target 父目录不可写等错误
+ * 在 `deploySkill` 内部抛出,且发生在任何 `upsertDeployment` 之前,因此
+ * deployment 清单不会被修改。
+ *
+ * @throws 无 deployment 记录(应改用 deploy)
+ * @throws deployment.target_path 为 null(legacy unresolved 记录)
+ */
+export interface RedeployOptions {
+  skillName: string
+  mode: DeployMode
+  backupsDir: string
+  canSymlink: boolean
+  canJunction: boolean
+}
+
+export function redeploySkill(
+  db: DB,
+  skillId: number,
+  targetTool: string,
+  opts: RedeployOptions
+): DeployResult {
+  const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
+  if (!deployment) {
+    throw new Error(
+      `no deployment record for skill ${opts.skillName} on tool ${targetTool}; use deploy instead`
+    )
+  }
+  if (deployment.target_path == null) {
+    throw new Error(
+      'deployment target path is unresolved; remove it from the manifest before redeploying'
+    )
+  }
+  // issue #22: 用清单记录的精确 target_path 与 source_path,不 re-derive,
+  // 不信任 renderer。target_path / source_path 由主进程在首次部署时写入。
+  const targetDir = assertAbsolutePath(deployment.target_path, 'recorded target_path')
+  return deploySkill(db, {
+    skillId,
+    skillName: opts.skillName,
+    targetTool,
+    mode: opts.mode,
+    sourcePath: deployment.source_path,
+    targetDir,
+    backupsDir: opts.backupsDir,
+    canSymlink: opts.canSymlink,
+    canJunction: opts.canJunction
+  })
 }
 
 /**

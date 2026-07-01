@@ -37,6 +37,7 @@ import { getAllSkills, getSkillById } from '../db/dao/skills'
 import {
   assertRegisteredSkillSource,
   computeConflict,
+  filterSourcesByEnabledTools,
   reconcileIndexedSources,
   removeFromRegistry
 } from '../services/registry'
@@ -45,6 +46,7 @@ import {
   deploySkill,
   detectDriftsForTool,
   inspectDeployTarget,
+  redeploySkill,
   undeploySkill
 } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
@@ -181,13 +183,25 @@ export function registerIpcHandlers(db: DB): void {
   })
 
   ipcMain.handle('getSkills', async () => {
-    // 在 IPC 边界把 sources 折算成冲突状态,UI 只读不计算
+    // issue #20:禁用预设工具后,技能页应隐藏仅来自该工具配置路径的 source,
+    // 并基于过滤后的 source 重算冲突状态。DB 记录保留,重新启用工具并扫描后
+    // source 自然恢复显示(过滤是只读的,不删 DB)。
+    //
+    // 一个 skill 的所有 source 都来自已禁用工具时,不再作为当前可部署 skill 展示。
+    const settings = readSettings(SETTINGS_PATH)
+    const toolConfigs = resolveToolConfigs(settings, homedir())
     const skills = getAllSkills(db)
-    const out: SkillWithConflict[] = skills.map((s) => ({
-      ...s,
-      conflict: computeConflict(s.sources, s.id),
-      deployments: getDeploymentsBySkillId(db, s.id)
-    }))
+    const out: SkillWithConflict[] = []
+    for (const s of skills) {
+      const visibleSources = filterSourcesByEnabledTools(s.sources, toolConfigs)
+      if (visibleSources.length === 0) continue
+      out.push({
+        ...s,
+        sources: visibleSources,
+        conflict: computeConflict(visibleSources, s.id),
+        deployments: getDeploymentsBySkillId(db, s.id)
+      })
+    }
     return out
   })
 
@@ -381,6 +395,26 @@ export function registerIpcHandlers(db: DB): void {
       throw new Error(`skill not found: ${safeSkillId}`)
     }
     undeploySkill(db, safeSkillId, safeTool)
+  })
+
+  // issue #22:漂移"重新部署"——从 deployment 清单读取精确 target_path,
+  // 不接收 renderer 提供的任意路径,不依赖当前工具配置重新推导。
+  ipcMain.handle('redeploy', async (_e, skillId: number, targetTool: string, mode: DeployMode) => {
+    const safeSkillId = assertInteger(skillId, 'skillId')
+    const safeTool = validateToolKey(targetTool)
+    const safeMode = assertDeployMode(mode)
+    const skill = getSkillById(db, safeSkillId)
+    if (!skill) {
+      throw new Error(`skill not found: ${safeSkillId}`)
+    }
+    const settings = readSettings(SETTINGS_PATH)
+    return redeploySkill(db, safeSkillId, safeTool, {
+      skillName: skill.name,
+      mode: safeMode,
+      backupsDir: BACKUPS_DIR,
+      canSymlink: settings.platform.canSymlink,
+      canJunction: settings.platform.canJunction
+    })
   })
 
   // ===== Drift actions(切片 #8)=====

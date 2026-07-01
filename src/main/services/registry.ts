@@ -10,9 +10,9 @@
 // (removeFromRegistry 有副作用:备份 + 卸载部署 + 删文件,但通过 opts 注入路径,无 Electron 依赖)
 
 import { existsSync, rmSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import type { DB } from '../db/database'
-import type { ConflictStatus, SkillSource } from '../types'
+import type { ConflictStatus, SkillSource, ToolConfig } from '../types'
 import {
   deleteSourceById,
   deleteSourcesBySkillId,
@@ -59,6 +59,50 @@ export function computeConflict(
 export function getConflictStatus(db: DB, skillId: number): ConflictStatus {
   const sources = getSourcesBySkillId(db, skillId)
   return computeConflict(sources, skillId)
+}
+
+/**
+ * issue #20:根据当前已启用的工具配置过滤 source 列表(纯函数,只读过滤,不删 DB)。
+ *
+ * 禁用一个预设工具后,技能页不应继续把该工具路径下扫描得到的 source 当作当前可用
+ * source 展示。但禁用只改变可见性,不应误删本地文件;重新启用并扫描后应能恢复发现。
+ *
+ * 规则:
+ * - central-repo source 始终保留(中央仓库不依赖任何工具配置)
+ * - indexed source 的 path 在某个 enabled 工具的 paths 下 → 保留
+ * - indexed source 的 path 不在任何工具(enabled 或 disabled)的 paths 下 → 保留
+ *   (用户通过"添加本地目录"登记的 source,不因禁用无关工具而隐藏)
+ * - indexed source 的 path 仅在 disabled 工具的 paths 下(不在任何 enabled 工具下)→ 隐藏
+ *
+ * 该函数只过滤,不删除 DB 记录。重新启用工具后,source 自然重新显示(DB 记录从未删除,
+ * 只是过滤后不再隐藏)。调用方应在过滤后用 `computeConflict` 基于可见 source 重算冲突。
+ *
+ * @param sources 某 skill 的全部 source(按 discovered_at ASC)
+ * @param toolConfigs 当前解析出的全部工具配置(enabled + disabled,预设 + 自定义)
+ * @returns 过滤后的 source 列表(保持原顺序)
+ */
+export function filterSourcesByEnabledTools(
+  sources: SkillSource[],
+  toolConfigs: ToolConfig[]
+): SkillSource[] {
+  const enabledRoots = toolConfigs
+    .filter((c) => c.enabled)
+    .flatMap((c) => c.paths)
+    .map((p) => resolve(p))
+  const allRoots = toolConfigs
+    .flatMap((c) => c.paths)
+    .map((p) => resolve(p))
+
+  return sources.filter((source) => {
+    if (source.source_type === 'central-repo') return true
+    const srcPath = resolve(source.path)
+    // 在某个 enabled 工具路径下 → 保留
+    if (enabledRoots.some((root) => isPathWithin(root, srcPath))) return true
+    // 不在任何工具(enabled + disabled)路径下 = 用户添加的本地 source → 保留
+    const underAny = allRoots.some((root) => isPathWithin(root, srcPath))
+    // 仅在 disabled 工具路径下 → 隐藏
+    return !underAny
+  })
 }
 
 /**

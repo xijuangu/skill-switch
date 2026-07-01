@@ -7,6 +7,7 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
@@ -18,6 +19,7 @@ import {
   detectDrift,
   detectDriftsForTool,
   inspectDeployTarget,
+  redeploySkill,
   resolveActualMode
 } from '../src/main/services/deployer'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -1047,6 +1049,7 @@ describe('deployer service', () => {
 
   // ===== issue #9:junction fallback 服务层测试 =====
   describe('junction fallback (issue #9)', () => {
+
     describe('resolveActualMode (纯函数,覆盖所有分支)', () => {
       test('(a) canSymlink=true + 请求 symlink → symlink,无降级', () => {
         const r = resolveActualMode('symlink', true, false, true)
@@ -1273,6 +1276,520 @@ describe('deployer service', () => {
 
       src.cleanup()
       target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+  })
+
+  // ===== issue #24:自部署 / 父子目录重叠守卫(deployer service seam)=====
+  // 验收:拒绝发生在任何备份、目标清理和 deployment 写入之前,FS 与 DB 完全不变。
+  describe('issue #24 self-deploy guard', () => {
+    test('source === target → throw,FS+DB 完全不变(无备份、无清单、源内容完好)', () => {
+      const src = createTempDir('ss-src-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'self', '---\nname: self\n---\noriginal\n')
+      const skillId = upsertSkill(db, 'self', skillDir)
+      const backupsBefore = listBackups(backups.dir).length
+
+      expect(() =>
+        deploySkill(db, {
+          skillId,
+          skillName: 'self',
+          targetTool: 'codex',
+          mode: 'copy',
+          sourcePath: skillDir,
+          targetDir: skillDir, // 自部署
+          backupsDir: backups.dir,
+          canSymlink: true,
+          canJunction: false
+        })
+      ).toThrow(/own source path/)
+
+      // 无新备份
+      expect(listBackups(backups.dir)).toHaveLength(backupsBefore)
+      // 无清单记录
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')).toBeUndefined()
+      // 源内容完好(没被清理、没被覆盖)
+      expect(readFileSync(join(skillDir, 'SKILL.md'), 'utf-8')).toBe(
+        '---\nname: self\n---\noriginal\n'
+      )
+
+      src.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('target inside source → throw,FS+DB 完全不变', () => {
+      const src = createTempDir('ss-src-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'parent', '---\nname: parent\n---\noriginal\n')
+      const skillId = upsertSkill(db, 'parent', skillDir)
+      const targetInside = join(skillDir, 'child') // 目标嵌在源里
+      const backupsBefore = listBackups(backups.dir).length
+
+      expect(() =>
+        deploySkill(db, {
+          skillId,
+          skillName: 'parent',
+          targetTool: 'codex',
+          mode: 'copy',
+          sourcePath: skillDir,
+          targetDir: targetInside,
+          backupsDir: backups.dir,
+          canSymlink: true,
+          canJunction: false
+        })
+      ).toThrow(/inside source/)
+
+      expect(listBackups(backups.dir)).toHaveLength(backupsBefore)
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')).toBeUndefined()
+      // 目标没被创建,源内容完好
+      expect(existsSync(targetInside)).toBe(false)
+      expect(readFileSync(join(skillDir, 'SKILL.md'), 'utf-8')).toBe(
+        '---\nname: parent\n---\noriginal\n'
+      )
+
+      src.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('source inside target → throw,FS+DB 完全不变(cleanup 会删源的隐患被拦截)', () => {
+      const src = createTempDir('ss-src-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      // skillDir 是 targetRoot 的子目录:target = parent,source = parent/inner
+      const targetRoot = src.dir
+      const skillDir = writeSkillDir(src.dir, 'inner', '---\nname: inner\n---\noriginal\n')
+      const skillId = upsertSkill(db, 'inner', skillDir)
+      const backupsBefore = listBackups(backups.dir).length
+
+      expect(() =>
+        deploySkill(db, {
+          skillId,
+          skillName: 'inner',
+          targetTool: 'codex',
+          mode: 'copy',
+          sourcePath: skillDir,
+          targetDir: targetRoot, // source 在 target 内
+          backupsDir: backups.dir,
+          canSymlink: true,
+          canJunction: false
+        })
+      ).toThrow(/inside target/)
+
+      expect(listBackups(backups.dir)).toHaveLength(backupsBefore)
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')).toBeUndefined()
+      // 源内容完好(target 没被清理,否则会递归删掉 skillDir)
+      expect(readFileSync(join(skillDir, 'SKILL.md'), 'utf-8')).toBe(
+        '---\nname: inner\n---\noriginal\n'
+      )
+
+      backups.cleanup()
+      src.cleanup()
+      cleanupDb()
+    })
+
+    test('symlink 别名指回 source → throw(等同自部署),FS+DB 完全不变', () => {
+      const src = createTempDir('ss-src-')
+      const alias = createTempDir('ss-alias-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'aliased', '---\nname: aliased\n---\noriginal\n')
+      const skillId = upsertSkill(db, 'aliased', skillDir)
+      // 把 alias.dir 替换成指向 skillDir 的符号链接
+      rmSync(alias.dir, { recursive: true, force: true })
+      symlinkSync(skillDir, alias.dir)
+      const backupsBefore = listBackups(backups.dir).length
+
+      expect(() =>
+        deploySkill(db, {
+          skillId,
+          skillName: 'aliased',
+          targetTool: 'codex',
+          mode: 'copy',
+          sourcePath: skillDir,
+          targetDir: alias.dir, // realpath 后等于 skillDir
+          backupsDir: backups.dir,
+          canSymlink: true,
+          canJunction: false
+        })
+      ).toThrow(/own source path/)
+
+      expect(listBackups(backups.dir)).toHaveLength(backupsBefore)
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')).toBeUndefined()
+      expect(readFileSync(join(skillDir, 'SKILL.md'), 'utf-8')).toBe(
+        '---\nname: aliased\n---\noriginal\n'
+      )
+
+      src.cleanup()
+      alias.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('合法部署(两个独立目录)不受守卫影响 → 正常 created', () => {
+      const src = createTempDir('ss-src-')
+      const target = createTempDir('ss-target-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'legit', '---\nname: legit\n---\nbody\n')
+      const skillId = upsertSkill(db, 'legit', skillDir)
+      const targetDir = join(target.dir, 'legit')
+
+      const result = deploySkill(db, {
+        skillId,
+        skillName: 'legit',
+        targetTool: 'codex',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+
+      expect(result.action).toBe('created')
+      expect(getDeploymentBySkillAndTool(db, skillId, 'codex')).toBeDefined()
+      expect(readFileSync(join(targetDir, 'SKILL.md'), 'utf-8')).toBe(
+        '---\nname: legit\n---\nbody\n'
+      )
+
+      src.cleanup()
+      target.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+  })
+
+  // ===== issue #22:redeploy 使用清单记录的精确 target_path =====
+  // 验收:不 re-derive、不信任 renderer 路径;source 缺失/失败不改清单;
+  // 覆盖 TRAE 多路径、目标删除、配置 A→B、伪造路径、成功恢复。
+  describe('issue #22 redeploy uses exact target_path from manifest', () => {
+    test('TRAE 多路径:redeploy 重建到清单记录的 target_path,不碰其它配置路径', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const pathB = createTempDir('ss-pathB-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'grilling', '---\nname: grilling\n---\nv1\n')
+      const skillId = upsertSkill(db, 'grilling', skillDir)
+      const targetA = join(pathA.dir, 'grilling')
+
+      // 首次部署到 pathA(模拟 TRAE 多路径中的某一条)
+      deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'trae',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      // drift:用户手动删了 targetA
+      rmSync(targetA, { recursive: true, force: true })
+      // pathB 上有同名外部内容(模拟"新配置路径已有东西")
+      mkdirSync(join(pathB.dir, 'grilling'), { recursive: true })
+      writeFileSync(join(pathB.dir, 'grilling', 'SKILL.md'), 'should not be touched')
+
+      // redeploy:不传任何路径,主进程从清单读 target_path
+      const result = redeploySkill(db, skillId, 'trae', {
+        skillName: 'grilling',
+        mode: 'copy',
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+
+      expect(result.targetPath).toBe(targetA)
+      expect(existsSync(join(targetA, 'SKILL.md'))).toBe(true)
+      // pathB 没被碰
+      expect(readFileSync(join(pathB.dir, 'grilling', 'SKILL.md'), 'utf-8')).toBe(
+        'should not be touched'
+      )
+      // 清单仍指向 pathA
+      expect(getDeploymentBySkillAndTool(db, skillId, 'trae')!.target_path).toBe(targetA)
+
+      src.cleanup()
+      pathA.cleanup()
+      pathB.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('renderer 无法伪造路径:redeploySkill 签名不接收路径,只认清单', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const decoy = createTempDir('ss-decoy-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+
+      const skillDir = writeSkillDir(src.dir, 'forge', 'body')
+      const skillId = upsertSkill(db, 'forge', skillDir)
+      const targetA = join(pathA.dir, 'forge')
+      deploySkill(db, {
+        skillId,
+        skillName: 'forge',
+        targetTool: 'trae',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      rmSync(targetA, { recursive: true, force: true })
+
+      // redeploy 不接受任何路径参数 — decoy 永远不会被触及
+      const result = redeploySkill(db, skillId, 'trae', {
+        skillName: 'forge',
+        mode: 'copy',
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      expect(result.targetPath).toBe(targetA)
+      expect(existsSync(join(decoy.dir, 'forge'))).toBe(false)
+
+      src.cleanup()
+      pathA.cleanup()
+      decoy.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('目标手动删除后 redeploy → 在原 target_path 重建(copy)', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'gone', '---\nname: gone\n---\nbody\n')
+      const skillId = upsertSkill(db, 'gone', skillDir)
+      const targetA = join(pathA.dir, 'gone')
+      deploySkill(db, {
+        skillId,
+        skillName: 'gone',
+        targetTool: 'trae',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      rmSync(targetA, { recursive: true, force: true })
+      expect(existsSync(targetA)).toBe(false)
+
+      const result = redeploySkill(db, skillId, 'trae', {
+        skillName: 'gone',
+        mode: 'copy',
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      expect(result.action).toBe('updated')
+      expect(existsSync(join(targetA, 'SKILL.md'))).toBe(true)
+      expect(readFileSync(join(targetA, 'SKILL.md'), 'utf-8')).toBe(
+        '---\nname: gone\n---\nbody\n'
+      )
+
+      src.cleanup()
+      pathA.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('同 hash 同 mode → action=skipped(幂等,不动 FS 不动 DB)', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'stable', 'stable-content')
+      const skillId = upsertSkill(db, 'stable', skillDir)
+      const targetA = join(pathA.dir, 'stable')
+      deploySkill(db, {
+        skillId,
+        skillName: 'stable',
+        targetTool: 'trae',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      const deployedAtBefore = getDeploymentBySkillAndTool(db, skillId, 'trae')!.deployed_at
+
+      const result = redeploySkill(db, skillId, 'trae', {
+        skillName: 'stable',
+        mode: 'copy',
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      expect(result.action).toBe('skipped')
+      expect(getDeploymentBySkillAndTool(db, skillId, 'trae')!.deployed_at).toBe(deployedAtBefore)
+
+      src.cleanup()
+      pathA.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('源已更新 → action=updated,目标内容更新到新源', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'grilling', 'v1')
+      const skillId = upsertSkill(db, 'grilling', skillDir)
+      const targetA = join(pathA.dir, 'grilling')
+      deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'trae',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      writeFileSync(join(skillDir, 'SKILL.md'), 'v2-updated')
+
+      const result = redeploySkill(db, skillId, 'trae', {
+        skillName: 'grilling',
+        mode: 'copy',
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      expect(result.action).toBe('updated')
+      expect(readFileSync(join(targetA, 'SKILL.md'), 'utf-8')).toBe('v2-updated')
+
+      src.cleanup()
+      pathA.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('redeploy 可切换 mode(symlink→copy)在原 target_path', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'grilling', 'body')
+      const skillId = upsertSkill(db, 'grilling', skillDir)
+      const targetA = join(pathA.dir, 'grilling')
+      deploySkill(db, {
+        skillId,
+        skillName: 'grilling',
+        targetTool: 'trae',
+        mode: 'symlink',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      expect(lstatSync(targetA).isSymbolicLink()).toBe(true)
+
+      const result = redeploySkill(db, skillId, 'trae', {
+        skillName: 'grilling',
+        mode: 'copy',
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      expect(result.action).toBe('mode-switched')
+      expect(result.mode).toBe('copy')
+      expect(lstatSync(targetA).isSymbolicLink()).toBe(false)
+      expect(readFileSync(join(targetA, 'SKILL.md'), 'utf-8')).toBe('body')
+
+      src.cleanup()
+      pathA.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('无部署记录 → throw,不退化为 fresh deploy,FS+DB 不变', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'never', 'body')
+      const skillId = upsertSkill(db, 'never', skillDir)
+
+      expect(() =>
+        redeploySkill(db, skillId, 'trae', {
+          skillName: 'never',
+          mode: 'copy',
+          backupsDir: backups.dir,
+          canSymlink: true,
+          canJunction: false
+        })
+      ).toThrow(/no deployment record/)
+
+      expect(getDeploymentBySkillAndTool(db, skillId, 'trae')).toBeUndefined()
+      // pathA 下什么都没创建
+      expect(existsSync(join(pathA.dir, 'never'))).toBe(false)
+
+      src.cleanup()
+      pathA.cleanup()
+      backups.cleanup()
+      cleanupDb()
+    })
+
+    test('源缺失 → throw,deployment 清单不变(hashDir 抛错在 upsert 之前)', () => {
+      const src = createTempDir('ss-src-')
+      const pathA = createTempDir('ss-pathA-')
+      const backups = createTempDir('ss-backups-')
+      const { db, cleanup: cleanupDb } = createTempDb()
+      const skillDir = writeSkillDir(src.dir, 'gone-src', 'body')
+      const skillId = upsertSkill(db, 'gone-src', skillDir)
+      const targetA = join(pathA.dir, 'gone-src')
+      deploySkill(db, {
+        skillId,
+        skillName: 'gone-src',
+        targetTool: 'trae',
+        mode: 'copy',
+        sourcePath: skillDir,
+        targetDir: targetA,
+        backupsDir: backups.dir,
+        canSymlink: true,
+        canJunction: false
+      })
+      const depBefore = getDeploymentBySkillAndTool(db, skillId, 'trae')!
+      // 删源
+      rmSync(skillDir, { recursive: true, force: true })
+
+      expect(() =>
+        redeploySkill(db, skillId, 'trae', {
+          skillName: 'gone-src',
+          mode: 'copy',
+          backupsDir: backups.dir,
+          canSymlink: true,
+          canJunction: false
+        })
+      ).toThrow()
+
+      // 清单未改
+      const depAfter = getDeploymentBySkillAndTool(db, skillId, 'trae')!
+      expect(depAfter.deployed_at).toBe(depBefore.deployed_at)
+      expect(depAfter.source_hash_at_deploy).toBe(depBefore.source_hash_at_deploy)
+
+      src.cleanup()
+      pathA.cleanup()
       backups.cleanup()
       cleanupDb()
     })

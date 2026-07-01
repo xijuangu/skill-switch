@@ -17,16 +17,24 @@ type DeployMode = 'copy' | 'symlink'
 export default function App() {
   const [page, setPage] = useState<Page>('skills')
   const [skills, setSkills] = useState<SkillView[]>([])
+  const [tools, setTools] = useState<ToolWithDriftsView[]>([])
   const [scanning, setScanning] = useState(false)
   const [lastScan, setLastScan] = useState<ScanResult | null>(null)
 
+  // issue #21: 统一的 mutation 后重载机制——任何 deploy / undeploy / remove /
+  // install / scan 成功后都调用 refresh,一次性重读 skills + tools 权威状态,
+  // 避免各对话框分别遗漏或只刷新单个页面。自动刷新只读 DB,不触发全量磁盘扫描。
   const refresh = useCallback(async () => {
-    const result = await window.api.getSkills()
-    setSkills(result)
+    const [skillsResult, toolsResult] = await Promise.all([
+      window.api.getSkills(),
+      window.api.getTools()
+    ])
+    setSkills(skillsResult)
+    setTools(toolsResult)
   }, [])
 
   useEffect(() => {
-    if (page === 'skills') {
+    if (page === 'skills' || page === 'tools') {
       refresh()
     }
   }, [page, refresh])
@@ -65,7 +73,9 @@ export default function App() {
           />
         )}
         {page === 'settings' && <SettingsPage />}
-        {page === 'tools' && <ToolsPage />}
+        {page === 'tools' && (
+          <ToolsPage tools={tools} onRefresh={refresh} />
+        )}
         {page === 'backups' && <BackupsPage />}
       </main>
     </div>
@@ -406,6 +416,8 @@ function SkillsPage({
       setTimeout(() => setFeedback(null), 6000)
     } catch (e) {
       setFeedback(e instanceof Error ? e.message : String(e))
+      // issue #21: 失败时重新读取权威状态,确保 UI 与 DB 一致
+      await onRefresh()
       setTimeout(() => setFeedback(null), 6000)
     } finally {
       setRemoveRegistryTarget(null)
@@ -429,6 +441,8 @@ function SkillsPage({
       await onRefresh()
     } catch (e) {
       setFeedback(e instanceof Error ? e.message : String(e))
+      // issue #21: 失败时重新读取权威状态,确保 UI 与 DB 一致
+      await onRefresh()
       setTimeout(() => setFeedback(null), 5000)
     } finally {
       setActionBusy(false)
@@ -880,40 +894,75 @@ function SkillRow({
       </div>
 
       {expanded && (
-        <div className="border-t border-neutral-200 bg-neutral-50 p-3">
-          <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-2">Source</h4>
-          {skill.sources.length === 0 ? (
-            <p className="text-xs text-neutral-400">未登记任何 source。</p>
-          ) : (
-            <ul className="space-y-1.5">
-              {skill.sources.map((src) => (
-                <li key={src.id} className="text-xs grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 items-start">
-                  <span className="text-neutral-500">path</span>
-                  <code className="text-neutral-700 break-all">{src.path}</code>
-                  <span className="text-neutral-500">hash</span>
-                  <code className="text-neutral-700 break-all">{src.hash}</code>
-                  <span className="text-neutral-500">mtime</span>
-                  <span className="text-neutral-700">{new Date(src.mtime).toISOString()}</span>
-                  <span className="text-neutral-500">source_type</span>
-                  <span className="text-neutral-700">{src.source_type}</span>
-                  {src.repo_url && (
-                    <>
-                      <span className="text-neutral-500">repo</span>
-                      <code className="text-neutral-700 break-all">{src.repo_url}</code>
-                    </>
-                  )}
-                  {src.commit_sha && (
-                    <>
-                      <span className="text-neutral-500">sha</span>
-                      <code className="text-neutral-700">{src.commit_sha.slice(0, 12)}</code>
-                    </>
-                  )}
-                  <span className="text-neutral-500">discovered_at</span>
-                  <span className="text-neutral-700">{src.discovered_at}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+        <div className="border-t border-neutral-200 bg-neutral-50 p-3 space-y-4">
+          {/* issue #23: 明确区分 source(权威内容来源)与 deployment(派生目标) */}
+          <div>
+            <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-1">来源 (Source)</h4>
+            <p className="text-xs text-neutral-400 mb-2">
+              权威内容来源 — 部署从此处派生。部署目标不会成为新的 source。
+            </p>
+            {skill.sources.length === 0 ? (
+              <p className="text-xs text-neutral-400">未登记任何 source。</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {skill.sources.map((src) => (
+                  <li key={src.id} className="text-xs grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 items-start">
+                    <span className="text-neutral-500">path</span>
+                    <code className="text-neutral-700 break-all">{src.path}</code>
+                    <span className="text-neutral-500">hash</span>
+                    <code className="text-neutral-700 break-all">{src.hash}</code>
+                    <span className="text-neutral-500">mtime</span>
+                    <span className="text-neutral-700">{new Date(src.mtime).toISOString()}</span>
+                    <span className="text-neutral-500">source_type</span>
+                    <span className="text-neutral-700">{src.source_type}</span>
+                    {src.repo_url && (
+                      <>
+                        <span className="text-neutral-500">repo</span>
+                        <code className="text-neutral-700 break-all">{src.repo_url}</code>
+                      </>
+                    )}
+                    {src.commit_sha && (
+                      <>
+                        <span className="text-neutral-500">sha</span>
+                        <code className="text-neutral-700">{src.commit_sha.slice(0, 12)}</code>
+                      </>
+                    )}
+                    <span className="text-neutral-500">discovered_at</span>
+                    <span className="text-neutral-700">{src.discovered_at}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* issue #23: 部署列表 — 工具 / target_path / mode / 部署时间 */}
+          <div>
+            <h4 className="text-xs font-semibold text-neutral-500 uppercase mb-1">部署 (Deployment)</h4>
+            <p className="text-xs text-neutral-400 mb-2">
+              派生目标 — 部署到各工具目录的链接或副本。详细漂移状态见工具页。
+            </p>
+            {skill.deployments.length === 0 ? (
+              <p className="text-xs text-neutral-400">未部署到任何工具。</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {skill.deployments.map((dep) => (
+                  <li
+                    key={`${dep.target_tool}:${dep.target_path}`}
+                    className="text-xs grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 items-start"
+                  >
+                    <span className="text-neutral-500">tool</span>
+                    <span className="text-neutral-700 font-medium">{dep.target_tool}</span>
+                    <span className="text-neutral-500">target_path</span>
+                    <code className="text-neutral-700 break-all">{dep.target_path}</code>
+                    <span className="text-neutral-500">mode</span>
+                    <span className="text-neutral-700">{dep.mode}</span>
+                    <span className="text-neutral-500">deployed_at</span>
+                    <span className="text-neutral-700">{dep.deployed_at}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
       )}
     </li>
@@ -1109,6 +1158,21 @@ function ViewMdSourcePickerModal({
   )
 }
 
+/**
+ * issue #24:UI 侧禁用"明显的"自部署目标根——source 位于工具根内(部署目标
+ * path/skillName 会等于或落在 source 内),或工具根位于 source 内(反向重叠)。
+ * 仅做词法判定处理明显场景;符号链接别名等非显然情况由主进程
+ * assertSafeDeployTarget 权威拦截,UI 不重复 realpath 逻辑。
+ */
+function isObviousSelfDeployRoot(sourcePath: string, targetRoot: string): boolean {
+  const sep = '/'
+  const norm = (p: string) => (p.endsWith(sep) ? p.slice(0, -1) : p)
+  const src = norm(sourcePath)
+  const root = norm(targetRoot)
+  if (src === root) return true
+  return src.startsWith(root + sep) || root.startsWith(src + sep)
+}
+
 function DeployDialog({
   skill,
   sourcePath,
@@ -1134,15 +1198,24 @@ function DeployDialog({
             .flatMap((tool) =>
               tool.existingPaths.map((path) => ({ tool, path }))
             )
-            .find(({ path }) => path === deployedTarget)
+            .find(
+              ({ path }) =>
+                path === deployedTarget &&
+                // issue #24:已部署目标若构成自部署也不再默认选中
+                !isObviousSelfDeployRoot(sourcePath, path)
+            )
         : undefined
-      const firstTool = s.tools.find((tool) => tool.enabled && tool.exists)
+      // issue #24:默认选中首个非自部署的可用目标根,避免下拉框初始指向被禁用项
+      const firstSafe = s.tools
+        .filter((tool) => tool.enabled && tool.exists)
+        .flatMap((tool) => tool.existingPaths.map((path) => ({ tool, path })))
+        .find(({ path }) => !isObviousSelfDeployRoot(sourcePath, path))
       if (selected) {
         setSelectedTool(selected.tool.key)
         setSelectedTargetRoot(selected.path)
-      } else if (firstTool?.existingPaths[0]) {
-        setSelectedTool(firstTool.key)
-        setSelectedTargetRoot(firstTool.existingPaths[0])
+      } else if (firstSafe) {
+        setSelectedTool(firstSafe.tool.key)
+        setSelectedTargetRoot(firstSafe.path)
       }
       // 平台支持 symlink 则默认 symlink,否则 copy
       setMode(s.platform.canSymlink ? 'symlink' : 'copy')
@@ -1153,6 +1226,8 @@ function DeployDialog({
   const availableTargets = availableTools
     .flatMap((tool) => tool.existingPaths.map((path) => ({ tool, path })))
     .filter(({ tool, path }) => {
+      // issue #24:UI 侧禁用明显的自部署目标根;权威拦截在主进程 assertSafeDeployTarget
+      if (isObviousSelfDeployRoot(sourcePath, path)) return false
       const existing = skill.deployments.find(
         (deployment) => deployment.target_tool === tool.key
       )
@@ -1345,20 +1420,16 @@ function DeployDialog({
 
 // ===== Tools 页(#6)=====
 
-function ToolsPage() {
-  const [tools, setTools] = useState<ToolWithDriftsView[]>([])
+function ToolsPage({
+  tools,
+  onRefresh
+}: {
+  tools: ToolWithDriftsView[]
+  onRefresh: () => Promise<void>
+}) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    const result = await window.api.getTools()
-    setTools(result)
-  }, [])
-
-  useEffect(() => {
-    load()
-  }, [load])
 
   const toggleExpand = (key: string) => {
     setExpanded((prev) => {
@@ -1372,6 +1443,8 @@ function ToolsPage() {
     })
   }
 
+  // issue #21: 所有 mutation 后统一调用 onRefresh(重读 skills + tools 权威状态),
+  // 不再各自维护局部 load。失败时也重新读取权威状态,确保 UI 与 DB 一致。
   const handleUndeploy = async (skillId: number, targetTool: string, skillName: string) => {
     if (!window.confirm(`从 ${targetTool} 卸载「${skillName}」?\n\n此操作只移除部署(链接/副本),不删源文件。`)) {
       return
@@ -1380,9 +1453,10 @@ function ToolsPage() {
     setError(null)
     try {
       await window.api.undeploy(skillId, targetTool)
-      await load()
+      await onRefresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      await onRefresh()
     } finally {
       setBusy(null)
     }
@@ -1397,9 +1471,10 @@ function ToolsPage() {
     setError(null)
     try {
       await window.api.removeFromManifest(skillId, targetTool)
-      await load()
+      await onRefresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      await onRefresh()
     } finally {
       setBusy(null)
     }
@@ -1409,25 +1484,22 @@ function ToolsPage() {
     setBusy(`${skillId}:${targetTool}`)
     setError(null)
     try {
-      // 重新部署:用清单记录的 source_path 和 mode
+      // issue #22:重新部署——target_path / source_path 由主进程从清单读取,
+      // renderer 只传 skillId / targetTool / mode,不传也不信任路径。
       const tool = tools.find((t) => t.config.key === targetTool)
       const drift = tool?.drifts.find((d) => d.skillId === skillId)
       if (!drift?.deployment) {
         throw new Error('没有可重新部署的部署记录')
       }
-      if (!drift.deployment.target_path) {
-        throw new Error('旧部署缺少目标路径,请先从清单移除后重新部署')
-      }
-      await window.api.deploy(
+      await window.api.redeploy(
         skillId,
         targetTool,
-        drift.deployment.mode,
-        drift.deployment.source_path,
-        drift.deployment.target_path
+        drift.deployment.mode
       )
-      await load()
+      await onRefresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      await onRefresh()
     } finally {
       setBusy(null)
     }
@@ -1438,7 +1510,7 @@ function ToolsPage() {
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-semibold">工具</h2>
         <button
-          onClick={load}
+          onClick={onRefresh}
           className="px-3 py-1.5 bg-neutral-700 text-white rounded text-sm hover:bg-neutral-800"
         >
           刷新

@@ -202,6 +202,12 @@ declare global {
         targetRoot?: string,
         confirmationToken?: string
       ) => Promise<DeployResultView>
+      // issue #22:漂移重新部署,target_path / source_path 由主进程从清单读取
+      redeploy: (
+        skillId: number,
+        targetTool: string,
+        mode: DeployModeView
+      ) => Promise<DeployResultView>
       undeploy: (skillId: number, targetTool: string) => Promise<void>
       getTools: () => Promise<ToolWithDriftsView[]>
       // Drift + Remove from Registry (#8)
