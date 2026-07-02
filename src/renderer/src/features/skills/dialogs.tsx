@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Button, Input, Dialog } from '../../shared'
 import { completeMutation } from '../../async-state'
+import { groupByHash } from './sourceGrouping'
 
 export type DeployMode = 'copy' | 'symlink'
 export type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
@@ -31,12 +32,7 @@ export function ConflictDialog({
   onConfirm: (source: SkillSourceView) => void
 }) {
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const hashGroups = new Map<string, SkillSourceView[]>()
-  for (const s of skill.sources) {
-    const arr = hashGroups.get(s.hash) ?? []
-    arr.push(s)
-    hashGroups.set(s.hash, arr)
-  }
+  const hashGroups = groupByHash(skill.sources)
   const distinctVersions = hashGroups.size
 
   return (

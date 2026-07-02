@@ -1,21 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useState } from 'react'
 import { RotateCcw, Trash2, RefreshCw, ChevronRight, ChevronDown, Wrench, AlertCircle } from 'lucide-react'
-import { Button, StatusDot, EmptyState, Skeleton, Dialog } from '../../shared'
+import { Button, StatusDot, EmptyState, Skeleton, Dialog, getDriftStatus } from '../../shared'
 import { useToast } from '../../app/Toast'
+import { type DriftKey, driftKeyEquals } from './driftKey'
 
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 type DriftStatusView = ToolWithDriftsView['drifts'][number]
-
-const DRIFT_STATUS: Record<string, { variant: 'success' | 'warning' | 'danger' | 'neutral'; label: string }> = {
-  normal: { variant: 'success', label: '正常' },
-  'source-updated': { variant: 'warning', label: '源已更新' },
-  'target-modified': { variant: 'warning', label: '目标已修改' },
-  'link-mismatch': { variant: 'danger', label: '链接异常' },
-  'source-missing': { variant: 'danger', label: '源缺失' },
-  unresolved: { variant: 'danger', label: '待确认' },
-  drift: { variant: 'danger', label: '漂移（目标缺失）' },
-  external: { variant: 'neutral', label: '外部' },
-}
 
 export function ToolsPage({
   tools,
@@ -27,7 +17,7 @@ export function ToolsPage({
   onRefresh: () => Promise<void>
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [busyKey, setBusyKey] = useState<DriftKey | null>(null)
   const [confirmUndeploy, setConfirmUndeploy] = useState<{ skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmRemoveManifest, setConfirmRemoveManifest] = useState<{ skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmRedeploy, setConfirmRedeploy] = useState<{ skillId: number; targetTool: string; skillName: string } | null>(null)
@@ -46,7 +36,7 @@ export function ToolsPage({
   const handleUndeploy = async () => {
     if (!confirmUndeploy) return
     const { skillId, targetTool } = confirmUndeploy
-    setBusyKey(`${skillId}:${targetTool}`)
+    setBusyKey({ skillId, targetTool })
     try {
       await window.api.undeploy(skillId, targetTool)
       await onRefresh()
@@ -63,7 +53,7 @@ export function ToolsPage({
   const handleRemoveFromManifest = async () => {
     if (!confirmRemoveManifest) return
     const { skillId, targetTool } = confirmRemoveManifest
-    setBusyKey(`${skillId}:${targetTool}`)
+    setBusyKey({ skillId, targetTool })
     try {
       await window.api.removeFromManifest(skillId, targetTool)
       await onRefresh()
@@ -80,7 +70,7 @@ export function ToolsPage({
   const handleRedeploy = async () => {
     if (!confirmRedeploy) return
     const { skillId, targetTool } = confirmRedeploy
-    setBusyKey(`${skillId}:${targetTool}`)
+    setBusyKey({ skillId, targetTool })
     try {
       const tool = tools.find((t) => t.config.key === targetTool)
       const drift = tool?.drifts.find((d) => d.skillId === skillId)
@@ -144,7 +134,7 @@ export function ToolsPage({
         variant="danger"
         confirmLabel="取消部署"
         onConfirm={handleUndeploy}
-        busy={busyKey === `${confirmUndeploy?.skillId}:${confirmUndeploy?.targetTool}`}
+        busy={driftKeyEquals(busyKey, confirmUndeploy)}
         closeOnOverlay={false}
       />
 
@@ -155,7 +145,7 @@ export function ToolsPage({
         description="目标已从磁盘移除，此操作只清理清单记录。"
         confirmLabel="移除"
         onConfirm={handleRemoveFromManifest}
-        busy={busyKey === `${confirmRemoveManifest?.skillId}:${confirmRemoveManifest?.targetTool}`}
+        busy={driftKeyEquals(busyKey, confirmRemoveManifest)}
       />
 
       <Dialog
@@ -164,7 +154,7 @@ export function ToolsPage({
         title={`重新部署「${confirmRedeploy?.skillName ?? ''}」到 ${confirmRedeploy?.targetTool ?? ''}?`}
         confirmLabel="重新部署"
         onConfirm={handleRedeploy}
-        busy={busyKey === `${confirmRedeploy?.skillId}:${confirmRedeploy?.targetTool}`}
+        busy={driftKeyEquals(busyKey, confirmRedeploy)}
       />
     </div>
   )
@@ -182,7 +172,7 @@ function ToolCard({
   tool: ToolWithDriftsView
   expanded: boolean
   onToggleExpand: () => void
-  busyKey: string | null
+  busyKey: DriftKey | null
   onUndeploy: (skillId: number, targetTool: string, skillName: string) => void
   onRedeploy: (skillId: number, targetTool: string, skillName: string) => void
   onRemoveFromManifest: (skillId: number, targetTool: string, skillName: string) => void
@@ -251,7 +241,7 @@ function ToolCard({
                     <DriftItem
                       key={`${d.skillId}:${d.skillName}`}
                       drift={d}
-                      busy={busyKey === `${d.skillId}:${d.targetTool}`}
+                      busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
                       onUndeploy={() => onUndeploy(d.skillId, d.targetTool, d.skillName)}
                       onRedeploy={() => onRedeploy(d.skillId, d.targetTool, d.skillName)}
                       onRemoveFromManifest={() => onRemoveFromManifest(d.skillId, d.targetTool, d.skillName)}
@@ -299,7 +289,7 @@ function DriftItem({
   onRedeploy: () => void
   onRemoveFromManifest: () => void
 }) {
-  const status = DRIFT_STATUS[drift.kind] ?? { variant: 'neutral' as const, label: drift.kind }
+  const status = getDriftStatus(drift.kind)
   const isExternal = drift.kind === 'external'
   const isDrift = drift.kind === 'drift'
 

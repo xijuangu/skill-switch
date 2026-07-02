@@ -5,7 +5,7 @@ import {
   ChevronRight, ChevronDown, Hash, Calendar, GitBranch, AlertCircle
 } from 'lucide-react'
 import {
-  Button, Input, StatusDot, EmptyState, Tabs, Skeleton, Menu
+  Button, Input, StatusDot, EmptyState, Tabs, Skeleton, Menu, getDriftStatus
 } from '../../shared'
 import { useToast } from '../../app/Toast'
 import {
@@ -22,6 +22,7 @@ import {
   type DeployResultView,
   type InstallResultView,
 } from './dialogs'
+import { groupByHash } from './sourceGrouping'
 
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
@@ -666,13 +667,7 @@ function SourcePanel({ skill }: { skill: SkillView }) {
     return <p className="text-xs text-foreground-muted">未登记任何来源。</p>
   }
 
-  const hashGroups = new Map<string, SkillSourceView[]>()
-  for (const s of skill.sources) {
-    const arr = hashGroups.get(s.hash) ?? []
-    arr.push(s)
-    hashGroups.set(s.hash, arr)
-  }
-  const distinctVersions = hashGroups.size
+  const distinctVersions = groupByHash(skill.sources).size
 
   return (
     <div className="space-y-2">
@@ -735,42 +730,29 @@ function DeploymentPanel({ skill }: { skill: SkillView }) {
 
   return (
     <div className="space-y-2">
-      {skill.deployments.map((dep) => (
-        <div
-          key={`${dep.target_tool}:${dep.target_path}`}
-          className="border border-border rounded-md p-2.5"
-        >
-          <div className="flex items-center justify-between mb-1.5">
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-foreground">{dep.target_tool}</span>
-              <span className="text-2xs px-1 py-px rounded bg-surface-secondary text-foreground-secondary">
-                {dep.mode}
-              </span>
+      {skill.deployments.map((dep) => {
+        const status = getDriftStatus(dep.status)
+        return (
+          <div
+            key={`${dep.target_tool}:${dep.target_path}`}
+            className="border border-border rounded-md p-2.5"
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-foreground">{dep.target_tool}</span>
+                <span className="text-2xs px-1 py-px rounded bg-surface-secondary text-foreground-secondary">
+                  {dep.mode}
+                </span>
+              </div>
+              <StatusDot variant={status.variant} label={status.label} />
             </div>
-            <StatusDot
-              variant={
-                dep.status === 'normal' ? 'success' :
-                dep.status === 'source-updated' || dep.status === 'target-modified' ? 'warning' : 'danger'
-              }
-              label={DRIFT_LABEL[dep.status] ?? dep.status}
-            />
+            <div className="space-y-1">
+              <MetaRow icon={ExternalLink} label="目标路径" value={dep.target_path ?? ''} />
+              <MetaRow icon={Calendar} label="部署时间" value={dep.deployed_at} />
+            </div>
           </div>
-          <div className="space-y-1">
-            <MetaRow icon={ExternalLink} label="目标路径" value={dep.target_path ?? ''} />
-            <MetaRow icon={Calendar} label="部署时间" value={dep.deployed_at} />
-          </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
-}
-
-const DRIFT_LABEL: Record<string, string> = {
-  normal: '正常',
-  'source-updated': '源已更新',
-  'target-modified': '目标已修改',
-  'link-mismatch': '链接异常',
-  'source-missing': '源缺失',
-  unresolved: '待确认',
-  drift: '漂移',
 }
