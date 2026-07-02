@@ -72,8 +72,11 @@ Platform-specific package commands:
 ## Status
 
 Spec'd via `/grill-me` → `/to-prd` → `/to-issues`. See:
-- PRD: [issue #1](https://github.com/xijuangu/skill-switch/issues/1)
-- Slices: [issues #2–#10](https://github.com/xijuangu/skill-switch/issues)
+- MVP PRD: [issue #1](https://github.com/xijuangu/skill-switch/issues/1)
+- MVP Slices: [issues #2–#10](https://github.com/xijuangu/skill-switch/issues)
+- UI 可用性与浅色视觉系统升级 PRD: [issue #29](https://github.com/xijuangu/skill-switch/issues/29)
+- UI 升级 Slices: [issues #30–#34](https://github.com/xijuangu/skill-switch/issues)
+- Review 后修复与增强: [issues #52–#62](https://github.com/xijuangu/skill-switch/issues)（白屏、滚动条、Skeleton 静态化、ADR 0002 分层落实、来源按 hash 分组展示等）
 
 ## Out of Scope (MVP)
 
