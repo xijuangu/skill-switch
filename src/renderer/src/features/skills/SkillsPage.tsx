@@ -227,8 +227,8 @@ export function SkillsPage({
     try {
       const result = await window.api.removeFromRegistry(removeRegistryTarget.id)
       const msg = result.backedUp
-        ? `已移除「${result.skillName}」(已备份，从 ${result.undeployedTools.length} 个工具卸载)`
-        : `已移除「${result.skillName}」(从 ${result.undeployedTools.length} 个工具卸载)`
+        ? `已移除「${result.skillName}」(已备份，从 ${result.undeployedTools.length} 个工具取消部署)`
+        : `已移除「${result.skillName}」(从 ${result.undeployedTools.length} 个工具取消部署)`
       success(msg)
       await onRefresh()
       if (selectedId === removeRegistryTarget.id) {
@@ -255,7 +255,7 @@ export function SkillsPage({
         setUndeployFromTarget({ ...undeployFromTarget, deployments: remaining })
       }
       await onRefresh()
-      success(`已从 ${targetTool} 卸载`)
+      success(`已从 ${targetTool} 取消部署`)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
       await onRefresh()
@@ -279,7 +279,7 @@ export function SkillsPage({
 
   const getMenuActions = (skill: SkillView) => [
     { key: 'deploy', label: '部署到…', onClick: () => handleDeployClick(skill) },
-    { key: 'undeploy', label: '从…卸载', onClick: () => handleUndeployFromInit(skill), disabled: actionBusy },
+    { key: 'undeploy', label: '从…取消部署', onClick: () => handleUndeployFromInit(skill), disabled: actionBusy },
     { key: 'view-md', label: '查看 SKILL.md', onClick: () => handleViewMd(skill), disabled: actionBusy },
     { key: 'remove', label: '从注册表移除', onClick: () => handleRemoveFromRegistry(skill), danger: true as const, disabled: actionBusy },
   ]
@@ -303,7 +303,7 @@ export function SkillsPage({
       <div className="flex gap-0 h-full">
         <div className="w-72 shrink-0 border-r border-border p-3 space-y-2">
           {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="h-12 rounded-md border border-border p-2 animate-pulse">
+            <div key={i} className="h-12 rounded-md border border-border p-2">
               <div className="h-3 w-2/3 rounded-sm bg-border-subtle mb-1.5" />
               <div className="h-2 w-1/3 rounded-sm bg-border-subtle" />
             </div>
@@ -311,7 +311,7 @@ export function SkillsPage({
         </div>
         <div className="flex-1 p-4 space-y-3">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-3 rounded-sm bg-border-subtle w-3/4 animate-pulse" />
+            <div key={i} className="h-3 rounded-sm bg-border-subtle w-3/4" />
           ))}
         </div>
       </div>
@@ -1209,7 +1209,7 @@ function UndeployDialog({
     <Dialog
       open
       onClose={() => !busy && onClose()}
-      title={`从…卸载 ${skill.name}`}
+      title={`从…取消部署 ${skill.name}`}
       description={`${deployments.length} 个部署。此操作只移除部署（链接/副本），不删源文件。`}
       hideCancel
       closeOnOverlay={!busy}
@@ -1222,7 +1222,7 @@ function UndeployDialog({
               <span className="text-2xs px-1 py-px rounded bg-surface-secondary text-foreground-secondary">{d.mode}</span>
             </div>
             <Button variant="danger" size="sm" onClick={() => onUndeploy(d.target_tool)} disabled={busy}>
-              卸载
+              取消部署
             </Button>
           </div>
         ))}
@@ -1253,7 +1253,7 @@ function RemoveRegistryDialog({
       onClose={onCancel}
       title={`从注册表移除「${skill.name}」?`}
       variant="danger"
-      description="此操作将永久从注册表移除该 skill：将中央仓库实体备份（如有），从所有工具卸载，并删除注册表记录。此操作不可撤销。"
+      description="此操作将永久从注册表移除该 skill：将中央仓库实体备份（如有），从所有工具取消部署，并删除注册表记录。此操作不可撤销。"
       confirmLabel="从注册表移除"
       onConfirm={onConfirm}
       busy={busy}

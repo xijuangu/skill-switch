@@ -80,7 +80,7 @@ export function SettingsPage() {
     return (
       <div className="space-y-3 p-1">
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="h-16 rounded-md bg-border-subtle animate-pulse" />
+          <div key={i} className="h-16 rounded-md bg-border-subtle" />
         ))}
       </div>
     )

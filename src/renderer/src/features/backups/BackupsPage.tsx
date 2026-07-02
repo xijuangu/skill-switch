@@ -72,7 +72,7 @@ export function BackupsPage() {
         </div>
         <div className="space-y-2">
           {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-16 rounded-md border border-border p-3 animate-pulse">
+            <div key={i} className="h-16 rounded-md border border-border p-3">
               <div className="flex items-center gap-2">
                 <div className="h-3 w-24 rounded-sm bg-border-subtle" />
                 <div className="h-2.5 w-12 rounded-full bg-border-subtle" />

@@ -50,7 +50,7 @@ export function ToolsPage({
     try {
       await window.api.undeploy(skillId, targetTool)
       await onRefresh()
-      success(`已从 ${targetTool} 卸载`)
+      success(`已从 ${targetTool} 取消部署`)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
       await onRefresh()
@@ -138,10 +138,10 @@ export function ToolsPage({
       <Dialog
         open={confirmUndeploy !== null}
         onClose={() => setConfirmUndeploy(null)}
-        title={`从 ${confirmUndeploy?.targetTool ?? ''} 卸载「${confirmUndeploy?.skillName ?? ''}」?`}
+        title={`从 ${confirmUndeploy?.targetTool ?? ''} 取消部署「${confirmUndeploy?.skillName ?? ''}」?`}
         description="此操作只移除部署（链接/副本），不删源文件。"
         variant="danger"
-        confirmLabel="卸载"
+        confirmLabel="取消部署"
         onConfirm={handleUndeploy}
         busy={busyKey === `${confirmUndeploy?.skillId}:${confirmUndeploy?.targetTool}`}
         closeOnOverlay={false}
@@ -336,7 +336,7 @@ function DriftItem({
         )}
         {drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && (
           <Button variant="danger" size="sm" onClick={onUndeploy} disabled={busy}>
-            卸载
+            取消部署
           </Button>
         )}
         {isExternal && (

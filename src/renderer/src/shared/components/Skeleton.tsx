@@ -7,7 +7,7 @@ export function Skeleton({ lines = 3, className = '' }: SkeletonProps) {
   const widths = ['w-full', 'w-3/4', 'w-1/2']
 
   return (
-    <div className={`space-y-3 animate-pulse ${className}`} role="status" aria-label="加载中">
+    <div className={`space-y-3 ${className}`} role="status" aria-label="加载中">
       <div className="space-y-3">
         {Array.from({ length: lines }).map((_, i) => (
           <div
@@ -23,7 +23,7 @@ export function Skeleton({ lines = 3, className = '' }: SkeletonProps) {
 
 export function SkeletonCard({ className = '' }: { className?: string }) {
   return (
-    <div className={`rounded-md border border-border p-4 animate-pulse ${className}`} role="status" aria-label="加载中">
+    <div className={`rounded-md border border-border p-4 ${className}`} role="status" aria-label="加载中">
       <div className="flex items-center gap-3">
         <div className="h-8 w-8 rounded-full bg-border-subtle" />
         <div className="flex-1 space-y-2">
