@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { RotateCcw, Trash2, RefreshCw, ChevronRight, ChevronDown, Wrench, AlertCircle } from 'lucide-react'
-import { Button, StatusDot, EmptyState, Skeleton, Dialog, useToast } from '../../shared'
+import { Button, StatusDot, EmptyState, Skeleton, Dialog } from '../../shared'
+import { useToast } from '../../app/Toast'
 
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 type DriftStatusView = ToolWithDriftsView['drifts'][number]

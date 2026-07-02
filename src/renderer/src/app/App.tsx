@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Sparkles, Wrench, Archive, Settings,
 } from 'lucide-react'
-import { ToastProvider, useToast } from '../shared'
+import { ToastProvider, useToast } from './Toast'
 import { createLatestRequestGate, completeMutation } from '../async-state'
 import { SkillsPage } from '../features/skills/SkillsPage'
 import { ToolsPage } from '../features/tools/ToolsPage'

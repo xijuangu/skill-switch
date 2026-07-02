@@ -1,6 +1,9 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
 import { X, CheckCircle, AlertCircle, Info } from 'lucide-react'
 
+// 通知系统归 app/ (ADR 0002),非视觉原语,不归 shared/components/。
+// feature 页通过 useToast 消费 app 层提供的通知能力。
+
 type ToastType = 'success' | 'error' | 'info'
 
 interface Toast {

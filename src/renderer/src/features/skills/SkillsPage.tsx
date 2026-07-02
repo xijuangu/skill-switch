@@ -6,8 +6,9 @@ import {
 } from 'lucide-react'
 import {
   Button, Input, StatusDot, EmptyState, Tabs, Skeleton,
-  Dialog, Menu, useToast
+  Dialog, Menu
 } from '../../shared'
+import { useToast } from '../../app/Toast'
 import { completeMutation } from '../../async-state'
 
 type DeployMode = 'copy' | 'symlink'

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { RotateCcw, Trash2, Archive } from 'lucide-react'
-import { Button, StatusDot, EmptyState, Skeleton, Dialog, useToast } from '../../shared'
+import { Button, StatusDot, EmptyState, Skeleton, Dialog } from '../../shared'
+import { useToast } from '../../app/Toast'
 
 type BackupView = Awaited<ReturnType<typeof window.api.listBackups>>[number]
 
