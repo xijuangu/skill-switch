@@ -46,12 +46,12 @@ export function ToolsPage({
   const handleUndeploy = async () => {
     if (!confirmUndeploy) return
     const { skillId, targetTool } = confirmUndeploy
-    setConfirmUndeploy(null)
     setBusyKey(`${skillId}:${targetTool}`)
     try {
       await window.api.undeploy(skillId, targetTool)
       await onRefresh()
       success(`已从 ${targetTool} 取消部署`)
+      setConfirmUndeploy(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
       await onRefresh()
@@ -63,12 +63,12 @@ export function ToolsPage({
   const handleRemoveFromManifest = async () => {
     if (!confirmRemoveManifest) return
     const { skillId, targetTool } = confirmRemoveManifest
-    setConfirmRemoveManifest(null)
     setBusyKey(`${skillId}:${targetTool}`)
     try {
       await window.api.removeFromManifest(skillId, targetTool)
       await onRefresh()
       success('已从清单移除')
+      setConfirmRemoveManifest(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
       await onRefresh()
@@ -80,7 +80,6 @@ export function ToolsPage({
   const handleRedeploy = async () => {
     if (!confirmRedeploy) return
     const { skillId, targetTool } = confirmRedeploy
-    setConfirmRedeploy(null)
     setBusyKey(`${skillId}:${targetTool}`)
     try {
       const tool = tools.find((t) => t.config.key === targetTool)
@@ -89,6 +88,7 @@ export function ToolsPage({
       await window.api.redeploy(skillId, targetTool, drift.deployment.mode)
       await onRefresh()
       success(`已重新部署`)
+      setConfirmRedeploy(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
       await onRefresh()

@@ -36,12 +36,12 @@ export function BackupsPage() {
   const handleRestore = async () => {
     if (!confirmRestore) return
     const backup = confirmRestore
-    setConfirmRestore(null)
     setBusyId(backup.backupId)
     try {
       await window.api.restoreBackup(backup.backupId)
       await load()
       success(`已恢复备份「${backup.skillName}」`)
+      setConfirmRestore(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -52,12 +52,12 @@ export function BackupsPage() {
   const handleDelete = async () => {
     if (!confirmDelete) return
     const backup = confirmDelete
-    setConfirmDelete(null)
     setBusyId(backup.backupId)
     try {
       await window.api.deleteBackup(backup.backupId)
       await load()
       success(`已删除备份「${backup.skillName}」`)
+      setConfirmDelete(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
     } finally {

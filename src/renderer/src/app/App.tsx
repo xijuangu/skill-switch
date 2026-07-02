@@ -37,6 +37,7 @@ function AppShell() {
   const [scanning, setScanning] = useState(false)
   const [lastScan, setLastScan] = useState<ScanResult | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const refreshGate = useRef(createLatestRequestGate())
 
   const { success, error: toastError, info } = useToast()
@@ -52,9 +53,12 @@ function AppShell() {
       setSkills(skillsResult)
       setTools(toolsResult)
       setLoading(false)
+      setLoadError(null)
     } catch (err) {
       if (refreshGate.current.isLatest(generation)) {
-        toastError(err instanceof Error ? err.message : String(err))
+        const msg = err instanceof Error ? err.message : String(err)
+        setLoadError(msg)
+        toastError(msg)
       }
       if (loading) setLoading(false)
       throw err
@@ -102,16 +106,18 @@ function AppShell() {
 
       <main className="flex-1 p-6 overflow-auto">
         {page === 'skills' && (
-          <SkillsPage
-            skills={skills}
-            tools={tools}
-            scanning={scanning}
-            lastScan={lastScan}
-            loading={loading}
-            onScan={handleScan}
-            onRefresh={refresh}
-          />
-        )}
+            <SkillsPage
+              skills={skills}
+              tools={tools}
+              scanning={scanning}
+              lastScan={lastScan}
+              loading={loading}
+              loadError={loadError}
+              onScan={handleScan}
+              onRefresh={refresh}
+              onRetry={refresh}
+            />
+          )}
         {page === 'tools' && (
           <ToolsPage
             tools={tools}

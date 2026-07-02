@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import {
   Search, Filter, Plus, FolderOpen, MoreHorizontal,
   Download, Trash2, FileText, ExternalLink, Package, Upload,
@@ -41,16 +41,20 @@ export function SkillsPage({
   scanning,
   lastScan,
   loading,
+  loadError,
   onScan,
-  onRefresh
+  onRefresh,
+  onRetry
 }: {
   skills: SkillView[]
   tools: ToolWithDriftsView[]
   scanning: boolean
   lastScan: ScanResult | null
   loading: boolean
+  loadError: string | null
   onScan: () => void
   onRefresh: () => Promise<void>
+  onRetry: () => Promise<void>
 }) {
   const [search, setSearch] = useState('')
   const [deployFilter, setDeployFilter] = useState<DeployFilter>('all')
@@ -69,6 +73,8 @@ export function SkillsPage({
   const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { target_tool: string; mode: string }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
+  // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
+  const pendingAdjacentSelectRef = useRef<number | null>(null)
 
   const { success, error: toastError, info } = useToast()
 
@@ -111,6 +117,17 @@ export function SkillsPage({
 
   useEffect(() => {
     if (filtered.length > 0) {
+      // 删除当前项后选相邻项:优先下一项,回退上一项
+      if (pendingAdjacentSelectRef.current !== null) {
+        const idx = pendingAdjacentSelectRef.current
+        const next = filtered[idx] ?? filtered[idx - 1] ?? filtered[0]
+        pendingAdjacentSelectRef.current = null
+        if (next.id !== selectedId) {
+          setSelectedId(next.id)
+          setDetailTab('sources')
+        }
+        return
+      }
       const stillVisible = filtered.find((s) => s.id === selectedId)
       if (!stillVisible) {
         setSelectedId(filtered[0].id)
@@ -122,7 +139,7 @@ export function SkillsPage({
   }, [filtered, selectedId])
 
   useEffect(() => {
-    if (skills.length > 0 && selectedId == null) {
+    if (skills.length > 0 && selectedId == null && pendingAdjacentSelectRef.current === null) {
       setSelectedId(skills[0].id)
     }
   }, [skills, selectedId])
@@ -224,16 +241,23 @@ export function SkillsPage({
 
   const handleRemoveFromRegistryConfirm = async () => {
     if (!removeRegistryTarget) return
+    const removedId = removeRegistryTarget.id
+    // 记录被删项在当前 filtered 中的索引,用于 refresh 后选相邻项
+    const removedIndex = filtered.findIndex((s) => s.id === removedId)
     setActionBusy(true)
     try {
-      const result = await window.api.removeFromRegistry(removeRegistryTarget.id)
+      const result = await window.api.removeFromRegistry(removedId)
       const msg = result.backedUp
         ? `已移除「${result.skillName}」(已备份，从 ${result.undeployedTools.length} 个工具取消部署)`
         : `已移除「${result.skillName}」(从 ${result.undeployedTools.length} 个工具取消部署)`
       success(msg)
       await onRefresh()
-      if (selectedId === removeRegistryTarget.id) {
-        setSelectedId(null)
+      if (selectedId === removedId) {
+        // refresh 后 skills 已更新;基于旧 filtered 索引选相邻项(优先下一项,回退上一项)
+        // skills state 此时已更新,但闭包 filtered 是旧值,用最新 skills 重新过滤
+        // 此处用 setSelectedId(null) 会让 effect 选第一条,不符合"选相邻项"
+        // 改为延迟到下个 effect 周期基于最新 filtered 选择
+        pendingAdjacentSelectRef.current = removedIndex
       }
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
@@ -316,6 +340,17 @@ export function SkillsPage({
           ))}
         </div>
       </div>
+    )
+  }
+
+  if (loadError && skills.length === 0) {
+    return (
+      <EmptyState
+        icon={<AlertCircle className="h-8 w-8" />}
+        title="加载失败"
+        description={loadError}
+        action={{ label: '重试', onClick: () => onRetry().catch(() => {}) }}
+      />
     )
   }
 
@@ -831,6 +866,10 @@ function DeployDialogContent({
   const [mode, setMode] = useState<DeployMode>('copy')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [externalOverwritePlan, setExternalOverwritePlan] = useState<{
+    targetPath: string
+    confirmationToken: string
+  } | null>(null)
   const { success: toastSuccess, error: toastError } = useToast()
 
   useEffect(() => {
@@ -878,20 +917,38 @@ function DeployDialogContent({
       const plan = await window.api.prepareDeploy(
         skill.id, selectedTool, mode, sourcePath, selectedTargetRoot
       )
-      let confirmationToken: string | undefined
       if (plan.kind === 'external-overwrite') {
-        const proceed = window.confirm(
-          `目标已存在外部 skill「${skill.name}」:\n${plan.targetPath}\n\n覆盖前会自动备份。是否继续?`
-        )
-        if (!proceed) { setBusy(false); return }
         if (!plan.confirmationToken) {
           throw new Error('无法获取外部覆盖确认令牌')
         }
-        confirmationToken = plan.confirmationToken
+        setExternalOverwritePlan({
+          targetPath: plan.targetPath,
+          confirmationToken: plan.confirmationToken
+        })
+        setBusy(false)
+        return
       }
       const result = await window.api.deploy(
-        skill.id, selectedTool, mode, sourcePath, selectedTargetRoot, confirmationToken
+        skill.id, selectedTool, mode, sourcePath, selectedTargetRoot
       )
+      await completeMutation(result, onDone)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleExternalOverwriteConfirm = async () => {
+    if (!externalOverwritePlan || !selectedTool || !selectedTargetRoot) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await window.api.deploy(
+        skill.id, selectedTool, mode, sourcePath, selectedTargetRoot,
+        externalOverwritePlan.confirmationToken
+      )
+      setExternalOverwritePlan(null)
       await completeMutation(result, onDone)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -982,6 +1039,18 @@ function DeployDialogContent({
           </p>
         </div>
       </div>
+
+      <Dialog
+        open={externalOverwritePlan !== null}
+        onClose={() => !busy && setExternalOverwritePlan(null)}
+        title={`覆盖外部 skill「${skill.name}」?`}
+        description={`目标已存在外部 skill，覆盖前会自动备份：\n${externalOverwritePlan?.targetPath ?? ''}`}
+        variant="danger"
+        confirmLabel="覆盖并备份"
+        onConfirm={handleExternalOverwriteConfirm}
+        busy={busy}
+        closeOnOverlay={false}
+      />
     </Dialog>
   )
 }
