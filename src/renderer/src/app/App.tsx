@@ -23,6 +23,14 @@ const NAV_ITEMS: { page: Page; label: string; icon: typeof Sparkles }[] = [
 ]
 
 export default function App() {
+  return (
+    <ToastProvider>
+      <AppShell />
+    </ToastProvider>
+  )
+}
+
+function AppShell() {
   const [page, setPage] = useState<Page>('skills')
   const [skills, setSkills] = useState<SkillView[]>([])
   const [tools, setTools] = useState<ToolWithDriftsView[]>([])
@@ -72,51 +80,49 @@ export default function App() {
   }
 
   return (
-    <ToastProvider>
-      <div className="min-h-screen flex bg-[#fafafa]">
-        <nav className="w-44 shrink-0 bg-surface-secondary border-r border-border flex flex-col">
-          <div className="p-4">
-            <h1 className="text-sm font-semibold text-foreground">skill-switch</h1>
-            <p className="text-2xs text-foreground-muted mt-0.5">AI 编程工具 Skill 管理器</p>
-          </div>
-          <ul className="flex-1 px-2 space-y-0.5">
-            {NAV_ITEMS.map((item) => (
-              <NavItem
-                key={item.page}
-                page={item.page}
-                current={page}
-                onClick={setPage}
-                label={item.label}
-                icon={item.icon}
-              />
-            ))}
-          </ul>
-        </nav>
+    <div className="min-h-screen flex bg-[#fafafa]">
+      <nav className="w-44 shrink-0 bg-surface-secondary border-r border-border flex flex-col">
+        <div className="p-4">
+          <h1 className="text-sm font-semibold text-foreground">skill-switch</h1>
+          <p className="text-2xs text-foreground-muted mt-0.5">AI 编程工具 Skill 管理器</p>
+        </div>
+        <ul className="flex-1 px-2 space-y-0.5">
+          {NAV_ITEMS.map((item) => (
+            <NavItem
+              key={item.page}
+              page={item.page}
+              current={page}
+              onClick={setPage}
+              label={item.label}
+              icon={item.icon}
+            />
+          ))}
+        </ul>
+      </nav>
 
-        <main className="flex-1 p-6 overflow-auto">
-          {page === 'skills' && (
-            <SkillsPage
-              skills={skills}
-              tools={tools}
-              scanning={scanning}
-              lastScan={lastScan}
-              loading={loading}
-              onScan={handleScan}
-              onRefresh={refresh}
-            />
-          )}
-          {page === 'tools' && (
-            <ToolsPage
-              tools={tools}
-              loading={loading}
-              onRefresh={refresh}
-            />
-          )}
-          {page === 'backups' && <BackupsPage />}
-          {page === 'settings' && <SettingsPage />}
-        </main>
-      </div>
-    </ToastProvider>
+      <main className="flex-1 p-6 overflow-auto">
+        {page === 'skills' && (
+          <SkillsPage
+            skills={skills}
+            tools={tools}
+            scanning={scanning}
+            lastScan={lastScan}
+            loading={loading}
+            onScan={handleScan}
+            onRefresh={refresh}
+          />
+        )}
+        {page === 'tools' && (
+          <ToolsPage
+            tools={tools}
+            loading={loading}
+            onRefresh={refresh}
+          />
+        )}
+        {page === 'backups' && <BackupsPage />}
+        {page === 'settings' && <SettingsPage />}
+      </main>
+    </div>
   )
 }
 
