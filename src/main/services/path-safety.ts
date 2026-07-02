@@ -150,10 +150,11 @@ export function assertSafeDeployTarget(
   targetPath: string,
   options?: { allowExistingSymlinkToSource?: boolean }
 ): void {
-  // Lexical self-deploy: always reject, regardless of existing deployments.
-  if (resolve(sourcePath) === resolve(targetPath)) {
-    throw new Error('cannot deploy skill to its own source path')
+  const lexical = assessLexicalDeployTarget(sourcePath, targetPath)
+  if (!lexical.eligible) {
+    throw new Error(lexical.reason!)
   }
+  // Lexical self-deploy: always reject, regardless of existing deployments.
   const src = normalizeForCompare(sourcePath)
   const tgt = normalizeForCompare(targetPath)
   // Realpath self-deploy (symlink alias to source): reject unless the caller
@@ -170,5 +171,55 @@ export function assertSafeDeployTarget(
     throw new Error(
       'source path is inside target path; cleanup would delete source'
     )
+  }
+}
+
+export interface DeployTargetAssessment {
+  eligible: boolean
+  reason: string | null
+}
+
+function assessLexicalDeployTarget(
+  sourcePath: string,
+  targetPath: string
+): DeployTargetAssessment {
+  const usesWindowsSyntax =
+    /^(?:[A-Za-z]:[\\/]|\\\\)/.test(sourcePath) ||
+    /^(?:[A-Za-z]:[\\/]|\\\\)/.test(targetPath)
+  const pathApi = usesWindowsSyntax ? win32 : posix
+  const source = pathApi.resolve(sourcePath)
+  const target = pathApi.resolve(targetPath)
+  if (source === target) {
+    return { eligible: false, reason: 'cannot deploy skill to its own source path' }
+  }
+  if (isPathWithin(source, target)) {
+    return {
+      eligible: false,
+      reason: 'target path is inside source path; deployment would recurse into source'
+    }
+  }
+  if (isPathWithin(target, source)) {
+    return {
+      eligible: false,
+      reason: 'source path is inside target path; cleanup would delete source'
+    }
+  }
+  return { eligible: true, reason: null }
+}
+
+/** Non-mutating preflight used by the main process to build renderer target options. */
+export function assessSafeDeployTarget(
+  sourcePath: string,
+  targetPath: string,
+  options?: { allowExistingSymlinkToSource?: boolean }
+): DeployTargetAssessment {
+  try {
+    assertSafeDeployTarget(sourcePath, targetPath, options)
+    return { eligible: true, reason: null }
+  } catch (error) {
+    return {
+      eligible: false,
+      reason: error instanceof Error ? error.message : String(error)
+    }
   }
 }

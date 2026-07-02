@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS skill_sources (
   hash TEXT NOT NULL,
   mtime INTEGER NOT NULL,
   source_type TEXT NOT NULL,
+  source_origin TEXT NOT NULL DEFAULT 'legacy',
+  source_tool TEXT,
   discovered_at TEXT NOT NULL,
   repo_url TEXT,
   commit_sha TEXT,
@@ -57,6 +59,17 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
   }
   if (!names.has('commit_sha')) {
     db.exec('ALTER TABLE skill_sources ADD COLUMN commit_sha TEXT')
+  }
+  if (!names.has('source_origin')) {
+    db.exec(
+      "ALTER TABLE skill_sources ADD COLUMN source_origin TEXT NOT NULL DEFAULT 'legacy'"
+    )
+    db.exec(
+      "UPDATE skill_sources SET source_origin = CASE WHEN source_type = 'central-repo' AND repo_url IS NOT NULL THEN 'github' WHEN source_type = 'central-repo' THEN 'zip' ELSE 'legacy' END"
+    )
+  }
+  if (!names.has('source_tool')) {
+    db.exec('ALTER TABLE skill_sources ADD COLUMN source_tool TEXT')
   }
 
   const deploymentCols = db.prepare('PRAGMA table_info(deployments)').all() as {

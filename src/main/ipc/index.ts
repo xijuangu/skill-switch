@@ -44,16 +44,21 @@ import {
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 import {
   deploySkill,
-  describeDeploymentStatus,
+  detectDrift,
   detectDriftsForTool,
   inspectDeployTarget,
   redeploySkill,
   undeploySkill
 } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
-import { getDeploymentsBySkillId, deleteDeployment } from '../db/dao/deployments'
+import {
+  deleteDeployment,
+  getDeploymentBySkillAndTool,
+  getDeploymentsBySkillId
+} from '../db/dao/deployments'
 import {
   assertAbsolutePath,
+  assessSafeDeployTarget,
   resolveWithin,
   validateBackupId,
   validateSkillName,
@@ -73,11 +78,65 @@ export interface ToolWithDriftsView {
   drifts: DriftStatus[]
 }
 
+export interface DeployTargetOption {
+  targetTool: string
+  displayName: string
+  targetRoot: string
+  targetPath: string
+  eligible: boolean
+  reason: string | null
+}
+
+export function readDeployTargetOptions(
+  db: DB,
+  skillId: number,
+  skillName: string,
+  sourcePath: string,
+  toolConfigs: ToolConfig[]
+): DeployTargetOption[] {
+  return toolConfigs
+    .filter((tool) => tool.enabled && tool.exists)
+    .flatMap((tool) =>
+      tool.existingPaths.map((targetRoot) => {
+        const targetPath = resolveWithin(
+          targetRoot,
+          validateSkillName(skillName)
+        )
+        const existing = getDeploymentBySkillAndTool(db, skillId, tool.key)
+        if (
+          existing?.target_path != null &&
+          existing.target_path !== targetPath
+        ) {
+          return {
+            targetTool: tool.key,
+            displayName: tool.displayName,
+            targetRoot,
+            targetPath,
+            eligible: false,
+            reason: `已部署到 ${existing.target_path}，更换路径前请先卸载`
+          }
+        }
+        const assessment = assessSafeDeployTarget(sourcePath, targetPath, {
+          allowExistingSymlinkToSource:
+            existing != null &&
+            (existing.mode === 'symlink' || existing.mode === 'junction')
+        })
+        return {
+          targetTool: tool.key,
+          displayName: tool.displayName,
+          targetRoot,
+          targetPath,
+          ...assessment
+        }
+      })
+    )
+}
+
 /**
  * issue #21:抽取出 getSkills IPC handler 的纯读逻辑,使其可独立测试。
  * 输入 db + 已解析的 toolConfigs,返回 Skills 页权威视图(含 issue #20 source 过滤)。
  * 不读 settings、不碰磁盘扫描,只读 DB — 对应 renderer refresh 的数据契约。
- * issue #23:每条 deployment 附带轻量"当前状态"(describeDeploymentStatus)。
+ * 每条 deployment 复用工具页的完整 drift 状态。
  */
 export function readSkillsView(
   db: DB,
@@ -94,7 +153,13 @@ export function readSkillsView(
       conflict: computeConflict(visibleSources, s.id),
       deployments: getDeploymentsBySkillId(db, s.id).map((d) => ({
         ...d,
-        status: describeDeploymentStatus(d.target_path, d.mode)
+        status: detectDrift(
+          db,
+          s.id,
+          s.name,
+          d.target_tool,
+          d.target_path ?? ''
+        ).kind
       }))
     })
   }
@@ -243,6 +308,21 @@ export function registerIpcHandlers(db: DB): void {
   ipcMain.handle('getSettings', async () => {
     const settings = readSettings(SETTINGS_PATH)
     return buildSettingsView(settings)
+  })
+
+  ipcMain.handle('getDeployTargets', async (_e, skillId: number, sourcePath: string) => {
+    const safeSkillId = assertInteger(skillId, 'skillId')
+    const skill = getSkillById(db, safeSkillId)
+    if (!skill) throw new Error(`skill not found: ${safeSkillId}`)
+    const safeSource = assertRegisteredSkillSource(db, safeSkillId, sourcePath)
+    const settings = readSettings(SETTINGS_PATH)
+    return readDeployTargetOptions(
+      db,
+      safeSkillId,
+      skill.name,
+      safeSource,
+      resolveToolConfigs(settings, homedir())
+    )
   })
 
   ipcMain.handle('setPresetEnabled', async (_e, key: string, enabled: boolean) => {

@@ -9,7 +9,7 @@
 // - status 反映目标存在性(目标存在/缺失/链接断裂)
 
 import { test, expect, describe } from 'vitest'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -89,14 +89,14 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     expect(codexDep.source_path).toBe(skillDir)
     expect(typeof codexDep.deployed_at).toBe('string')
     expect(codexDep.source_hash_at_deploy).toHaveLength(64)
-    expect(codexDep.status).toBe('目标存在(副本)')
+    expect(codexDep.status).toBe('normal')
 
     // agents 部署:symlink mode + 精确 target_path + status
     const agentsDep = skill.deployments.find((d) => d.target_tool === 'agents')!
     expect(agentsDep.mode).toBe('symlink')
     expect(agentsDep.target_path).toBe(agentsTargetDir)
     expect(agentsDep.source_path).toBe(skillDir)
-    expect(agentsDep.status).toBe('目标存在(链接)')
+    expect(agentsDep.status).toBe('normal')
 
     // source 与 deployment 路径不重叠(部署目标不是 source)
     const sourcePaths = skill.sources.map((s) => s.path)
@@ -149,7 +149,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     expect(skill.deployments).toHaveLength(1)
     expect(skill.deployments[0].target_path).toBe(targetDir)
     expect(skill.deployments[0].target_path).not.toBe(skillDir)
-    expect(skill.deployments[0].status).toBe('目标存在(链接)')
+    expect(skill.deployments[0].status).toBe('normal')
 
     central.cleanup()
     target.cleanup()
@@ -205,12 +205,12 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
 
     // 部署后 status = 目标存在(副本)
     let view = readSkillsView(db, [mkTool('codex', [target.dir])])
-    expect(view[0].deployments[0].status).toBe('目标存在(副本)')
+    expect(view[0].deployments[0].status).toBe('normal')
 
     // 删 target → status 变为 目标缺失
     rmSync(targetDir, { recursive: true, force: true })
     view = readSkillsView(db, [mkTool('codex', [target.dir])])
-    expect(view[0].deployments[0].status).toBe('目标缺失')
+    expect(view[0].deployments[0].status).toBe('drift')
 
     source.cleanup()
     target.cleanup()
@@ -246,12 +246,47 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
 
     // 部署后 status = 目标存在(链接)
     let view = readSkillsView(db, [mkTool('codex', [target.dir])])
-    expect(view[0].deployments[0].status).toBe('目标存在(链接)')
+    expect(view[0].deployments[0].status).toBe('normal')
 
     // 删源 → symlink 断裂 → status = 链接断裂
     rmSync(skillDir, { recursive: true, force: true })
     view = readSkillsView(db, [mkTool('codex', [target.dir])])
-    expect(view[0].deployments[0].status).toBe('链接断裂')
+    expect(view[0].deployments[0].status).toBe('source-missing')
+
+    source.cleanup()
+    target.cleanup()
+    backups.cleanup()
+    cleanup()
+  })
+
+  test('symlink target replaced by a real directory reports link-mismatch', () => {
+    const source = createTempDir('iss27-src-')
+    const target = createTempDir('iss27-tgt-')
+    const backups = createTempDir('iss27-bak-')
+    const { db, cleanup } = createTempDb()
+    const skillName = 'replaced'
+    const skillDir = join(source.dir, skillName)
+    mkdirSync(skillDir)
+    writeFileSync(join(skillDir, 'SKILL.md'), 'body')
+    const skillId = upsertSkill(db, skillName, skillDir)
+    upsertSource(db, skillId, skillDir, 'hash', Date.now(), 'indexed')
+    const targetDir = join(target.dir, skillName)
+    deploySkill(db, {
+      skillId,
+      skillName,
+      targetTool: 'codex',
+      mode: 'symlink',
+      sourcePath: skillDir,
+      targetDir,
+      backupsDir: backups.dir,
+      canSymlink: true,
+      canJunction: false
+    })
+    unlinkSync(targetDir)
+    mkdirSync(targetDir)
+
+    const view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    expect(view[0].deployments[0].status).toBe('link-mismatch')
 
     source.cleanup()
     target.cleanup()

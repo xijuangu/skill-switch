@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, symlinkSync } from 'fs'
 import { join } from 'path'
 import { createTempDir } from './helpers/temp'
 import {
+  assessSafeDeployTarget,
   assertAbsolutePath,
   assertSafeDeployTarget,
   isPathWithin,
@@ -56,6 +57,20 @@ describe('path safety', () => {
 
 // issue #24: 禁止把 skill 部署到自身 source 路径(或在父子目录重叠处)
 describe('assertSafeDeployTarget (issue #24 self-deploy guard)', () => {
+  test('reports Windows self-deploy and nested targets as ineligible', () => {
+    expect(
+      assessSafeDeployTarget(
+        'C:\\Users\\me\\.codex\\skills\\demo',
+        'C:\\Users\\me\\.codex\\skills\\demo'
+      ).eligible
+    ).toBe(false)
+    expect(
+      assessSafeDeployTarget(
+        'C:\\Users\\me\\.codex\\skills',
+        'C:\\Users\\me\\.codex\\skills\\demo'
+      ).eligible
+    ).toBe(false)
+  })
   test('rejects identical path (normalized + realpath)', () => {
     const { dir, cleanup } = createTempDir('ss-self-')
     expect(() => assertSafeDeployTarget(dir, dir)).toThrow(/own source path/)

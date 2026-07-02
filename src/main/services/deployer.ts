@@ -17,7 +17,6 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
-  statSync,
   symlinkSync,
   unlinkSync
 } from 'fs'
@@ -119,37 +118,6 @@ function pathEntryExists(targetPath: string): boolean {
   } catch {
     return false
   }
-}
-
-/**
- * issue #23:轻量描述 deployment 的"当前状态"——只做存在性检查,
- * 不计算完整 drift(完整 drift 见 detectDrift,工具页用)。
- *
- * - symlink/junction:目标存在且链接有效 → "目标存在(链接)";链接断裂(源被删)→ "链接断裂"
- * - copy:目标存在 → "目标存在(副本)";目标缺失 → "目标缺失"
- * - target_path 为 null(legacy)→ "未解析"
- *
- * 注意:lstatSync 不跟随符号链接,所以 symlink 条目即使指向已删的源也"存在"。
- * 因此对 symlink/junction 模式需用 statSync(跟随链接)验证目标可达。
- */
-export function describeDeploymentStatus(
-  targetPath: string | null,
-  mode: DeployMode
-): string {
-  if (targetPath == null) return '未解析'
-  // 链接类:条目存在 + 目标可达 → 存在;条目存在但目标不可达 → 断裂;条目本身不存在 → 缺失
-  if (mode === 'symlink' || mode === 'junction') {
-    if (!pathEntryExists(targetPath)) return '目标缺失'
-    try {
-      // statSync 跟随链接;目标不可达会抛错(broken symlink)
-      statSync(targetPath)
-      return '目标存在(链接)'
-    } catch {
-      return '链接断裂'
-    }
-  }
-  // copy 类:目录/文件存在 → 存在;否则缺失
-  return pathEntryExists(targetPath) ? '目标存在(副本)' : '目标缺失'
 }
 
 function targetMatchesDeployment(

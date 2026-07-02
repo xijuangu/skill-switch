@@ -18,7 +18,7 @@ describe('scanner', () => {
       '---\nname: grilling\n---\n# grilling skill\n'
     )
 
-    const result = scanToolDir(db, dir)
+    const result = scanToolDir(db, dir, new Set(), 'codex')
 
     expect(result.scanned).toBe(1)
     const skill = getSkillByName(db, 'grilling')
@@ -28,6 +28,8 @@ describe('scanner', () => {
     const sources = getSourcesBySkillId(db, skill!.id)
     expect(sources).toHaveLength(1)
     expect(sources[0].source_type).toBe('indexed')
+    expect(sources[0].source_origin).toBe('scan')
+    expect(sources[0].source_tool).toBe('codex')
     expect(sources[0].path).toBe(join(dir, 'grilling'))
     expect(sources[0].hash).toBeTruthy()
     expect(sources[0].mtime).toBeGreaterThan(0)

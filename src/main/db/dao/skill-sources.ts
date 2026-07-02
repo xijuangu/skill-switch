@@ -1,6 +1,6 @@
 // skill_sources 表 DAO
 import type { DB } from '../database'
-import type { SkillSource, SourceType } from '../../types'
+import type { SkillSource, SourceOrigin, SourceType } from '../../types'
 
 /**
  * Upsert 一个 source:按 (skill_id, path) UNIQUE 约束。
@@ -14,16 +14,24 @@ export function upsertSource(
   hash: string,
   mtime: number,
   sourceType: SourceType,
-  repoUrl?: string,
-  commitSha?: string
+  metadata: {
+    repoUrl?: string
+    commitSha?: string
+    origin?: SourceOrigin
+    tool?: string | null
+  } = {}
 ): void {
+  const sourceOrigin = metadata.origin ?? 'legacy'
+  const sourceTool = metadata.tool ?? null
   db.prepare(
-    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, discovered_at, repo_url, commit_sha)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, source_origin, source_tool, discovered_at, repo_url, commit_sha)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(skill_id, path) DO UPDATE SET
        hash = excluded.hash,
        mtime = excluded.mtime,
        source_type = excluded.source_type,
+       source_origin = excluded.source_origin,
+       source_tool = excluded.source_tool,
        discovered_at = excluded.discovered_at,
        repo_url = excluded.repo_url,
        commit_sha = excluded.commit_sha`
@@ -33,9 +41,11 @@ export function upsertSource(
     hash,
     mtime,
     sourceType,
+    sourceOrigin,
+    sourceTool,
     new Date().toISOString(),
-    repoUrl ?? null,
-    commitSha ?? null
+    metadata.repoUrl ?? null,
+    metadata.commitSha ?? null
   )
 }
 

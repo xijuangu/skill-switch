@@ -5,6 +5,8 @@ const api = {
   scan: () => ipcRenderer.invoke('scan'),
   getSkills: () => ipcRenderer.invoke('getSkills'),
   getSettings: () => ipcRenderer.invoke('getSettings'),
+  getDeployTargets: (skillId: number, sourcePath: string) =>
+    ipcRenderer.invoke('getDeployTargets', skillId, sourcePath),
   setPresetEnabled: (key: string, enabled: boolean) =>
     ipcRenderer.invoke('setPresetEnabled', key, enabled),
   setPresetPaths: (key: string, paths: string[]) =>

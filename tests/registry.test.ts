@@ -28,6 +28,8 @@ function mkSrc(partial: Partial<SkillSource> & Pick<SkillSource, 'id' | 'path' |
     skill_id: 7,
     mtime: 100,
     source_type: 'indexed',
+    source_origin: 'legacy',
+    source_tool: null,
     discovered_at: '2026-01-01T00:00:00.000Z',
     repo_url: null,
     commit_sha: null,
@@ -482,14 +484,14 @@ function mkTool(partial: Partial<ToolConfig> & Pick<ToolConfig, 'key' | 'paths'>
 describe('filterSourcesByEnabledTools (issue #20)', () => {
   test('single source from enabled tool → kept', () => {
     const toolDir = '/home/u/.codex/skills'
-    const src = mkSrc({ id: 1, path: `${toolDir}/grilling`, hash: 'h1' })
+    const src = mkSrc({ id: 1, path: `${toolDir}/grilling`, hash: 'h1', source_origin: 'scan', source_tool: 'codex' })
     const tools = [mkTool({ key: 'codex', paths: [toolDir] })]
     expect(filterSourcesByEnabledTools([src], tools)).toEqual([src])
   })
 
   test('single source from disabled tool → hidden (empty result)', () => {
     const toolDir = '/home/u/.codex/skills'
-    const src = mkSrc({ id: 1, path: `${toolDir}/grilling`, hash: 'h1' })
+    const src = mkSrc({ id: 1, path: `${toolDir}/grilling`, hash: 'h1', source_origin: 'scan', source_tool: 'codex' })
     const tools = [mkTool({ key: 'codex', paths: [toolDir], enabled: false })]
     expect(filterSourcesByEnabledTools([src], tools)).toEqual([])
   })
@@ -497,8 +499,8 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
   test('multi-source: enabled + disabled → only enabled source shown', () => {
     const codexDir = '/home/u/.codex/skills'
     const agentsDir = '/home/u/.agents/skills'
-    const codexSrc = mkSrc({ id: 1, path: `${codexDir}/shared`, hash: 'h1', discovered_at: '2026-01-01T00:00:00.000Z' })
-    const agentsSrc = mkSrc({ id: 2, path: `${agentsDir}/shared`, hash: 'h1', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
+    const codexSrc = mkSrc({ id: 1, path: `${codexDir}/shared`, hash: 'h1', source_origin: 'scan', source_tool: 'codex', discovered_at: '2026-01-01T00:00:00.000Z' })
+    const agentsSrc = mkSrc({ id: 2, path: `${agentsDir}/shared`, hash: 'h1', source_origin: 'scan', source_tool: 'agents', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
     const tools = [
       mkTool({ key: 'codex', paths: [codexDir] }),
       mkTool({ key: 'agents', paths: [agentsDir], enabled: false })
@@ -510,8 +512,8 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
   test('conflicting sources: disabled conflicting source hidden → conflict recomputed as none', () => {
     const codexDir = '/home/u/.codex/skills'
     const agentsDir = '/home/u/.agents/skills'
-    const codexSrc = mkSrc({ id: 1, path: `${codexDir}/diverged`, hash: 'hA', discovered_at: '2026-01-01T00:00:00.000Z' })
-    const agentsSrc = mkSrc({ id: 2, path: `${agentsDir}/diverged`, hash: 'hB', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
+    const codexSrc = mkSrc({ id: 1, path: `${codexDir}/diverged`, hash: 'hA', source_origin: 'scan', source_tool: 'codex', discovered_at: '2026-01-01T00:00:00.000Z' })
+    const agentsSrc = mkSrc({ id: 2, path: `${agentsDir}/diverged`, hash: 'hB', source_origin: 'scan', source_tool: 'agents', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
     const tools = [
       mkTool({ key: 'codex', paths: [codexDir] }),
       mkTool({ key: 'agents', paths: [agentsDir], enabled: false })
@@ -553,6 +555,8 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
       id: 2,
       path: `${codexDir}/grilling`,
       hash: 'h1',
+      source_origin: 'scan',
+      source_tool: 'codex',
       mtime: 200,
       discovered_at: '2026-01-02T00:00:00.000Z'
     })
@@ -570,9 +574,26 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
     expect(filterSourcesByEnabledTools([localSrc], tools)).toEqual([localSrc])
   })
 
+  test('user-added local source inside a disabled tool path remains visible', () => {
+    const toolDir = '/home/u/.codex/skills'
+    const localSrc = {
+      ...mkSrc({ id: 1, path: `${toolDir}/manually-added`, hash: 'h1' }),
+      source_origin: 'local',
+      source_tool: null
+    } as SkillSource & {
+      source_origin: 'local'
+      source_tool: null
+    }
+    const tools = [
+      mkTool({ key: 'codex', paths: [toolDir], enabled: false })
+    ]
+
+    expect(filterSourcesByEnabledTools([localSrc], tools)).toEqual([localSrc])
+  })
+
   test('re-enable tool restores source visibility (stateless: enabled=true keeps it)', () => {
     const toolDir = '/home/u/.codex/skills'
-    const src = mkSrc({ id: 1, path: `${toolDir}/grilling`, hash: 'h1' })
+    const src = mkSrc({ id: 1, path: `${toolDir}/grilling`, hash: 'h1', source_origin: 'scan', source_tool: 'codex' })
     // 禁用时隐藏
     const disabled = [mkTool({ key: 'codex', paths: [toolDir], enabled: false })]
     expect(filterSourcesByEnabledTools([src], disabled)).toEqual([])
@@ -584,7 +605,13 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
   test('source under both enabled and disabled tool → kept (enabled wins)', () => {
     // 罕见但安全:source 路径同时在 enabled 和 disabled 工具路径下 → 保留
     const sharedDir = '/home/u/.codex/skills'
-    const src = mkSrc({ id: 1, path: `${sharedDir}/grilling`, hash: 'h1' })
+    const src = mkSrc({
+      id: 1,
+      path: `${sharedDir}/grilling`,
+      hash: 'h1',
+      source_origin: 'scan',
+      source_tool: 'codex'
+    })
     const tools = [
       mkTool({ key: 'codex', paths: [sharedDir], enabled: false }),
       mkTool({ key: 'custom', paths: [sharedDir], enabled: true, isCustom: true })
@@ -595,8 +622,8 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
   test('skill with all sources from disabled tools → empty (excluded from Skills page)', () => {
     const codexDir = '/home/u/.codex/skills'
     const agentsDir = '/home/u/.agents/skills'
-    const codexSrc = mkSrc({ id: 1, path: `${codexDir}/only`, hash: 'h1' })
-    const agentsSrc = mkSrc({ id: 2, path: `${agentsDir}/only`, hash: 'h1', mtime: 200 })
+    const codexSrc = mkSrc({ id: 1, path: `${codexDir}/only`, hash: 'h1', source_origin: 'scan', source_tool: 'codex' })
+    const agentsSrc = mkSrc({ id: 2, path: `${agentsDir}/only`, hash: 'h1', source_origin: 'scan', source_tool: 'agents', mtime: 200 })
     const tools = [
       mkTool({ key: 'codex', paths: [codexDir], enabled: false }),
       mkTool({ key: 'agents', paths: [agentsDir], enabled: false })
@@ -612,8 +639,8 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
   test('multi-path tool (TRAE): source in one enabled path kept, disabled path hidden', () => {
     const traeCn = '/home/u/.trae-cn/skills'
     const traeIntl = '/home/u/.trae/skills'
-    const srcCn = mkSrc({ id: 1, path: `${traeCn}/grilling`, hash: 'h1', discovered_at: '2026-01-01T00:00:00.000Z' })
-    const srcIntl = mkSrc({ id: 2, path: `${traeIntl}/grilling`, hash: 'h1', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
+    const srcCn = mkSrc({ id: 1, path: `${traeCn}/grilling`, hash: 'h1', source_origin: 'scan', source_tool: 'trae', discovered_at: '2026-01-01T00:00:00.000Z' })
+    const srcIntl = mkSrc({ id: 2, path: `${traeIntl}/grilling`, hash: 'h1', source_origin: 'scan', source_tool: 'trae', mtime: 200, discovered_at: '2026-01-02T00:00:00.000Z' })
     // TRAE 是单工具多路径,禁用则两条路径的 source 都隐藏
     const tools = [mkTool({ key: 'trae', paths: [traeCn, traeIntl], enabled: false })]
     expect(filterSourcesByEnabledTools([srcCn, srcIntl], tools)).toEqual([])

@@ -1,4 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import {
+  completeMutation,
+  createLatestRequestGate
+} from './async-state'
 
 type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
@@ -8,6 +12,9 @@ type ToolConfigView = SettingsView['tools'][number]
 type BackupView = Awaited<ReturnType<typeof window.api.listBackups>>[number]
 type DeployResultView = Awaited<ReturnType<typeof window.api.deploy>>
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
+type DeployTargetOptionView = Awaited<
+  ReturnType<typeof window.api.getDeployTargets>
+>[number]
 type DriftStatusView = ToolWithDriftsView['drifts'][number]
 type InstallResultView = Awaited<ReturnType<typeof window.api.installFromGitHub>>
 
@@ -20,22 +27,36 @@ export default function App() {
   const [tools, setTools] = useState<ToolWithDriftsView[]>([])
   const [scanning, setScanning] = useState(false)
   const [lastScan, setLastScan] = useState<ScanResult | null>(null)
+  const refreshGate = useRef(createLatestRequestGate())
+  const [refreshError, setRefreshError] = useState<string | null>(null)
 
   // issue #21: 统一的 mutation 后重载机制——任何 deploy / undeploy / remove /
   // install / scan 成功后都调用 refresh,一次性重读 skills + tools 权威状态,
   // 避免各对话框分别遗漏或只刷新单个页面。自动刷新只读 DB,不触发全量磁盘扫描。
   const refresh = useCallback(async () => {
-    const [skillsResult, toolsResult] = await Promise.all([
-      window.api.getSkills(),
-      window.api.getTools()
-    ])
-    setSkills(skillsResult)
-    setTools(toolsResult)
+    const generation = refreshGate.current.start()
+    try {
+      const [skillsResult, toolsResult] = await Promise.all([
+        window.api.getSkills(),
+        window.api.getTools()
+      ])
+      if (!refreshGate.current.isLatest(generation)) return
+      setSkills(skillsResult)
+      setTools(toolsResult)
+      setRefreshError(null)
+    } catch (error) {
+      if (refreshGate.current.isLatest(generation)) {
+        setRefreshError(error instanceof Error ? error.message : String(error))
+      }
+      throw error
+    }
   }, [])
 
   useEffect(() => {
     if (page === 'skills' || page === 'tools') {
-      refresh()
+      refresh().catch((error) => {
+        setRefreshError(error instanceof Error ? error.message : String(error))
+      })
     }
   }, [page, refresh])
 
@@ -63,10 +84,14 @@ export default function App() {
       </nav>
 
       <main className="flex-1 p-6 overflow-auto">
+        {refreshError && (
+          <div className="mb-4 px-3 py-2 rounded border border-red-200 bg-red-50 text-red-700 text-sm">
+            刷新失败：{refreshError}
+          </div>
+        )}
         {page === 'skills' && (
           <SkillsPage
             skills={skills}
-            tools={tools}
             scanning={scanning}
             lastScan={lastScan}
             onScan={handleScan}
@@ -237,18 +262,16 @@ function BackupsPage() {
 
 function SkillsPage({
   skills,
-  tools,
   scanning,
   lastScan,
   onScan,
   onRefresh
 }: {
   skills: SkillView[]
-  tools: ToolWithDriftsView[]
   scanning: boolean
   lastScan: ScanResult | null
   onScan: () => void
-  onRefresh: () => void
+  onRefresh: () => Promise<void>
 }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   // 冲突选择 modal
@@ -308,7 +331,10 @@ function SkillsPage({
   }
 
   const handleDeployDone = async (result: DeployResultView | null) => {
-    setDeployTarget(null)
+    if (!result) {
+      setDeployTarget(null)
+      return
+    }
     if (result) {
       // #9: junction fallback / copy 降级时在反馈消息里提示
       const degradeNote =
@@ -321,18 +347,23 @@ function SkillsPage({
           : `已部署(${result.action})到 ${result.targetPath}${degradeNote}`
       setFeedback(msg)
       await onRefresh()
+      setDeployTarget(null)
       setTimeout(() => setFeedback(null), 6000)
     }
   }
 
   const handleInstallDone = async (result: InstallResultView | null) => {
-    setInstallOpen(false)
+    if (!result) {
+      setInstallOpen(false)
+      return
+    }
     if (result) {
       const msg = result.overwritten
         ? `已安装「${result.skillName}」(覆盖了已有版本,已创建备份)。`
         : `已安装「${result.skillName}」。`
       setFeedback(msg)
       await onRefresh()
+      setInstallOpen(false)
       setTimeout(() => setFeedback(null), 5000)
     }
   }
@@ -441,11 +472,11 @@ function SkillsPage({
       } else {
         setUndeployFromTarget({ ...undeployFromTarget, deployments: remaining })
       }
-      await onRefresh()
+      await onRefresh().catch(() => undefined)
     } catch (e) {
       setFeedback(e instanceof Error ? e.message : String(e))
       // issue #21: 失败时重新读取权威状态,确保 UI 与 DB 一致
-      await onRefresh()
+      await onRefresh().catch(() => undefined)
       setTimeout(() => setFeedback(null), 5000)
     } finally {
       setActionBusy(false)
@@ -526,7 +557,6 @@ function SkillsPage({
             <SkillRow
               key={skill.id}
               skill={skill}
-              tools={tools}
               expanded={expanded.has(skill.id)}
               onToggleExpand={() => toggleExpand(skill.id)}
               onDeploy={() => handleDeployClick(skill)}
@@ -849,35 +879,26 @@ function RemoveFromRegistryConfirm({
  * - indexed + 路径不在任何工具配置下 → "添加本地"(用户主动登记)
  */
 function sourceKindLabel(
-  src: SkillSourceView,
-  toolConfigs: ToolConfigView[]
+  src: SkillSourceView
 ): string {
-  if (src.source_type === 'central-repo') {
-    return src.repo_url ? 'GitHub 安装' : 'ZIP 安装'
+  const labels: Record<SkillSourceView['source_origin'], string> = {
+    scan: '扫描发现',
+    local: '添加本地',
+    github: 'GitHub 安装',
+    zip: 'ZIP 安装',
+    legacy: '旧版来源'
   }
-  // indexed:检查路径是否落在某个工具配置的 paths 下
-  const sep = '/'
-  const norm = (p: string) => (p.endsWith(sep) ? p.slice(0, -1) : p)
-  const srcPath = norm(src.path)
-  const underTool = toolConfigs.some((tc) =>
-    tc.paths.some((p) => {
-      const root = norm(p)
-      return srcPath === root || srcPath.startsWith(root + sep)
-    })
-  )
-  return underTool ? '扫描发现' : '添加本地'
+  return labels[src.source_origin]
 }
 
 function SkillRow({
   skill,
-  tools,
   expanded,
   onToggleExpand,
   onDeploy,
   onContextMenu
 }: {
   skill: SkillView
-  tools: ToolWithDriftsView[]
   expanded: boolean
   onToggleExpand: () => void
   onDeploy: () => void
@@ -942,7 +963,7 @@ function SkillRow({
                   <li key={src.id} className="text-xs grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 items-start">
                     <span className="text-neutral-500">类型</span>
                     <span className="text-neutral-700 font-medium">
-                      {sourceKindLabel(src, tools.map((t) => t.config))}
+                      {sourceKindLabel(src)}
                       <span className="text-neutral-400 ml-1">({src.source_type})</span>
                     </span>
                     <span className="text-neutral-500">path</span>
@@ -993,7 +1014,9 @@ function SkillRow({
                     <span className="text-neutral-500">mode</span>
                     <span className="text-neutral-700">{dep.mode}</span>
                     <span className="text-neutral-500">状态</span>
-                    <span className="text-neutral-700">{dep.status}</span>
+                    <span className="text-neutral-700">
+                      {DRIFT_BADGE[dep.status]?.label ?? dep.status}
+                    </span>
                     <span className="text-neutral-500">deployed_at</span>
                     <span className="text-neutral-700">{dep.deployed_at}</span>
                   </li>
@@ -1196,21 +1219,6 @@ function ViewMdSourcePickerModal({
   )
 }
 
-/**
- * issue #24:UI 侧禁用"明显的"自部署目标根——source 位于工具根内(部署目标
- * path/skillName 会等于或落在 source 内),或工具根位于 source 内(反向重叠)。
- * 仅做词法判定处理明显场景;符号链接别名等非显然情况由主进程
- * assertSafeDeployTarget 权威拦截,UI 不重复 realpath 逻辑。
- */
-function isObviousSelfDeployRoot(sourcePath: string, targetRoot: string): boolean {
-  const sep = '/'
-  const norm = (p: string) => (p.endsWith(sep) ? p.slice(0, -1) : p)
-  const src = norm(sourcePath)
-  const root = norm(targetRoot)
-  if (src === root) return true
-  return src.startsWith(root + sep) || root.startsWith(src + sep)
-}
-
 function DeployDialog({
   skill,
   sourcePath,
@@ -1218,9 +1226,12 @@ function DeployDialog({
 }: {
   skill: SkillView
   sourcePath: string
-  onDone: (result: DeployResultView | null) => void
+  onDone: (result: DeployResultView | null) => Promise<void>
 }) {
   const [settings, setSettings] = useState<SettingsView | null>(null)
+  const [targetOptions, setTargetOptions] = useState<
+    DeployTargetOptionView[]
+  >([])
   const [selectedTool, setSelectedTool] = useState<string>('')
   const [selectedTargetRoot, setSelectedTargetRoot] = useState<string>('')
   const [mode, setMode] = useState<DeployMode>('copy')
@@ -1228,51 +1239,37 @@ function DeployDialog({
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    window.api.getSettings().then((s) => {
-      setSettings(s)
-      const deployedTarget = skill.deployments[0]?.target_path
-      const selected = deployedTarget
-        ? s.tools
-            .flatMap((tool) =>
-              tool.existingPaths.map((path) => ({ tool, path }))
+    Promise.all([
+      window.api.getSettings(),
+      window.api.getDeployTargets(skill.id, sourcePath)
+    ])
+      .then(([s, options]) => {
+        setSettings(s)
+        setTargetOptions(options)
+        const selected = options.find(
+          (option) =>
+            option.eligible &&
+            skill.deployments.some(
+              (deployment) => deployment.target_path === option.targetPath
             )
-            .find(
-              ({ path }) =>
-                path === deployedTarget &&
-                // issue #24:已部署目标若构成自部署也不再默认选中
-                !isObviousSelfDeployRoot(sourcePath, path)
-            )
-        : undefined
-      // issue #24:默认选中首个非自部署的可用目标根,避免下拉框初始指向被禁用项
-      const firstSafe = s.tools
-        .filter((tool) => tool.enabled && tool.exists)
-        .flatMap((tool) => tool.existingPaths.map((path) => ({ tool, path })))
-        .find(({ path }) => !isObviousSelfDeployRoot(sourcePath, path))
-      if (selected) {
-        setSelectedTool(selected.tool.key)
-        setSelectedTargetRoot(selected.path)
-      } else if (firstSafe) {
-        setSelectedTool(firstSafe.tool.key)
-        setSelectedTargetRoot(firstSafe.path)
-      }
-      // 平台支持 symlink 则默认 symlink,否则 copy
-      setMode(s.platform.canSymlink ? 'symlink' : 'copy')
-    })
+        )
+        const firstSafe = options.find((option) => option.eligible)
+        if (selected) {
+          setSelectedTool(selected.targetTool)
+          setSelectedTargetRoot(selected.targetRoot)
+        } else if (firstSafe) {
+          setSelectedTool(firstSafe.targetTool)
+          setSelectedTargetRoot(firstSafe.targetRoot)
+        }
+        setMode(s.platform.canSymlink ? 'symlink' : 'copy')
+      })
+      .catch((loadError) => {
+        setError(loadError instanceof Error ? loadError.message : String(loadError))
+      })
   }, [])
 
-  const availableTools = settings?.tools.filter((t) => t.enabled && t.exists) ?? []
-  const availableTargets = availableTools
-    .flatMap((tool) => tool.existingPaths.map((path) => ({ tool, path })))
-    .filter(({ tool, path }) => {
-      // issue #24:UI 侧禁用明显的自部署目标根;权威拦截在主进程 assertSafeDeployTarget
-      if (isObviousSelfDeployRoot(sourcePath, path)) return false
-      const existing = skill.deployments.find(
-        (deployment) => deployment.target_tool === tool.key
-      )
-      return !existing || existing.target_path === path
-    })
-  const targetSelectionValid = availableTargets.some(
-    ({ path }) => path === selectedTargetRoot
+  const targetSelectionValid = targetOptions.some(
+    (option) => option.targetRoot === selectedTargetRoot && option.eligible
   )
   const selectedDeployment = skill.deployments.find(
     (deployment) => deployment.target_tool === selectedTool
@@ -1315,7 +1312,7 @@ function DeployDialog({
         selectedTargetRoot,
         confirmationToken
       )
-      onDone(result)
+      await completeMutation(result, onDone)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -1351,24 +1348,40 @@ function DeployDialog({
             <select
               value={selectedTargetRoot}
               onChange={(e) => {
-                const selected = availableTargets.find(
-                  (target) => target.path === e.target.value
+                const selected = targetOptions.find(
+                  (target) => target.targetRoot === e.target.value
                 )
                 setSelectedTargetRoot(e.target.value)
-                setSelectedTool(selected?.tool.key ?? '')
+                setSelectedTool(selected?.targetTool ?? '')
               }}
               disabled={busy}
               className="w-full border border-neutral-300 rounded px-2 py-1.5 text-sm"
             >
-              {availableTargets.length === 0 && (
-                <option value="" disabled>无可用工具(请在设置中启用)</option>
+              {targetOptions.length === 0 && (
+                <option value="" disabled>无可用工具目标</option>
               )}
-              {availableTargets.map(({ tool, path }) => (
-                <option key={`${tool.key}:${path}`} value={path}>
-                  {tool.displayName} — {path}
+              {targetOptions.map((option) => (
+                <option
+                  key={`${option.targetTool}:${option.targetRoot}`}
+                  value={option.targetRoot}
+                  disabled={!option.eligible}
+                >
+                  {option.displayName} — {option.targetRoot}
+                  {!option.eligible ? `（不可用：${option.reason}）` : ''}
                 </option>
               ))}
             </select>
+            {targetOptions.length > 0 &&
+              !targetOptions.some((option) => option.eligible) && (
+                <div className="mt-2 text-xs text-red-700 space-y-1">
+                  <p>没有安全的部署目标：</p>
+                  {targetOptions.map((option) => (
+                    <p key={`${option.targetTool}:${option.targetRoot}`}>
+                      {option.displayName}：{option.reason}
+                    </p>
+                  ))}
+                </div>
+              )}
             {selectedDeployment && (
               <p className="text-xs text-neutral-400 mt-1">
                 此工具已有部署，只能更新原目标；如需更换路径，请先卸载。
@@ -1494,7 +1507,7 @@ function ToolsPage({
       await onRefresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-      await onRefresh()
+      await onRefresh().catch(() => undefined)
     } finally {
       setBusy(null)
     }
@@ -1512,7 +1525,7 @@ function ToolsPage({
       await onRefresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-      await onRefresh()
+      await onRefresh().catch(() => undefined)
     } finally {
       setBusy(null)
     }
@@ -1537,7 +1550,7 @@ function ToolsPage({
       await onRefresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-      await onRefresh()
+      await onRefresh().catch(() => undefined)
     } finally {
       setBusy(null)
     }
@@ -1809,7 +1822,7 @@ function InstallDialog({
   onDone
 }: {
   initialTab: 'github' | 'zip' | 'local-dir'
-  onDone: (result: InstallResultView | null) => void
+  onDone: (result: InstallResultView | null) => Promise<void>
 }) {
   const [tab, setTab] = useState<'github' | 'zip' | 'local-dir'>(initialTab)
   const [githubUrl, setGithubUrl] = useState('')
@@ -1855,7 +1868,7 @@ function InstallDialog({
         }
         result = await window.api.installFromLocalDir(localPath)
       }
-      onDone(result)
+      await completeMutation(result, onDone)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {

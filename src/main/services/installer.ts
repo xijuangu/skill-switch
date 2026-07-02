@@ -210,8 +210,11 @@ export function installFromGitHub(
         hash,
         mtime,
         'central-repo',
-        parsed.repoWebUrl,
-        commitSha
+        {
+          repoUrl: parsed.repoWebUrl,
+          commitSha,
+          origin: 'github'
+        }
       )
       return id
     })
@@ -262,7 +265,15 @@ export function installFromZip(
 
     const skillId = runInTransaction(db, () => {
       const id = upsertSkill(db, skillName, destPath)
-      upsertSource(db, id, destPath, hash, mtime, 'central-repo')
+      upsertSource(
+        db,
+        id,
+        destPath,
+        hash,
+        mtime,
+        'central-repo',
+        { origin: 'zip' }
+      )
       return id
     })
 
@@ -297,7 +308,15 @@ export function installFromLocalDir(
 
   const skillId = runInTransaction(db, () => {
     const id = upsertSkill(db, skillName, localPath)
-    upsertSource(db, id, localPath, hash, mtime, 'indexed')
+    upsertSource(
+      db,
+      id,
+      localPath,
+        hash,
+        mtime,
+        'indexed',
+        { origin: 'local' }
+    )
     return id
   })
 

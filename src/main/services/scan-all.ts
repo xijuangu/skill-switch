@@ -62,7 +62,7 @@ export function scanAllTools(
         })
         continue
       }
-      const r = scanToolDir(db, dir, skipPaths)
+      const r = scanToolDir(db, dir, skipPaths, tool.key)
       successfullyScannedDirs.push(dir)
       results.push({
         key: tool.key,

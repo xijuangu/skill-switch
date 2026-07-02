@@ -35,7 +35,12 @@ function resolveSkillName(skillDir: string): string {
  * @param skipPaths 要跳过的子目录绝对路径集合(如 copy 部署的目标目录,
  *                  避免副本被当成新 source 索引进来)。默认空集合。
  */
-export function scanToolDir(db: DB, toolDir: string, skipPaths: Set<string> = new Set()): ScanResult {
+export function scanToolDir(
+  db: DB,
+  toolDir: string,
+  skipPaths: Set<string> = new Set(),
+  sourceTool: string | null = null
+): ScanResult {
   const entries = readdirSync(toolDir, { withFileTypes: true })
   const skillDirs = entries
     .filter((e) => e.isDirectory())
@@ -51,7 +56,15 @@ export function scanToolDir(db: DB, toolDir: string, skipPaths: Set<string> = ne
     const mtime = Math.floor(statSync(skillDir).mtimeMs)
     runInTransaction(db, () => {
       const skillId = upsertSkill(db, name, skillDir)
-      upsertSource(db, skillId, skillDir, hash, mtime, 'indexed')
+      upsertSource(
+        db,
+        skillId,
+        skillDir,
+        hash,
+        mtime,
+        'indexed',
+        { origin: 'scan', tool: sourceTool }
+      )
       upserted++
     })
     scannedPaths.push(skillDir)

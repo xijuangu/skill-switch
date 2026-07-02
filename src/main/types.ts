@@ -2,6 +2,7 @@
 
 /** skill 来源类型:索引(不搬文件)/ 中央仓库实体(新安装) */
 export type SourceType = 'indexed' | 'central-repo'
+export type SourceOrigin = 'scan' | 'local' | 'github' | 'zip' | 'legacy'
 
 /** 部署模式 */
 export type DeployMode = 'symlink' | 'junction' | 'copy'
@@ -22,6 +23,8 @@ export interface SkillSource {
   hash: string
   mtime: number
   source_type: SourceType
+  source_origin: SourceOrigin
+  source_tool: string | null
   discovered_at: string
   /** GitHub 安装记录的源仓库 URL(仅 central-repo + GitHub 来源有值) */
   repo_url: string | null
@@ -67,11 +70,9 @@ export interface ConflictStatus {
 export interface SkillWithConflict extends SkillWithSources {
   conflict: ConflictStatus
   /**
-   * issue #23:展开视图用的部署列表,每条附带"当前状态"。
-   * status 值:目标存在(目标在磁盘上)/ 目标缺失(被手动删)/ 链接断裂(symlink 源缺失)。
-   * 详细漂移(kind)见工具页 detectDriftsForTool,这里只做轻量存在性检查。
+   * 展开视图用的部署列表,复用工具页的完整 DriftKind 状态。
    */
-  deployments: (Deployment & { status: string })[]
+  deployments: (Deployment & { status: DriftKind })[]
 }
 
 /** 扫描结果:发现的 skill 数量 + 本次实际 upsert 的 source 路径列表 */

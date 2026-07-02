@@ -14,6 +14,8 @@ export interface SkillSourceView {
   hash: string
   mtime: number
   source_type: 'indexed' | 'central-repo'
+  source_origin: 'scan' | 'local' | 'github' | 'zip' | 'legacy'
+  source_tool: string | null
   discovered_at: string
   repo_url: string | null
   commit_sha: string | null
@@ -35,13 +37,13 @@ export interface SkillWithConflictView {
   created_at: string
   sources: SkillSourceView[]
   conflict: ConflictStatusView
-  /** issue #23:每条 deployment 附带轻量"当前状态" */
+  /** 每条 deployment 附带与工具页一致的完整 drift 状态 */
   deployments: SkillDeploymentView[]
 }
 
 /** issue #23:Skills 页展开视图用,DeploymentView + 当前状态描述 */
 export interface SkillDeploymentView extends DeploymentView {
-  status: string
+  status: DriftKindView
 }
 
 export interface ToolScanResultView {
@@ -66,6 +68,15 @@ export interface ToolConfigView {
   existingPaths: string[]
   isCustom: boolean
   exists: boolean
+}
+
+export interface DeployTargetOptionView {
+  targetTool: string
+  displayName: string
+  targetRoot: string
+  targetPath: string
+  eligible: boolean
+  reason: string | null
 }
 
 export interface PlatformInfoView {
@@ -176,6 +187,10 @@ declare global {
       scan: () => Promise<MultiScanResultView>
       getSkills: () => Promise<SkillWithConflictView[]>
       getSettings: () => Promise<SettingsView>
+      getDeployTargets: (
+        skillId: number,
+        sourcePath: string
+      ) => Promise<DeployTargetOptionView[]>
       setPresetEnabled: (key: string, enabled: boolean) => Promise<SettingsView>
       setPresetPaths: (key: string, paths: string[]) => Promise<SettingsView>
       addCustomTool: (tool: CustomToolInput) => Promise<SettingsView>

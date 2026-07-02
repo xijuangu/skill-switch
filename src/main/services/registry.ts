@@ -85,23 +85,23 @@ export function filterSourcesByEnabledTools(
   sources: SkillSource[],
   toolConfigs: ToolConfig[]
 ): SkillSource[] {
+  const enabledTools = new Set(
+    toolConfigs.filter((config) => config.enabled).map((config) => config.key)
+  )
   const enabledRoots = toolConfigs
-    .filter((c) => c.enabled)
-    .flatMap((c) => c.paths)
-    .map((p) => resolve(p))
-  const allRoots = toolConfigs
-    .flatMap((c) => c.paths)
-    .map((p) => resolve(p))
+    .filter((config) => config.enabled)
+    .flatMap((config) => config.paths)
+    .map((path) => resolve(path))
 
   return sources.filter((source) => {
-    if (source.source_type === 'central-repo') return true
-    const srcPath = resolve(source.path)
-    // 在某个 enabled 工具路径下 → 保留
-    if (enabledRoots.some((root) => isPathWithin(root, srcPath))) return true
-    // 不在任何工具(enabled + disabled)路径下 = 用户添加的本地 source → 保留
-    const underAny = allRoots.some((root) => isPathWithin(root, srcPath))
-    // 仅在 disabled 工具路径下 → 隐藏
-    return !underAny
+    if (source.source_origin !== 'scan' || source.source_tool == null) {
+      return true
+    }
+    if (enabledTools.has(source.source_tool)) return true
+    const sourcePath = resolve(source.path)
+    return enabledRoots.some(
+      (root) => root === sourcePath || isPathWithin(root, sourcePath)
+    )
   })
 }
 
