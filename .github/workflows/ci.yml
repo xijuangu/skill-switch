@@ -56,3 +56,32 @@ jobs:
         with:
           name: skill-switch-${{ matrix.artifact }}
           path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+      - run: |
+          # 收集所有安装产物(排除 unpacked 目录、blockmap、yml 元数据)
+          mkdir -p release-assets
+          find dist -type f \( \
+            -name '*.dmg' -o \
+            -name '*.exe' -o \
+            -name '*.AppImage' -o \
+            -name '*.deb' -o \
+            -name '*.snap' \
+          \) -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
