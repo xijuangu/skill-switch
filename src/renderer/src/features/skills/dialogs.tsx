@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Button, Input, Dialog } from '../../shared'
 import { completeMutation } from '../../async-state'
-import { groupByHash } from './sourceGrouping'
+import { groupByHash, shortHash, findSourceGroup } from './sourceGrouping'
 
 export type DeployMode = 'copy' | 'symlink'
 export type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
@@ -205,6 +205,31 @@ export function DeployDialogContent({
         <p className="text-xs text-foreground-secondary font-mono break-all">
           {sourcePath}
         </p>
+
+        {skill.conflict.hasConflict && (() => {
+          // 一次 groupByHash 派生当前组与其他版本数,避免重复遍历(#62 review)
+          const groups = groupByHash(skill.sources)
+          const currentGroup = findSourceGroup(skill.sources, sourcePath)
+          const otherVersions = groups.size - (currentGroup ? 1 : 0)
+          return (
+            <div className="px-3 py-2 rounded border border-warning-subtle bg-warning-subtle space-y-0.5">
+              {currentGroup ? (
+                <div className="text-2xs text-warning font-medium">
+                  当前来源属于版本组 · {currentGroup.count} 个来源 · hash: {shortHash(currentGroup.hash)}
+                </div>
+              ) : (
+                <div className="text-2xs text-warning font-medium">
+                  当前来源未匹配任何版本组
+                </div>
+              )}
+              {otherVersions > 0 && (
+                <div className="text-2xs text-warning">
+                  另有 {otherVersions} 个不同版本
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         {error && (
           <div className="px-3 py-2 rounded border border-danger-subtle bg-danger-subtle text-danger text-xs">{error}</div>

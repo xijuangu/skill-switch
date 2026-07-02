@@ -22,7 +22,7 @@ import {
   type DeployResultView,
   type InstallResultView,
 } from './dialogs'
-import { groupByHash } from './sourceGrouping'
+import { groupByHash, shortHash } from './sourceGrouping'
 
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
@@ -669,19 +669,53 @@ function SourcePanel({ skill }: { skill: SkillView }) {
     return <p className="text-xs text-foreground-muted">未登记任何来源。</p>
   }
 
-  const distinctVersions = groupByHash(skill.sources).size
+  const hashGroups = groupByHash(skill.sources)
+  const distinctVersions = hashGroups.size
+
+  // 单版本:保持平铺,不显示分组结构
+  if (distinctVersions <= 1) {
+    return (
+      <div className="space-y-2">
+        {skill.sources.map((src) => (
+          <SourceItem key={src.id} source={src} />
+        ))}
+      </div>
+    )
+  }
+
+  // 多版本:按 hash 分组渲染,同组聚拢、异组分隔
+  const groups = Array.from(hashGroups.entries())
+  const versionLabels = 'ABCDEFGH'
 
   return (
-    <div className="space-y-2">
-      {distinctVersions > 1 && (
-        <div className="flex items-center gap-1.5 text-2xs text-warning mb-2">
-          <AlertCircle className="h-3 w-3" />
-          {distinctVersions} 个不同版本
-        </div>
-      )}
-      {skill.sources.map((src) => (
-        <SourceItem key={src.id} source={src} />
-      ))}
+    <div className="space-y-3">
+      <div className="flex items-center gap-1.5 text-2xs text-warning">
+        <AlertCircle className="h-3 w-3" />
+        {distinctVersions} 个不同版本
+      </div>
+      {groups.map(([hash, sources], idx) => {
+        const label = versionLabels[idx] ?? String(idx + 1)
+        return (
+          <div key={hash} className="border border-border rounded-md overflow-hidden">
+            <div className="px-2.5 py-1.5 bg-surface-secondary border-b border-border flex items-center gap-2">
+              <span className="text-2xs font-semibold text-foreground-secondary">
+                版本 {label}
+              </span>
+              <span className="text-2xs text-foreground-muted">
+                · {sources.length} 个来源
+              </span>
+              <code className="text-2xs font-mono text-foreground-muted ml-auto">
+                hash: {shortHash(hash)}
+              </code>
+            </div>
+            <div className="p-2 space-y-2 bg-surface">
+              {sources.map((src) => (
+                <SourceItem key={src.id} source={src} />
+              ))}
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

@@ -174,3 +174,94 @@ describe('SkillsPage 1000-row smoke (#56)', () => {
     expect(screen.getAllByText('skill-0001').length).toBeGreaterThan(0)
   })
 })
+
+// #62: 多版本冲突时,详情列来源应按 hash 分组渲染(版本 A / 版本 B 标题)
+function buildConflictSkill(): SkillWithConflictView {
+  return {
+    id: 1,
+    name: 'conflicted-skill',
+    primary_source_path: '/repo/v1',
+    created_at: new Date(2025, 0, 1).toISOString(),
+    sources: [
+      {
+        id: 1, skill_id: 1, path: '/repo/v1', hash: 'aaaa1111aaaa',
+        mtime: Date.now(), source_type: 'indexed', source_origin: 'scan',
+        source_tool: 'trae', discovered_at: new Date().toISOString(),
+        repo_url: null, commit_sha: null,
+      },
+      {
+        id: 2, skill_id: 1, path: '/repo/v1-dup', hash: 'aaaa1111aaaa',
+        mtime: Date.now(), source_type: 'indexed', source_origin: 'scan',
+        source_tool: 'trae', discovered_at: new Date().toISOString(),
+        repo_url: null, commit_sha: null,
+      },
+      {
+        id: 3, skill_id: 1, path: '/repo/v2', hash: 'bbbb2222bbbb',
+        mtime: Date.now(), source_type: 'indexed', source_origin: 'local',
+        source_tool: null, discovered_at: new Date().toISOString(),
+        repo_url: null, commit_sha: null,
+      },
+    ],
+    conflict: {
+      skillId: 1,
+      sourceCount: 3,
+      distinctHashCount: 2,
+      hasConflict: true,
+      primarySource: null,
+    },
+    deployments: [],
+  }
+}
+
+describe('SkillsPage source grouping (#62)', () => {
+  it('renders version group headers when skill has multiple versions', () => {
+    const skill = buildConflictSkill()
+    mockWindowApi()
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={[skill]}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+    // 选中该 skill 后,详情列应出现版本 A / 版本 B 两个组标题
+    expect(screen.getByText('版本 A')).toBeInTheDocument()
+    expect(screen.getByText('版本 B')).toBeInTheDocument()
+    // 组标题标注来源数
+    expect(screen.getByText('· 2 个来源')).toBeInTheDocument()
+    expect(screen.getByText('· 1 个来源')).toBeInTheDocument()
+    // hash 短码显示(带 "hash: " 前缀,与部署弹窗一致)
+    expect(screen.getByText('hash: aaaa1111')).toBeInTheDocument()
+    expect(screen.getByText('hash: bbbb2222')).toBeInTheDocument()
+  })
+
+  it('does not render version group headers for single-version skill', () => {
+    const skills = buildFakeSkills(1)
+    mockWindowApi()
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={skills}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+    // 单版本不显示分组标题
+    expect(screen.queryByText('版本 A')).not.toBeInTheDocument()
+  })
+})
