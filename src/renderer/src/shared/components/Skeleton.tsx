@@ -20,18 +20,3 @@ export function Skeleton({ lines = 3, className = '' }: SkeletonProps) {
     </div>
   )
 }
-
-export function SkeletonCard({ className = '' }: { className?: string }) {
-  return (
-    <div className={`rounded-md border border-border p-4 ${className}`} role="status" aria-label="加载中">
-      <div className="flex items-center gap-3">
-        <div className="h-8 w-8 rounded-full bg-border-subtle" />
-        <div className="flex-1 space-y-2">
-          <div className="h-3 w-1/3 rounded-sm bg-border-subtle" />
-          <div className="h-2.5 w-2/3 rounded-sm bg-border-subtle" />
-        </div>
-      </div>
-      <span className="sr-only">加载中…</span>
-    </div>
-  )
-}

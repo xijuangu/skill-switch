@@ -303,7 +303,6 @@ export function SkillsPage({
   }
 
   const getMenuActions = (skill: SkillView) => [
-    { key: 'deploy', label: '部署到…', onClick: () => handleDeployClick(skill) },
     { key: 'undeploy', label: '从…取消部署', onClick: () => handleUndeployFromInit(skill), disabled: actionBusy },
     { key: 'view-md', label: '查看 SKILL.md', onClick: () => handleViewMd(skill), disabled: actionBusy },
     { key: 'remove', label: '从注册表移除', onClick: () => handleRemoveFromRegistry(skill), danger: true as const, disabled: actionBusy },
@@ -870,7 +869,6 @@ function DeployDialogContent({
     targetPath: string
     confirmationToken: string
   } | null>(null)
-  const { success: toastSuccess, error: toastError } = useToast()
 
   useEffect(() => {
     Promise.all([
@@ -1068,7 +1066,6 @@ function InstallDialogContent({
   const [localPath, setLocalPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { success: toastSuccess, error: toastError } = useToast()
 
   const handleSelectZip = async () => {
     const path = await window.api.selectZipFile()

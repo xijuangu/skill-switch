@@ -53,8 +53,7 @@ export function Dialog({
     if (!open) return
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'Escape') {
-        const dangerouslyBusy = variant === 'danger' ? busy : false
-        if (!busy && !dangerouslyBusy) {
+        if (!busy) {
           onClose()
         }
         return

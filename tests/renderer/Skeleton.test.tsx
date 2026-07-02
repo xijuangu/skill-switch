@@ -1,6 +1,6 @@
 import React from 'react'
 import { render, screen } from '@testing-library/react'
-import { Skeleton, SkeletonCard } from '../../src/renderer/src/shared/components/Skeleton'
+import { Skeleton } from '../../src/renderer/src/shared/components/Skeleton'
 
 describe('Skeleton', () => {
   it('renders with default lines', () => {
@@ -19,12 +19,5 @@ describe('Skeleton', () => {
   it('has sr-only loading text', () => {
     render(<Skeleton />)
     expect(screen.getByText('加载中…')).toBeInTheDocument()
-  })
-})
-
-describe('SkeletonCard', () => {
-  it('renders', () => {
-    render(<SkeletonCard />)
-    expect(screen.getByRole('status')).toBeInTheDocument()
   })
 })

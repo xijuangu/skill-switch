@@ -45,7 +45,7 @@ export default {
       },
       fontFamily: {
         sans: ['"Inter Variable"', 'system-ui', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
-        mono: ['"JetBrains Mono Variable"', '"SF Mono"', '"Cascadia Code"', '"Fira Code"', 'monospace'],
+        mono: ['"SF Mono"', '"Cascadia Code"', '"Fira Code"', 'monospace'],
       },
       fontSize: {
         '2xs': ['0.6875rem', { lineHeight: '1rem' }],
