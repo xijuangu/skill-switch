@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.web.json",
+  "compilerOptions": {
+    "composite": true,
+    "types": ["vitest/globals"]
+  },
+  "include": [
+    "tests/renderer/**/*.tsx",
+    "tests/renderer/**/*.ts",
+    "src/preload/*.d.ts"
+  ]
+}
