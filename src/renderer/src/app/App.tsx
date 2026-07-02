@@ -84,7 +84,7 @@ function AppShell() {
   }
 
   return (
-    <div className="min-h-screen flex bg-[#fafafa]">
+    <div className="h-screen flex bg-[#fafafa] overflow-hidden">
       <nav className="w-44 shrink-0 bg-surface-secondary border-r border-border flex flex-col">
         <div className="p-4">
           <h1 className="text-sm font-semibold text-foreground">skill-switch</h1>
