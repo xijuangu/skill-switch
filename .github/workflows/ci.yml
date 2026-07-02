@@ -71,15 +71,14 @@ jobs:
           path: dist/
           merge-multiple: true
       - run: |
-          # 收集所有安装产物(排除 unpacked 目录、blockmap、yml 元数据)
+          # 收集正式安装产物(排除 unpacked 目录内的原始 exe、blockmap、yml 元数据)
           mkdir -p release-assets
           find dist -type f \( \
             -name '*.dmg' -o \
-            -name '*.exe' -o \
+            -name '*Setup*.exe' -o \
             -name '*.AppImage' -o \
-            -name '*.deb' -o \
-            -name '*.snap' \
-          \) -exec cp {} release-assets/ \;
+            -name '*.deb' \
+          \) ! -path 'dist/*-unpacked/*' -exec cp {} release-assets/ \;
           ls -lh release-assets/
       - uses: softprops/action-gh-release@v2
         with:
