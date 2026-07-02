@@ -88,11 +88,15 @@ export function ToolsPage({
   }
 
   if (loading) {
-    return <Skeleton lines={6} />
+    return (
+      <div className="h-full overflow-auto">
+        <Skeleton lines={6} />
+      </div>
+    )
   }
 
   return (
-    <div>
+    <div className="h-full overflow-auto">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <Wrench className="h-4 w-4 text-foreground-secondary" />

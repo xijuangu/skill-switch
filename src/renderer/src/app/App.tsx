@@ -104,7 +104,7 @@ function AppShell() {
         </ul>
       </nav>
 
-      <main className="flex-1 p-6 overflow-auto">
+      <main className="flex-1 p-6 overflow-hidden">
         {page === 'skills' && (
             <SkillsPage
               skills={skills}

@@ -134,10 +134,12 @@ export function SkillsPage({
   }, [filtered, selectedId])
 
   useEffect(() => {
-    if (skills.length > 0 && selectedId == null && pendingAdjacentSelectRef.current === null) {
+    // 守卫 filtered.length > 0:当筛选结果为空时,Effect A 已将 selectedId 置 null,
+    // 此处不能再翻回 skills[0].id(它不在 filtered 中),否则会与 Effect A 形成无限循环(#59)。
+    if (filtered.length > 0 && skills.length > 0 && selectedId == null && pendingAdjacentSelectRef.current === null) {
       setSelectedId(skills[0].id)
     }
-  }, [skills, selectedId])
+  }, [filtered, skills, selectedId])
 
   const handleDeployClick = (skill: SkillView) => {
     if (skill.conflict.hasConflict) {

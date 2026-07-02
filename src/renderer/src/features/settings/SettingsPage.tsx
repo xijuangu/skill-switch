@@ -78,7 +78,7 @@ export function SettingsPage() {
 
   if (!settings) {
     return (
-      <div className="space-y-3 p-1">
+      <div className="space-y-3 p-1 h-full overflow-auto">
         {Array.from({ length: 4 }).map((_, i) => (
           <div key={i} className="h-16 rounded-md bg-border-subtle" />
         ))}
@@ -87,7 +87,7 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-2xl h-full overflow-auto">
       <section className="mb-8">
         <div className="flex items-center gap-2 mb-4">
           <Wrench className="h-4 w-4 text-foreground-secondary" />
