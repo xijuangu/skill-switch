@@ -99,7 +99,7 @@ export function Dialog({
         aria-modal="true"
         aria-labelledby="dialog-title"
         aria-describedby={description ? 'dialog-desc' : undefined}
-        className="bg-surface rounded-lg shadow-dialog max-w-lg w-full mx-4 max-h-[80vh] flex flex-col motion-safe:animate-[dialogScaleIn_150ms_ease-out]"
+        className="bg-surface rounded-lg shadow-dialog max-w-lg w-full mx-4 max-h-[80vh] flex flex-col overflow-hidden motion-safe:animate-[dialogScaleIn_150ms_ease-out]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className={`p-4 border-b border-border flex items-start gap-3 ${isDanger ? 'bg-danger-subtle' : ''}`}>
