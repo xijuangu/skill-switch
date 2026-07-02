@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "A standalone GUI tool to manage AI coding tool skills — scan, index, install, and deploy via copy or symlink.",
   "main": "./out/main/index.js",
-  "author": "xijuangu",
+  "author": "xijuangu <xijuangu@users.noreply.github.com>",
   "scripts": {
     "native:node": "npm rebuild better-sqlite3",
     "native:electron": "electron-rebuild -f -w better-sqlite3",
