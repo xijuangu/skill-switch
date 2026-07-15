@@ -33,7 +33,11 @@ import {
 } from '../services/tools-config'
 import { scanAllTools } from '../services/scan-all'
 import { reconcileDeploymentIdentities } from '../services/deployment-identities'
-import { createDeploymentFacade, type DeploymentFacade } from '../services/deployment-facade'
+import {
+  assessDeploymentTargetOption,
+  createDeploymentFacade,
+  type DeploymentFacade
+} from '../services/deployment-facade'
 import { getAllSkills, getSkillById } from '../db/dao/skills'
 import { getSourceById } from '../db/dao/skill-sources'
 import {
@@ -60,7 +64,6 @@ import {
 } from '../db/dao/deployments'
 import {
   assertAbsolutePath,
-  assessSafeDeployTarget,
   resolveWithin,
   validateBackupId,
   validateSkillName,
@@ -106,20 +109,7 @@ export function readDeployTargetOptions(
           validateSkillName(skill.name)
         )
         const existing = getDeploymentBySkillAndTargetId(db, skill.id, targetId)
-        if (existing?.management === 'observed') {
-          return {
-            targetId,
-            targetTool: tool.key,
-            displayName: tool.existingTargets.length > 1 ? `${tool.displayName} (${index + 1})` : tool.displayName,
-            eligible: false,
-            reason: '已有外部订阅，请先在工具页显式接管'
-          }
-        }
-        const assessment = assessSafeDeployTarget(source.path, targetPath, {
-          allowExistingSymlinkToSource:
-            existing != null &&
-            (existing.mode === 'symlink' || existing.mode === 'junction')
-        })
+        const assessment = assessDeploymentTargetOption(source.path, targetPath, existing)
         return {
           targetId,
           targetTool: tool.key,

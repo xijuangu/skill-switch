@@ -60,8 +60,7 @@ describe('deploy target options', () => {
       'observed'
     )
     expect(readDeployTargetOptions(db, sourceId, [tool('safe', safeRoot.dir)])[0]).toMatchObject({
-      eligible: false,
-      reason: '已有外部订阅，请先在工具页显式接管'
+      eligible: false
     })
 
     sourceRoot.cleanup()

@@ -87,9 +87,6 @@ export function scanAllTools(
           { sourceId: source.id, targetId: target.id },
           'observed'
         )
-        // Prevent another configured target that aliases the same physical root
-        // from importing this exact filesystem entry a second time in this scan.
-        skipPaths.add(observation.discoveryPath)
       }
       successfullyScannedDirs.push(dir)
       results.push({

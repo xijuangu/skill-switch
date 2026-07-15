@@ -30,6 +30,10 @@ type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 type DeployFilter = 'all' | 'deployed' | 'undeployed'
 type DeployTarget = { skill: SkillView; sourceId: number }
 
+function managedDeploymentCount(skill: SkillView): number {
+  return skill.deployments.filter((deployment) => deployment.management === 'managed').length
+}
+
 export function SkillsPage({
   skills,
   tools,
@@ -78,9 +82,9 @@ export function SkillsPage({
     let result = skills
 
     if (deployFilter === 'deployed') {
-      result = result.filter((s) => s.deployments.length > 0)
+      result = result.filter((s) => managedDeploymentCount(s) > 0)
     } else if (deployFilter === 'undeployed') {
-      result = result.filter((s) => s.deployments.length === 0)
+      result = result.filter((s) => managedDeploymentCount(s) === 0)
     }
 
     if (q) {
@@ -566,7 +570,9 @@ function SkillMasterItem({
   onSelect: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }) {
-  const deployed = skill.deployments.length > 0
+  const managedCount = managedDeploymentCount(skill)
+  const observedCount = skill.deployments.filter((deployment) => deployment.management === 'observed').length
+  const deployed = managedCount > 0
   const sourceCount = skill.sources.length
   const conflict = skill.conflict.hasConflict
   const sourceLabels = skill.sources.map((s) => sourceOriginLabel(s.source_origin))
@@ -585,8 +591,10 @@ function SkillMasterItem({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
           <StatusDot
-            variant={deployed ? 'success' : 'neutral'}
-            label={deployed ? `已部署 · ${skill.deployments.length}` : '未部署'}
+            variant={deployed ? 'success' : observedCount > 0 ? 'warning' : 'neutral'}
+            label={deployed
+              ? `已部署 · ${managedCount}${observedCount > 0 ? ` · 外部订阅 ${observedCount}` : ''}`
+              : observedCount > 0 ? `外部订阅 · ${observedCount}` : '未部署'}
           />
           <span className="text-xs font-medium text-foreground truncate">{skill.name}</span>
         </div>
@@ -654,7 +662,7 @@ function SkillDetail({
       <Tabs
         tabs={[
           { key: 'sources', label: `来源 (${skill.sources.length})` },
-          { key: 'deployments', label: `部署 (${skill.deployments.length})` },
+          { key: 'deployments', label: `目标关系 (${skill.deployments.length})` },
         ]}
         activeKey={tab}
         onChange={onTabChange}
@@ -765,7 +773,7 @@ function MetaRow({ icon: Icon, label, value }: { icon: typeof Hash; label: strin
 
 function DeploymentPanel({ skill }: { skill: SkillView }) {
   if (skill.deployments.length === 0) {
-    return <p className="text-xs text-foreground-muted">未部署到任何工具。</p>
+    return <p className="text-xs text-foreground-muted">没有受管部署或外部订阅。</p>
   }
 
   return (
@@ -793,7 +801,11 @@ function DeploymentPanel({ skill }: { skill: SkillView }) {
             </div>
             <div className="space-y-1">
               <MetaRow icon={ExternalLink} label="目标路径" value={dep.target_path ?? ''} />
-              <MetaRow icon={Calendar} label="部署时间" value={dep.deployed_at} />
+              <MetaRow
+                icon={Calendar}
+                label={dep.management === 'observed' ? '观察时间' : '部署时间'}
+                value={new Date(dep.deployed_at).toLocaleString()}
+              />
             </div>
           </div>
         )

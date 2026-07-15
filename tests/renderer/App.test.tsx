@@ -99,7 +99,8 @@ describe('App (integration)', () => {
   })
 
   it('shows observed subscriptions as read-only with an explicit adopt action', async () => {
-    mockWindowApi({
+    const api = mockWindowApi({
+      adoptDeployment: vi.fn().mockResolvedValue({ status: 'completed', deploymentId: 9 }),
       getTools: vi.fn().mockResolvedValue([{
         config: {
           key: 'agents', displayName: 'Agents', enabled: true,
@@ -129,6 +130,12 @@ describe('App (integration)', () => {
     expect(screen.getByRole('button', { name: '接管' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '取消部署' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '重新部署' })).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '接管' }))
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('接管 agents 的外部订阅「to-tickets」?')
+    await userEvent.click(screen.getAllByRole('button', { name: '接管' }).at(-1)!)
+    await waitFor(() => expect(api.adoptDeployment).toHaveBeenCalledWith(9))
   })
 
   it('renders empty state on Skills page when no skills', async () => {
@@ -188,6 +195,7 @@ function buildFakeSkills(n: number): SkillWithConflictView[] {
           target_tool: 'trae',
           target_path: `/trae/skill-${i + 1}`,
           mode: 'symlink' as const,
+          management: 'managed' as const,
           source_path: `/repo/skill-${i + 1}`,
           deployed_at: new Date().toISOString(),
           source_hash_at_deploy: `hash${i}`,
@@ -228,6 +236,32 @@ describe('SkillsPage 1000-row smoke (#56)', () => {
     await userEvent.click(deployedBtn)
     // 已部署的 skill-0001(id=1,i=0,0%3===0 有 deployment)应可见
     expect(screen.getAllByText('skill-0001').length).toBeGreaterThan(0)
+  })
+
+  it('does not classify an observed-only subscription as deployed', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.deployments[0].management = 'observed'
+    mockWindowApi()
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={[skill]}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+
+    expect(screen.getByText('外部订阅 · 1')).toBeInTheDocument()
+    expect(screen.queryByText('已部署 · 1')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '已部署' }))
+    expect(screen.queryByText('skill-0001')).not.toBeInTheDocument()
   })
 })
 

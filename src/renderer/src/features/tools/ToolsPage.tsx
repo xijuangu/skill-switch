@@ -339,7 +339,6 @@ function ToolCard({
                       onUndeploy={() => d.deployment && onUndeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                       onRedeploy={() => d.deployment && onRedeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                       onRemoveFromManifest={() => d.deployment && onRemoveFromManifest(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
-                      onAdopt={() => {}}
                     />
                   ))}
                 </ul>
@@ -356,9 +355,6 @@ function ToolCard({
                         drift={d}
                         busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
                         onAdopt={() => onAdopt(d.deployment!.id, d.skillId, d.targetTool, d.skillName)}
-                        onUndeploy={() => {}}
-                        onRedeploy={() => {}}
-                        onRemoveFromManifest={() => {}}
                       />
                     ))}
                   </ul>
@@ -375,10 +371,6 @@ function ToolCard({
                         key={`ext:${d.skillName}`}
                         drift={d}
                         busy={false}
-                        onUndeploy={() => {}}
-                        onRedeploy={() => {}}
-                        onRemoveFromManifest={() => {}}
-                        onAdopt={() => {}}
                       />
                     ))}
                   </ul>
@@ -402,10 +394,10 @@ function DriftItem({
 }: {
   drift: DriftStatusView
   busy: boolean
-  onUndeploy: () => void
-  onRedeploy: () => void
-  onRemoveFromManifest: () => void
-  onAdopt: () => void
+  onUndeploy?: () => void
+  onRedeploy?: () => void
+  onRemoveFromManifest?: () => void
+  onAdopt?: () => void
 }) {
   const status = getDriftStatus(drift.kind)
   const isExternal = drift.kind === 'external'
@@ -425,34 +417,34 @@ function DriftItem({
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {!isObserved && (drift.kind === 'drift' || drift.kind === 'target-modified' || drift.kind === 'link-mismatch') && (
+        {!isObserved && onRedeploy && (drift.kind === 'drift' || drift.kind === 'target-modified' || drift.kind === 'link-mismatch') && (
           <>
             <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
               重新部署
             </Button>
-            {drift.kind === 'drift' && (
+            {drift.kind === 'drift' && onRemoveFromManifest && (
               <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
                 从清单移除
               </Button>
             )}
           </>
         )}
-        {!isObserved && drift.kind === 'source-updated' && (
+        {!isObserved && onRedeploy && drift.kind === 'source-updated' && (
           <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
             更新
           </Button>
         )}
-        {!isObserved && drift.kind === 'unresolved' && (
+        {!isObserved && onRemoveFromManifest && drift.kind === 'unresolved' && (
           <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
             从清单移除
           </Button>
         )}
-        {!isObserved && drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && (
+        {!isObserved && onUndeploy && drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && (
           <Button variant="danger" size="sm" onClick={onUndeploy} disabled={busy}>
             取消部署
           </Button>
         )}
-        {isObserved && (
+        {isObserved && onAdopt && (
           <Button variant="primary" size="sm" onClick={onAdopt} disabled={busy}>
             接管
           </Button>

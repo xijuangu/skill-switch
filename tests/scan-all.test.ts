@@ -99,6 +99,37 @@ describe('scan-all service', () => {
     cleanupDb()
   })
 
+  test.runIf(process.platform !== 'win32')('records two semantic Target IDs that share one physical discovery root', () => {
+    const root = createTempDir('scan-all-shared-target-root-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const source = join(root.dir, 'sources', 'to-tickets')
+    const sharedTargetRoot = join(root.dir, 'shared-skills')
+    mkdirSync(source, { recursive: true })
+    mkdirSync(sharedTargetRoot, { recursive: true })
+    writeFileSync(join(source, 'SKILL.md'), '---\nname: to-tickets\n---\n')
+    symlinkSync(source, join(sharedTargetRoot, 'to-tickets'))
+
+    scanAllTools(db, [{
+      key: 'shared',
+      displayName: 'Shared',
+      paths: [sharedTargetRoot],
+      targets: [
+        { id: 'agents-target', path: sharedTargetRoot },
+        { id: 'codex-target', path: sharedTargetRoot }
+      ]
+    }])
+
+    const skill = getSkillByName(db, 'to-tickets')!
+    expect(getSourcesBySkillId(db, skill.id)).toHaveLength(1)
+    expect(getDeploymentsBySkillId(db, skill.id).map((deployment) => deployment.target_id)).toEqual([
+      'agents-target',
+      'codex-target'
+    ])
+
+    root.cleanup()
+    cleanupDb()
+  })
+
   test.runIf(process.platform !== 'win32')('skips managed linked targets while still discovering an unmanaged directory symlink', () => {
     const root = createTempDir('scan-all-managed-links-')
     const backups = createTempDir('scan-all-managed-link-backups-')

@@ -4,7 +4,7 @@ import type { DB } from '../db/database'
 import { adoptObservedDeployment, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
 import { getSourceById } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
-import type { DeployMode, DeployResult, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
+import type { DeployMode, DeployResult, Deployment, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
 import {
   executePreparedDeployment,
   inspectRecoveryEvidence,
@@ -15,7 +15,26 @@ import {
   executePreparedUndeployment
 } from './deployer'
 import { hashDir } from './hash'
-import { resolveWithin, validateSkillName } from './path-safety'
+import { assessSafeDeployTarget, resolveWithin, validateSkillName } from './path-safety'
+
+/**
+ * Read-only target eligibility owned by the same module that authorizes deploy.
+ * Renderer-facing IPC must not recreate the managed/observed mutation policy.
+ */
+export function assessDeploymentTargetOption(
+  sourcePath: string,
+  targetPath: string,
+  existing?: Pick<Deployment, 'management' | 'mode'>
+) {
+  if (existing?.management === 'observed') {
+    return { eligible: false, reason: '已有外部订阅，请先在工具页显式接管' }
+  }
+  return assessSafeDeployTarget(sourcePath, targetPath, {
+    allowExistingSymlinkToSource:
+      existing?.management === 'managed' &&
+      (existing.mode === 'symlink' || existing.mode === 'junction')
+  })
+}
 
 export interface DeploymentRequest {
   sourceId: number
