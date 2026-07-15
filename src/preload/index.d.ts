@@ -140,7 +140,14 @@ export type DeploymentOutcomeView =
       status: 'confirmation-required'
       confirmationId: string
       expiresAt: number
-      facts: { skillName: string; targetPath: string; reason: 'external-overwrite' }
+      facts: {
+        skillName: string
+        targetPath: string
+        reasons: Array<'external-overwrite' | 'target-modified' | 'mode-degraded'>
+        requestedMode: DeployModeView
+        actualMode: DeployModeView
+        backup: { required: boolean; directory: string | null }
+      }
     }
   | {
       status: 'rejected'

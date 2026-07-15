@@ -111,6 +111,18 @@ export class RecoveryRequiredError extends Error {
   }
 }
 
+export class ModeDegradationRequiredError extends Error {
+  constructor(
+    readonly from: DeployMode,
+    readonly to: 'copy',
+    readonly reason: string,
+    options?: { cause?: unknown }
+  ) {
+    super(reason, options)
+    this.name = 'ModeDegradationRequiredError'
+  }
+}
+
 function markerForTarget(targetPath: string, operationId: string): RecoveryEvidence {
   const parent = dirname(targetPath)
   const name = basename(targetPath)
@@ -163,7 +175,7 @@ export function inspectRecoveryEvidence(targetPath: string): RecoveryEvidence | 
   return null
 }
 
-function targetMatchesDeployment(
+export function targetMatchesDeployment(
   targetPath: string,
   mode: DeployMode,
   sourcePath: string,
@@ -295,6 +307,16 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
   let actualMode = resolved.actualMode
   let degradedFrom = resolved.degradedFrom
   let degradeReason = resolved.degradeReason
+  if (actualMode === 'copy' && degradedFrom != null) {
+    const approval = opts.approvedModeDegradation
+    if (approval?.from !== degradedFrom || approval.to !== 'copy') {
+      throw new ModeDegradationRequiredError(
+        degradedFrom,
+        'copy',
+        degradeReason ?? 'linked deployment is unavailable; copy is required'
+      )
+    }
+  }
 
   // Step 3: 目标是否存在(existing 已在 Step 0 查过)
   const targetExists = pathEntryExists(opts.targetDir)
@@ -358,15 +380,20 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
     let manifestChanged = false
     let committed = false
     try {
-      if (actualMode === 'junction' && opts.mode === 'symlink' && !opts.canSymlink) {
+      if (actualMode === 'junction') {
         try {
+          opts.mutationHooks?.beforeJunctionStage?.()
           deployFiles('junction', opts.sourcePath, evidence.stagingPath)
-        } catch {
+        } catch (error) {
           cleanupUnknown(evidence.stagingPath)
+          const reason = 'junction creation failed (possibly cross-volume); copy is required.'
+          if (opts.approvedModeDegradation?.from !== opts.mode) {
+            throw new ModeDegradationRequiredError(opts.mode, 'copy', reason, { cause: error })
+          }
           deployFiles('copy', opts.sourcePath, evidence.stagingPath)
           actualMode = 'copy'
-          degradedFrom = 'symlink'
-          degradeReason = 'junction creation failed (possibly cross-volume); used copy instead.'
+          degradedFrom = opts.mode
+          degradeReason = reason
         }
       } else {
         deployFiles(actualMode, opts.sourcePath, evidence.stagingPath)

@@ -102,9 +102,13 @@ export function DeployDialogContent({
   const [mode, setMode] = useState<DeployMode>('copy')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [externalOverwritePlan, setExternalOverwritePlan] = useState<{
+  const [confirmationPlan, setConfirmationPlan] = useState<{
     targetPath: string
     confirmationToken: string
+    reasons: Array<'external-overwrite' | 'target-modified' | 'mode-degraded'>
+    requestedMode: 'copy' | 'symlink' | 'junction'
+    actualMode: 'copy' | 'symlink' | 'junction'
+    backup: { required: boolean; directory: string | null }
   } | null>(null)
 
   useEffect(() => {
@@ -159,9 +163,13 @@ export function DeployDialogContent({
         requestedMode: mode
       })
       if (outcome.status === 'confirmation-required') {
-        setExternalOverwritePlan({
+        setConfirmationPlan({
           targetPath: outcome.facts.targetPath,
-          confirmationToken: outcome.confirmationId
+          confirmationToken: outcome.confirmationId,
+          reasons: outcome.facts.reasons,
+          requestedMode: outcome.facts.requestedMode,
+          actualMode: outcome.facts.actualMode,
+          backup: outcome.facts.backup
         })
         setBusy(false)
         return
@@ -177,15 +185,15 @@ export function DeployDialogContent({
   }
 
   const handleExternalOverwriteConfirm = async () => {
-    if (!externalOverwritePlan) return
+    if (!confirmationPlan) return
     setBusy(true)
     setError(null)
     try {
-      const outcome = await window.api.deploymentConfirm(externalOverwritePlan.confirmationToken)
+      const outcome = await window.api.deploymentConfirm(confirmationPlan.confirmationToken)
       if (outcome.status !== 'completed') {
         throw new Error(outcome.status === 'confirmation-required' ? '部署计划已变化，请重新确认' : outcome.message)
       }
-      setExternalOverwritePlan(null)
+      setConfirmationPlan(null)
       await completeMutation(outcome.result, onDone)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -297,19 +305,29 @@ export function DeployDialogContent({
           </div>
           <p className="text-2xs text-foreground-muted mt-1">
             {mode === 'symlink'
-              ? isWindowsNormalUser ? '将自动尝试 junction，失败则降级 copy' : '源更新自动生效'
+              ? isWindowsNormalUser ? '将尝试 junction；如只能使用 copy，会先请求确认' : '源更新自动生效'
               : '快照副本 — 源更新需手动重新部署'}
           </p>
         </div>
       </div>
 
       <Dialog
-        open={externalOverwritePlan !== null}
-        onClose={() => !busy && setExternalOverwritePlan(null)}
-        title={`覆盖外部 skill「${skill.name}」?`}
-        description={`目标已存在外部 skill，覆盖前会自动备份：\n${externalOverwritePlan?.targetPath ?? ''}`}
+        open={confirmationPlan !== null}
+        onClose={() => !busy && setConfirmationPlan(null)}
+        title={`确认部署风险「${skill.name}」?`}
+        description={confirmationPlan == null ? '' : [
+          ...confirmationPlan.reasons.map((reason) => ({
+            'external-overwrite': '目标包含非本应用管理的内容，将覆盖现有内容。',
+            'target-modified': '已部署目标被外部修改，将用当前来源覆盖。',
+            'mode-degraded': `请求模式 ${confirmationPlan.requestedMode} 不可用，实际将使用 ${confirmationPlan.actualMode}。`
+          })[reason]),
+          `目标：${confirmationPlan.targetPath}`,
+          confirmationPlan.backup.required
+            ? `覆盖前会备份到：${confirmationPlan.backup.directory ?? '应用备份目录'}`
+            : '本次不会创建外部内容备份。'
+        ].join('\n')}
         variant="danger"
-        confirmLabel="覆盖并备份"
+        confirmLabel="确认并部署"
         onConfirm={handleExternalOverwriteConfirm}
         busy={busy}
         closeOnOverlay={false}

@@ -1165,7 +1165,7 @@ describe('deployer service', () => {
       cleanupDb()
     })
 
-    test('canSymlink=false + canJunction=true + source 是文件 → 降级 copy', () => {
+    test('canSymlink=false + canJunction=true + source 是文件 → 确认后降级 copy', () => {
       // skills 实际总是目录;此处用文件 source 覆盖 "source 不是目录 → 无法 junction → copy" 分支
       const src = createTempDir('ss-src-')
       const target = createTempDir('ss-target-')
@@ -1186,7 +1186,10 @@ describe('deployer service', () => {
         targetDir,
         backupsDir: backups.dir,
         canSymlink: false,
-        canJunction: true
+        canJunction: true,
+        approvedModeDegradation: {
+          from: 'symlink', to: 'copy', reason: '用户已确认平台能力降级'
+        }
       })
 
       // source 不是目录 → 无法 junction → 降级 copy
@@ -1204,7 +1207,7 @@ describe('deployer service', () => {
       cleanupDb()
     })
 
-    test('canSymlink=false + canJunction=false + 请求 symlink → 降级 copy', () => {
+    test('canSymlink=false + canJunction=false + 请求 symlink → 确认后降级 copy', () => {
       const src = createTempDir('ss-src-')
       const target = createTempDir('ss-target-')
       const backups = createTempDir('ss-backups-')
@@ -1223,7 +1226,10 @@ describe('deployer service', () => {
         targetDir,
         backupsDir: backups.dir,
         canSymlink: false,
-        canJunction: false
+        canJunction: false,
+        approvedModeDegradation: {
+          from: 'symlink', to: 'copy', reason: '用户已确认平台能力降级'
+        }
       })
 
       expect(result.mode).toBe('copy')

@@ -37,11 +37,15 @@ function setup() {
   const create = (options: {
     db?: DB
     tools?: ToolConfig[]
+    platform?: { platform: string; canSymlink: boolean; canJunction: boolean }
     runMutation?: <T>(mutation: () => T) => Promise<T>
     mutationHooks?: DeploymentMutationHooks
   } = {}) => createDeploymentFacade({
     db: options.db ?? database.db,
-    getRuntime: () => ({ tools: options.tools ?? [tool], platform: { platform: 'test', canSymlink: true, canJunction: false } }),
+    getRuntime: () => ({
+      tools: options.tools ?? [tool],
+      platform: options.platform ?? { platform: 'test', canSymlink: true, canJunction: false }
+    }),
     backupsDir,
     now: () => now,
     createId: () => `confirmation-${++confirmationSequence}`,
@@ -77,13 +81,92 @@ describe('Deployment Facade', () => {
     const outcome = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
     expect(outcome).toMatchObject({
       status: 'confirmation-required', confirmationId: 'confirmation-1',
-      facts: { targetPath: external, reason: 'external-overwrite' }
+      facts: { targetPath: external, reasons: ['external-overwrite'] }
     })
     expect(await facade.confirm('confirmation-1')).toMatchObject({
       status: 'completed', result: { action: 'external-overwritten' }
     })
     expect(await facade.confirm('confirmation-1')).toMatchObject({ status: 'rejected', reason: 'confirmation-used' })
   })
+
+  test('aggregates external overwrite and known linked-to-copy degradation in one confirmation', async () => {
+    const env = setup()
+    const external = join(env.targetRoot, 'demo')
+    mkdirSync(external)
+    writeFileSync(join(external, 'SKILL.md'), '# external')
+    const facade = env.create({ platform: { platform: 'test', canSymlink: false, canJunction: false } })
+
+    const outcome = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'symlink' })
+
+    expect(outcome).toMatchObject({
+      status: 'confirmation-required',
+      facts: {
+        targetPath: external,
+        requestedMode: 'symlink',
+        actualMode: 'copy',
+        reasons: ['external-overwrite', 'mode-degraded'],
+        backup: { required: true }
+      }
+    })
+    expect(readFileSync(join(external, 'SKILL.md'), 'utf-8')).toBe('# external')
+    if (outcome.status !== 'confirmation-required') throw new Error('expected confirmation')
+    expect(await facade.confirm(outcome.confirmationId)).toMatchObject({
+      status: 'completed', result: { mode: 'copy', degradedFrom: 'symlink' }
+    })
+  })
+
+  test('managed target modification is a stable confirmation risk', async () => {
+    const env = setup()
+    const facade = env.create()
+    const request = { sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' as const }
+    await facade.deploy(request)
+    writeFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), '# changed outside')
+
+    const outcome = await facade.deploy(request)
+
+    expect(outcome).toMatchObject({
+      status: 'confirmation-required',
+      facts: { reasons: ['target-modified'], requestedMode: 'copy', actualMode: 'copy' }
+    })
+  })
+
+  test('new risk invalidates a confirmation that was issued for a smaller plan', async () => {
+    const env = setup()
+    const facade = env.create({ platform: { platform: 'test', canSymlink: false, canJunction: false } })
+    const confirmation = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'symlink' })
+    if (confirmation.status !== 'confirmation-required') throw new Error('expected confirmation')
+    mkdirSync(join(env.targetRoot, 'demo'))
+    writeFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), '# appeared later')
+
+    expect(await facade.confirm(confirmation.confirmationId)).toMatchObject({
+      status: 'rejected', reason: 'plan-changed'
+    })
+  })
+
+  test.each(['symlink', 'junction'] as const)(
+    '%s junction runtime failure compensates staging and returns a fresh copy-degradation confirmation', async (requestedMode) => {
+      const env = setup()
+      const facade = env.create({
+        platform: { platform: 'test', canSymlink: false, canJunction: true },
+        mutationHooks: {
+          operationId: () => 'junction-failure',
+          beforeJunctionStage: () => { throw new Error('junction unavailable at runtime') }
+        }
+      })
+
+      const outcome = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode })
+
+      expect(outcome).toMatchObject({
+        status: 'confirmation-required',
+        facts: { reasons: ['mode-degraded'], requestedMode, actualMode: 'copy' }
+      })
+      expect(readdirSync(env.targetRoot).filter((name) => name.startsWith('.skill-switch-'))).toEqual([])
+      if (outcome.status !== 'confirmation-required') throw new Error('expected confirmation')
+      expect(await facade.confirm(outcome.confirmationId)).toMatchObject({
+        status: 'completed', result: { mode: 'copy', degradedFrom: requestedMode }
+      })
+    }
+  )
 
   test('expired, restarted and changed confirmations are structured rejections', async () => {
     const env = setup()

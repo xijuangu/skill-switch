@@ -182,12 +182,16 @@ export interface DeployOptions {
   canJunction: boolean
   /** Must be true only after an explicit external-overwrite confirmation. */
   allowExternalOverwrite?: boolean
+  /** Exact linked-to-copy degradation approved by the Deployment Confirmation. */
+  approvedModeDegradation?: { from: DeployMode; to: 'copy'; reason: string }
   identity?: { sourceId: number; targetId: string }
   mutationHooks?: DeploymentMutationHooks
 }
 
 export interface DeploymentMutationHooks {
   operationId?: () => string
+  /** Test seam for a junction creation failure reported by the filesystem. */
+  beforeJunctionStage?: () => void
   afterStaging?: () => void
   afterMarker?: () => void
   afterBackup?: () => void
