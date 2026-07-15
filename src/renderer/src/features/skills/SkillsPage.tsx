@@ -746,7 +746,7 @@ function SourceItem({ source }: { source: SkillSourceView }) {
           <MetaRow icon={Calendar} label="mtime" value={new Date(source.mtime).toLocaleString()} />
           {source.repo_url && <MetaRow icon={GitBranch} label="repo" value={source.repo_url} />}
           {source.commit_sha && <MetaRow icon={GitBranch} label="sha" value={source.commit_sha.slice(0, 12)} />}
-          <MetaRow icon={Calendar} label="发现时间" value={source.discovered_at} />
+          <MetaRow icon={Calendar} label="发现时间" value={new Date(source.discovered_at).toLocaleString()} />
         </div>
       )}
     </div>

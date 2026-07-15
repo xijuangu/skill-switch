@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'vitest'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
 import { scanAllTools } from '../src/main/services/scan-all'
@@ -11,6 +11,31 @@ import { executePreparedDeployment } from '../src/main/services/deployer'
 import { upsertSkill } from '../src/main/db/dao/skills'
 
 describe('scan-all service', () => {
+  test.runIf(process.platform !== 'win32')('aggregates a Skill discovered through a directory symlink', () => {
+    const root = createTempDir('scan-all-linked-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const toolDir = join(root.dir, 'agents')
+    const realSkill = join(root.dir, 'sources', 'to-tickets')
+    const linkedSkill = join(toolDir, 'to-tickets')
+    mkdirSync(toolDir, { recursive: true })
+    mkdirSync(realSkill, { recursive: true })
+    writeFileSync(join(realSkill, 'SKILL.md'), '---\nname: to-tickets\n---\n')
+    symlinkSync(realSkill, linkedSkill)
+
+    const result = scanAllTools(db, [
+      { key: 'agents', displayName: 'Agents', paths: [toolDir] }
+    ])
+
+    expect(result).toMatchObject({ totalScanned: 1, totalUpserted: 1 })
+    const skill = getSkillByName(db, 'to-tickets')
+    expect(getSourcesBySkillId(db, skill!.id)).toMatchObject([
+      { path: linkedSkill, source_tool: 'agents' }
+    ])
+
+    root.cleanup()
+    cleanupDb()
+  })
+
   test('scans a single tool dir and returns aggregated result', () => {
     const { dir, cleanup } = createTempDir()
     const { db, cleanup: cleanupDb } = createTempDb()

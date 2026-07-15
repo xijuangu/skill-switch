@@ -214,6 +214,32 @@ function buildConflictSkill(): SkillWithConflictView {
 }
 
 describe('SkillsPage source grouping (#62)', () => {
+  it('renders discovered_at in the local timezone instead of raw UTC text', async () => {
+    const discoveredAt = '2026-07-15T04:00:00.000Z'
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].discovered_at = discoveredAt
+    mockWindowApi()
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={[skill]}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+
+    await userEvent.click(screen.getByText('/repo/skill-1'))
+    expect(screen.getByText(new Date(discoveredAt).toLocaleString())).toBeInTheDocument()
+    expect(screen.queryByText(discoveredAt)).not.toBeInTheDocument()
+  })
+
   it('renders version group headers when skill has multiple versions', () => {
     const skill = buildConflictSkill()
     mockWindowApi()

@@ -24,7 +24,7 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 
 ## Scope (MVP)
 
-- Scan & index skills from multiple tool directories (no file moving for existing skills)
+- Scan & index skills from multiple tool directories, including valid directory symlinks (no file moving for existing skills)
 - Install new skills from GitHub repo (single + subpath), ZIP, or local directory
 - Deploy via copy / symlink / Windows junction; every linked-to-copy degradation requires confirmation
 - Stable Source / Discovery Target / Deployment identities; renderer mutation calls never submit paths

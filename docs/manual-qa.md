@@ -3,6 +3,8 @@
 ## 技能
 
 - 扫描后，技能行显示 source 类型、source 数量和已部署工具。
+- Discovery Target 中指向有效 Skill 目录的软链接会被扫描为 Source；broken link 与文件 link 被安全跳过，不中断整次扫描。
+- 展开 Source 后，“发现时间”按当前系统本地时区显示，不直接展示 UTC `Z` 字符串。
 - “安装”默认打开 GitHub 安装；“添加本地”直接打开本地目录页。
 - 多 source 冲突时，部署和查看 SKILL.md 都要求选择具体 source。
 - 多版本冲突时，详情列来源按 hash 分组渲染（版本 A / 版本 B 标题 + 来源数 + hash 短码），单版本保持平铺。

@@ -28,6 +28,17 @@ function resolveSkillName(skillDir: string): string {
   return validateSkillName(basename(skillDir))
 }
 
+function isDirectoryEntry(path: string, isDirectory: boolean, isSymbolicLink: boolean): boolean {
+  if (isDirectory) return true
+  if (!isSymbolicLink) return false
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    // A broken or inaccessible link is not a scannable Skill Source.
+    return false
+  }
+}
+
 /**
  * 扫描工具目录,把每个子目录登记为 skill(索引模式,不搬文件)。
  * 重复扫描幂等:(skill_id, path) 唯一约束 + ON CONFLICT 更新 hash/mtime。
@@ -43,7 +54,13 @@ export function scanToolDir(
 ): ScanResult {
   const entries = readdirSync(toolDir, { withFileTypes: true })
   const skillDirs = entries
-    .filter((e) => e.isDirectory())
+    .filter((entry) =>
+      isDirectoryEntry(
+        join(toolDir, entry.name),
+        entry.isDirectory(),
+        entry.isSymbolicLink()
+      )
+    )
     .map((e) => join(toolDir, e.name))
     // #3: 跳过 copy 部署的目标目录(副本不该被当成新 source)
     .filter((dir) => !skipPaths.has(dir))
