@@ -3,7 +3,7 @@
 // 收集语义 = 索引(不搬文件),source_type = 'indexed'。
 // 身份主键 = SKILL.md frontmatter 的 name;无 frontmatter 或无 name → 回退目录名。
 
-import { readdirSync, readFileSync, existsSync, statSync } from 'fs'
+import { readdirSync, readFileSync, existsSync, statSync, type Dirent } from 'fs'
 import { join, basename } from 'path'
 import matter from 'gray-matter'
 import type { DB } from '../db/database'
@@ -28,11 +28,11 @@ function resolveSkillName(skillDir: string): string {
   return validateSkillName(basename(skillDir))
 }
 
-function isDirectoryEntry(path: string, isDirectory: boolean, isSymbolicLink: boolean): boolean {
-  if (isDirectory) return true
-  if (!isSymbolicLink) return false
+function isScannableDirectoryEntry(parentDir: string, entry: Dirent): boolean {
+  if (entry.isDirectory()) return true
+  if (!entry.isSymbolicLink()) return false
   try {
-    return statSync(path).isDirectory()
+    return statSync(join(parentDir, entry.name)).isDirectory()
   } catch {
     // A broken or inaccessible link is not a scannable Skill Source.
     return false
@@ -54,13 +54,7 @@ export function scanToolDir(
 ): ScanResult {
   const entries = readdirSync(toolDir, { withFileTypes: true })
   const skillDirs = entries
-    .filter((entry) =>
-      isDirectoryEntry(
-        join(toolDir, entry.name),
-        entry.isDirectory(),
-        entry.isSymbolicLink()
-      )
-    )
+    .filter((entry) => isScannableDirectoryEntry(toolDir, entry))
     .map((e) => join(toolDir, e.name))
     // #3: 跳过 copy 部署的目标目录(副本不该被当成新 source)
     .filter((dir) => !skipPaths.has(dir))
