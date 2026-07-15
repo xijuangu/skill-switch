@@ -42,6 +42,9 @@ describe('database migrations', () => {
         source_hash_at_deploy TEXT NOT NULL,
         UNIQUE (skill_id, target_tool)
       );
+      INSERT INTO deployments
+        (skill_id, target_tool, mode, source_path, deployed_at, source_hash_at_deploy)
+      VALUES (1, 'codex', 'symlink', '/src/demo', 'now', 'hash');
     `)
     legacy.close()
 
@@ -50,7 +53,10 @@ describe('database migrations', () => {
       (upgraded.prepare('PRAGMA table_info(deployments)').all() as Array<{ name: string }>).map(
         (column) => column.name
       )
-    ).toEqual(expect.arrayContaining(['source_id', 'target_id']))
+    ).toEqual(expect.arrayContaining(['source_id', 'target_id', 'management']))
+    expect(upgraded.prepare('SELECT management FROM deployments WHERE id = 1').get()).toEqual({
+      management: 'managed'
+    })
     upgraded.close()
     rmSync(dir, { recursive: true, force: true })
   })

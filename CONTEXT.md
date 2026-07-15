@@ -12,8 +12,16 @@ Skill 内容的权威来源位置，Deployment 从 Source 派生。
 _Avoid_: Deployment target, deployed copy
 
 **Deployment**:
-Skill 从某个 Source 派生到工具目标位置的已登记关系。目标缺失或异常不会让这段关系自动消失。
-_Avoid_: Source, installation
+Skill 从某个 Source 派生到工具目标位置、且已授权 skill-switch 变更的受管关系。目标缺失或异常不会让这段关系自动消失。
+_Avoid_: Source, installation, Observed Subscription
+
+**Observed Subscription（外部订阅）**:
+扫描在 Discovery Target 中观察到的外部目录链接。它记录 Source 到目标的现实关系，但不授权 skill-switch 重新部署、取消部署或覆盖文件；必须显式接管后才转换为 Deployment。
+_Avoid_: Deployment, managed link
+
+**Adopt（接管）**:
+用户对一条仍精确指向登记 Source 的 Observed Subscription 作出的显式授权。请求只提交 Deployment ID，主进程重新校验后仅转换管理权，不重建链接或修改内容。
+_Avoid_: automatic import, overwrite confirmation
 
 **Deployed Skill（已部署 Skill）**:
 至少存在一个 Deployment 的 Skill，不要求部署目标当前健康或存在。

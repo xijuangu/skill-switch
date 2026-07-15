@@ -6,6 +6,7 @@ import { upsertSkill } from '../src/main/db/dao/skills'
 import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { readDeployTargetOptions } from '../src/main/ipc/index'
 import type { ToolConfig } from '../src/main/types'
+import { upsertDeployment } from '../src/main/db/dao/deployments'
 
 function tool(key: string, path: string): ToolConfig {
   return {
@@ -45,6 +46,22 @@ describe('deploy target options', () => {
     expect(options.find((option) => option.targetTool === 'safe')).toMatchObject({
       eligible: true,
       targetId: 'target-safe'
+    })
+
+    upsertDeployment(
+      db,
+      skillId,
+      'safe',
+      join(safeRoot.dir, skillName),
+      'symlink',
+      sourcePath,
+      'hash',
+      { sourceId, targetId: 'target-safe' },
+      'observed'
+    )
+    expect(readDeployTargetOptions(db, sourceId, [tool('safe', safeRoot.dir)])[0]).toMatchObject({
+      eligible: false,
+      reason: '已有外部订阅，请先在工具页显式接管'
     })
 
     sourceRoot.cleanup()

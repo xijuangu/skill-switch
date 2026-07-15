@@ -6,6 +6,7 @@ export type SourceOrigin = 'scan' | 'local' | 'github' | 'zip' | 'legacy'
 
 /** 部署模式 */
 export type DeployMode = 'symlink' | 'junction' | 'copy'
+export type DeploymentManagement = 'managed' | 'observed'
 
 /** skill 注册表记录 */
 export interface Skill {
@@ -51,6 +52,7 @@ export interface Deployment {
   /** Exact deployed destination; null only for pre-migration records. */
   target_path: string | null
   mode: DeployMode
+  management: DeploymentManagement
   source_path: string
   deployed_at: string
   source_hash_at_deploy: string

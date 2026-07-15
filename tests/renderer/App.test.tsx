@@ -35,6 +35,7 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     deploymentConfirm: vi.fn(),
     redeploy: vi.fn(),
     undeploy: vi.fn(),
+    adoptDeployment: vi.fn(),
     getTools: vi.fn().mockResolvedValue([]),
     removeFromManifest: vi.fn(),
     getDeploymentsForSkill: vi.fn().mockResolvedValue([]),
@@ -95,6 +96,39 @@ describe('App (integration)', () => {
     expect(screen.getByText('/canonical/skills')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重新扫描' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '解除登记' })).toBeInTheDocument()
+  })
+
+  it('shows observed subscriptions as read-only with an explicit adopt action', async () => {
+    mockWindowApi({
+      getTools: vi.fn().mockResolvedValue([{
+        config: {
+          key: 'agents', displayName: 'Agents', enabled: true,
+          paths: ['/agents'], existingPaths: ['/agents'],
+          targets: [{ id: 'agents-0', path: '/agents' }],
+          existingTargets: [{ id: 'agents-0', path: '/agents' }],
+          isCustom: false, exists: true
+        },
+        drifts: [{
+          skillId: 1, skillName: 'to-tickets', targetTool: 'agents',
+          targetPath: '/agents/to-tickets', targetExists: true,
+          currentSourceHash: 'hash', currentTargetHash: null, kind: 'normal',
+          deployment: {
+            id: 9, skill_id: 1, target_tool: 'agents', target_path: '/agents/to-tickets',
+            mode: 'symlink', management: 'observed', source_path: '/source/to-tickets',
+            source_id: 2, target_id: 'agents-0', deployed_at: '2026-07-15T00:00:00.000Z',
+            source_hash_at_deploy: 'hash'
+          }
+        }]
+      }]) as Window['api']['getTools']
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+
+    expect(screen.getByText('外部订阅')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '接管' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '取消部署' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重新部署' })).not.toBeInTheDocument()
   })
 
   it('renders empty state on Skills page when no skills', async () => {

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS deployments (
   target_tool TEXT NOT NULL,
   target_path TEXT NOT NULL,
   mode TEXT NOT NULL,
+  management TEXT NOT NULL DEFAULT 'managed' CHECK (management IN ('managed', 'observed')),
   source_path TEXT NOT NULL,
   deployed_at TEXT NOT NULL,
   source_hash_at_deploy TEXT NOT NULL,
@@ -134,6 +135,9 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
   if (!deploymentCols.some((column) => column.name === 'target_id')) {
     db.exec('ALTER TABLE deployments ADD COLUMN target_id TEXT')
   }
+  if (!deploymentCols.some((column) => column.name === 'management')) {
+    db.exec("ALTER TABLE deployments ADD COLUMN management TEXT NOT NULL DEFAULT 'managed' CHECK (management IN ('managed', 'observed'))")
+  }
   deploymentCols = db.prepare('PRAGMA table_info(deployments)').all() as { name: string }[]
 
   const deploymentSql = (
@@ -163,6 +167,7 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
             target_tool TEXT NOT NULL,
             target_path TEXT,
             mode TEXT NOT NULL,
+            management TEXT NOT NULL DEFAULT 'managed' CHECK (management IN ('managed', 'observed')),
             source_path TEXT NOT NULL,
             deployed_at TEXT NOT NULL,
             source_hash_at_deploy TEXT NOT NULL,
@@ -172,9 +177,9 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
             FOREIGN KEY (source_id) REFERENCES skill_sources(id) ON DELETE SET NULL
           );
           INSERT INTO deployments
-            (id, skill_id, target_tool, target_path, mode, source_path, deployed_at,
+            (id, skill_id, target_tool, target_path, mode, management, source_path, deployed_at,
              source_hash_at_deploy, source_id, target_id)
-          SELECT id, skill_id, target_tool, target_path, mode, source_path, deployed_at,
+          SELECT id, skill_id, target_tool, target_path, mode, management, source_path, deployed_at,
                  source_hash_at_deploy, source_id, target_id
           FROM deployments_legacy_identity;
           DROP TABLE deployments_legacy_identity;

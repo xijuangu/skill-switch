@@ -26,7 +26,7 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 
 ## Scope (MVP)
 
-- Scan skills from multiple tool directories, including unmanaged valid directory symlinks; linked aliases discover the authoritative real Source and are imported as observed symlink Deployments for their semantic Discovery Targets, while manifest-managed targets are excluded from re-import (no file moving for existing skills)
+- Scan skills from multiple tool directories, including unmanaged valid directory symlinks; linked aliases discover the authoritative real Source and are recorded as read-only Observed Subscriptions. They become managed Deployments only after explicit adoption; managed targets are excluded from re-import (no file moving for existing skills)
 - Register external authoritative Source Roots, recursively discover multiple Skills, rescan or detach metadata without deleting source files
 - Install new skills from GitHub repo (single + subpath), ZIP, or local directory
 - Deploy via copy / symlink / Windows junction; every linked-to-copy degradation requires confirmation

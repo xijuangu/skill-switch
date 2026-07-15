@@ -7,7 +7,7 @@ import { getSkillByName } from '../src/main/db/dao/skills'
 import { getAllSkills } from '../src/main/db/dao/skills'
 import { getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
 import type { ActiveScanDir } from '../src/main/services/tools-config'
-import { executePreparedDeployment, executePreparedUndeployment } from '../src/main/services/deployer'
+import { executePreparedDeployment } from '../src/main/services/deployer'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { getDeploymentsBySkillId } from '../src/main/db/dao/deployments'
 
@@ -48,10 +48,10 @@ describe('scan-all service', () => {
       target_path: linkedSkill,
       source_path: realpathSync(realSkill),
       mode: 'symlink',
-      target_id: 'preset:agents:0'
+      target_id: 'preset:agents:0',
+      management: 'observed'
     }])
-    executePreparedUndeployment(db, deployments[0])
-    expect(existsSync(linkedSkill)).toBe(false)
+    expect(existsSync(linkedSkill)).toBe(true)
     expect(existsSync(realSkill)).toBe(true)
     expect(getSourcesBySkillId(db, skill!.id)).toHaveLength(1)
 
@@ -91,8 +91,8 @@ describe('scan-all service', () => {
     expect(getSourcesBySkillId(db, skill.id)).toHaveLength(1)
     expect(getSourcesBySkillId(db, skill.id)[0].path).toBe(realpathSync(source))
     expect(getDeploymentsBySkillId(db, skill.id)).toMatchObject([
-      { target_tool: 'agents', target_id: 'preset:agents:0', mode: 'symlink' },
-      { target_tool: 'codex', target_id: 'preset:codex:0', mode: 'symlink' }
+      { target_tool: 'agents', target_id: 'preset:agents:0', mode: 'symlink', management: 'observed' },
+      { target_tool: 'codex', target_id: 'preset:codex:0', mode: 'symlink', management: 'observed' }
     ])
 
     root.cleanup()

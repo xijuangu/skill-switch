@@ -29,7 +29,7 @@ import { reconcileIndexedSources } from './registry'
 function buildSkipPaths(db: DB): Set<string> {
   const skip = new Set<string>()
   for (const dep of getAllDeployments(db)) {
-    if (dep.target_path) skip.add(dep.target_path)
+    if (dep.management === 'managed' && dep.target_path) skip.add(dep.target_path)
   }
   return skip
 }
@@ -84,7 +84,8 @@ export function scanAllTools(
           'symlink',
           source.path,
           source.hash,
-          { sourceId: source.id, targetId: target.id }
+          { sourceId: source.id, targetId: target.id },
+          'observed'
         )
         // Prevent another configured target that aliases the same physical root
         // from importing this exact filesystem entry a second time in this scan.

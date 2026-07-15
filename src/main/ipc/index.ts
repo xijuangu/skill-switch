@@ -106,6 +106,15 @@ export function readDeployTargetOptions(
           validateSkillName(skill.name)
         )
         const existing = getDeploymentBySkillAndTargetId(db, skill.id, targetId)
+        if (existing?.management === 'observed') {
+          return {
+            targetId,
+            targetTool: tool.key,
+            displayName: tool.existingTargets.length > 1 ? `${tool.displayName} (${index + 1})` : tool.displayName,
+            eligible: false,
+            reason: '已有外部订阅，请先在工具页显式接管'
+          }
+        }
         const assessment = assessSafeDeployTarget(source.path, targetPath, {
           allowExistingSymlinkToSource:
             existing != null &&
@@ -391,6 +400,10 @@ export function registerIpcHandlers(db: DB): void {
 
   ipcMain.handle('undeploy', async (_e, deploymentId: number) =>
     deploymentFacade.undeploy(assertInteger(deploymentId, 'deploymentId'))
+  )
+
+  ipcMain.handle('adoptDeployment', async (_e, deploymentId: number) =>
+    deploymentFacade.adopt(assertInteger(deploymentId, 'deploymentId'))
   )
 
   // issue #22:漂移"重新部署"——从 deployment 清单读取精确 target_path,

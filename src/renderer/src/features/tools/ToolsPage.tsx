@@ -22,6 +22,7 @@ export function ToolsPage({
   const [confirmUndeploy, setConfirmUndeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmRemoveManifest, setConfirmRemoveManifest] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmRedeploy, setConfirmRedeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
+  const [confirmAdopt, setConfirmAdopt] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [redeployRisk, setRedeployRisk] = useState<ConfirmationRequiredView | null>(null)
 
   const { success, error: toastError } = useToast()
@@ -84,6 +85,24 @@ export function ToolsPage({
       await onRefresh()
       success(`已重新部署`)
       setConfirmRedeploy(null)
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+      await onRefresh()
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const handleAdopt = async () => {
+    if (!confirmAdopt) return
+    const { deploymentId, skillId, targetTool } = confirmAdopt
+    setBusyKey({ skillId, targetTool })
+    try {
+      const outcome = await window.api.adoptDeployment(deploymentId)
+      if (outcome.status !== 'completed') throw new Error(outcome.message)
+      await onRefresh()
+      success('已接管外部订阅')
+      setConfirmAdopt(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
       await onRefresh()
@@ -164,10 +183,22 @@ export function ToolsPage({
               onUndeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmUndeploy({ deploymentId, skillId, targetTool, skillName })}
               onRedeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmRedeploy({ deploymentId, skillId, targetTool, skillName })}
               onRemoveFromManifest={(deploymentId, skillId, targetTool, skillName) => setConfirmRemoveManifest({ deploymentId, skillId, targetTool, skillName })}
+              onAdopt={(deploymentId, skillId, targetTool, skillName) => setConfirmAdopt({ deploymentId, skillId, targetTool, skillName })}
             />
           ))}
         </ul>
       )}
+
+      <Dialog
+        open={confirmAdopt !== null}
+        onClose={() => setConfirmAdopt(null)}
+        title={`接管 ${confirmAdopt?.targetTool ?? ''} 的外部订阅「${confirmAdopt?.skillName ?? ''}」?`}
+        description="接管前会重新校验链接仍指向登记的权威 Source；接管不会重建链接或修改文件。接管后才允许重新部署和取消部署。"
+        confirmLabel="接管"
+        onConfirm={handleAdopt}
+        busy={driftKeyEquals(busyKey, confirmAdopt)}
+        closeOnOverlay={false}
+      />
 
       <Dialog
         open={confirmUndeploy !== null}
@@ -222,7 +253,8 @@ function ToolCard({
   busyKey,
   onUndeploy,
   onRedeploy,
-  onRemoveFromManifest
+  onRemoveFromManifest,
+  onAdopt
 }: {
   tool: ToolWithDriftsView
   expanded: boolean
@@ -231,9 +263,11 @@ function ToolCard({
   onUndeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
   onRedeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
   onRemoveFromManifest: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
+  onAdopt: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
 }) {
   const { config, drifts } = tool
-  const managed = drifts.filter((d) => d.kind !== 'external')
+  const managed = drifts.filter((d) => d.kind !== 'external' && d.deployment?.management !== 'observed')
+  const observed = drifts.filter((d) => d.deployment?.management === 'observed')
   const external = drifts.filter((d) => d.kind === 'external')
   const driftCount = managed.filter((d) => d.kind !== 'normal').length
 
@@ -273,6 +307,11 @@ function ToolCard({
               {external.length} 个外部
             </span>
           )}
+          {observed.length > 0 && (
+            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-warning-subtle text-warning font-medium">
+              {observed.length} 个外部订阅
+            </span>
+          )}
         </div>
         <span className="text-xs text-foreground-muted">
           已部署 {managed.length} · 共 {drifts.length}
@@ -300,9 +339,30 @@ function ToolCard({
                       onUndeploy={() => d.deployment && onUndeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                       onRedeploy={() => d.deployment && onRedeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                       onRemoveFromManifest={() => d.deployment && onRemoveFromManifest(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
+                      onAdopt={() => {}}
                     />
                   ))}
                 </ul>
+              )}
+              {observed.length > 0 && (
+                <div className="border-t border-border-subtle pt-2 mb-3">
+                  <p className="text-2xs font-semibold text-foreground-muted uppercase mb-1.5">
+                    外部订阅（只读，接管后可变更）
+                  </p>
+                  <ul className="space-y-1.5">
+                    {observed.map((d) => (
+                      <DriftItem
+                        key={`observed:${d.deployment!.id}`}
+                        drift={d}
+                        busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
+                        onAdopt={() => onAdopt(d.deployment!.id, d.skillId, d.targetTool, d.skillName)}
+                        onUndeploy={() => {}}
+                        onRedeploy={() => {}}
+                        onRemoveFromManifest={() => {}}
+                      />
+                    ))}
+                  </ul>
+                </div>
               )}
               {external.length > 0 && (
                 <div className="border-t border-border-subtle pt-2">
@@ -318,6 +378,7 @@ function ToolCard({
                         onUndeploy={() => {}}
                         onRedeploy={() => {}}
                         onRemoveFromManifest={() => {}}
+                        onAdopt={() => {}}
                       />
                     ))}
                   </ul>
@@ -336,17 +397,20 @@ function DriftItem({
   busy,
   onUndeploy,
   onRedeploy,
-  onRemoveFromManifest
+  onRemoveFromManifest,
+  onAdopt
 }: {
   drift: DriftStatusView
   busy: boolean
   onUndeploy: () => void
   onRedeploy: () => void
   onRemoveFromManifest: () => void
+  onAdopt: () => void
 }) {
   const status = getDriftStatus(drift.kind)
   const isExternal = drift.kind === 'external'
   const isDrift = drift.kind === 'drift'
+  const isObserved = drift.deployment?.management === 'observed'
 
   return (
     <li className={`flex items-center justify-between bg-surface border border-border rounded px-2.5 py-1.5 ${isDrift ? 'opacity-50' : ''}`}>
@@ -356,9 +420,12 @@ function DriftItem({
         {drift.deployment && (
           <span className="text-2xs text-foreground-secondary">{drift.deployment.mode}</span>
         )}
+        {isObserved && (
+          <span className="text-2xs px-1.5 py-0.5 rounded bg-warning-subtle text-warning">外部订阅</span>
+        )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {(drift.kind === 'drift' || drift.kind === 'target-modified' || drift.kind === 'link-mismatch') && (
+        {!isObserved && (drift.kind === 'drift' || drift.kind === 'target-modified' || drift.kind === 'link-mismatch') && (
           <>
             <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
               重新部署
@@ -370,19 +437,24 @@ function DriftItem({
             )}
           </>
         )}
-        {drift.kind === 'source-updated' && (
+        {!isObserved && drift.kind === 'source-updated' && (
           <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
             更新
           </Button>
         )}
-        {drift.kind === 'unresolved' && (
+        {!isObserved && drift.kind === 'unresolved' && (
           <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
             从清单移除
           </Button>
         )}
-        {drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && (
+        {!isObserved && drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && (
           <Button variant="danger" size="sm" onClick={onUndeploy} disabled={busy}>
             取消部署
+          </Button>
+        )}
+        {isObserved && (
+          <Button variant="primary" size="sm" onClick={onAdopt} disabled={busy}>
+            接管
           </Button>
         )}
         {isExternal && (

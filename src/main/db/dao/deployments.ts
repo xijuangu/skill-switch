@@ -1,6 +1,6 @@
 // deployments 表 DAO
 import type { DB } from '../database'
-import type { DeployMode, Deployment } from '../../types'
+import type { DeployMode, Deployment, DeploymentManagement } from '../../types'
 
 /** 查所有部署记录 */
 export function getAllDeployments(db: DB): Deployment[] {
@@ -55,17 +55,19 @@ export function upsertDeployment(
   mode: DeployMode,
   sourcePath: string,
   sourceHashAtDeploy: string,
-  identity: { sourceId: number; targetId: string }
+  identity: { sourceId: number; targetId: string },
+  management: DeploymentManagement = 'managed'
 ): void {
   db.prepare(
     `INSERT INTO deployments
-      (skill_id, target_tool, target_path, mode, source_path, deployed_at,
+      (skill_id, target_tool, target_path, mode, management, source_path, deployed_at,
        source_hash_at_deploy, source_id, target_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(skill_id, target_id) WHERE target_id IS NOT NULL DO UPDATE SET
        target_tool = excluded.target_tool,
        target_path = excluded.target_path,
        mode = excluded.mode,
+       management = excluded.management,
        source_path = excluded.source_path,
        deployed_at = excluded.deployed_at,
        source_hash_at_deploy = excluded.source_hash_at_deploy,
@@ -75,6 +77,7 @@ export function upsertDeployment(
     targetTool,
     targetPath,
     mode,
+    management,
     sourcePath,
     new Date().toISOString(),
     sourceHashAtDeploy,
@@ -88,6 +91,14 @@ export function deleteDeploymentById(db: DB, deploymentId: number): void {
   db.prepare('DELETE FROM deployments WHERE id = ?').run(deploymentId)
 }
 
+/** Convert one still-observed relation to managed without touching the filesystem. */
+export function adoptObservedDeployment(db: DB, deploymentId: number): boolean {
+  const result = db.prepare(
+    "UPDATE deployments SET management = 'managed' WHERE id = ? AND management = 'observed'"
+  ).run(deploymentId)
+  return result.changes === 1
+}
+
 /** Restore the exact manifest snapshot after a failed filesystem transaction. */
 export function restoreDeploymentSnapshot(
   db: DB,
@@ -99,12 +110,13 @@ export function restoreDeploymentSnapshot(
     return
   }
   db.prepare(`UPDATE deployments SET
-    skill_id = ?, target_tool = ?, target_path = ?, mode = ?, source_path = ?, deployed_at = ?,
+    skill_id = ?, target_tool = ?, target_path = ?, mode = ?, management = ?, source_path = ?, deployed_at = ?,
     source_hash_at_deploy = ?, source_id = ?, target_id = ? WHERE id = ?`).run(
     snapshot.skill_id,
     snapshot.target_tool,
     snapshot.target_path,
     snapshot.mode,
+    snapshot.management,
     snapshot.source_path,
     snapshot.deployed_at,
     snapshot.source_hash_at_deploy,

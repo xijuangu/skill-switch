@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -9,7 +9,7 @@ import { createTempDb, createTempDir } from './helpers/temp'
 import type { DB } from '../src/main/db/database'
 import type { ToolConfig } from '../src/main/types'
 import type { DeploymentMutationHooks } from '../src/main/types'
-import { getDeploymentBySkillAndTargetId } from '../src/main/db/dao/deployments'
+import { getDeploymentBySkillAndTargetId, upsertDeployment } from '../src/main/db/dao/deployments'
 import { removeFromRegistry } from '../src/main/services/registry'
 import { dirname } from 'path'
 
@@ -61,6 +61,72 @@ function setup() {
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
 
 describe('Deployment Facade', () => {
+  test.runIf(process.platform !== 'win32')('keeps observed subscriptions read-only until an exact link is explicitly adopted', async () => {
+    const env = setup()
+    const targetPath = join(env.targetRoot, 'demo')
+    symlinkSync(env.sourcePath, targetPath)
+    upsertDeployment(
+      env.db,
+      env.skillId,
+      'codex',
+      targetPath,
+      'symlink',
+      env.sourcePath,
+      hashDir(env.sourcePath),
+      { sourceId: env.sourceId, targetId: env.targetId },
+      'observed'
+    )
+    const observed = getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)!
+    const facade = env.create()
+
+    expect(await facade.redeploy(observed.id)).toMatchObject({
+      status: 'rejected', reason: 'observed-read-only'
+    })
+    expect(await facade.undeploy(observed.id)).toMatchObject({
+      status: 'rejected', reason: 'observed-read-only'
+    })
+    expect(await facade.deploy({
+      sourceId: env.sourceId,
+      targetId: env.targetId,
+      requestedMode: 'symlink'
+    })).toMatchObject({ status: 'rejected', reason: 'observed-read-only' })
+    expect(await facade.adopt(observed.id)).toMatchObject({
+      status: 'completed', deploymentId: observed.id
+    })
+    expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)).toMatchObject({
+      management: 'managed'
+    })
+    expect(realpathSync(targetPath)).toBe(realpathSync(env.sourcePath))
+  })
+
+  test.runIf(process.platform !== 'win32')('rejects adoption when the observed link no longer targets its Source', async () => {
+    const env = setup()
+    const targetPath = join(env.targetRoot, 'demo')
+    const replacement = join(env.targetRoot, 'replacement')
+    mkdirSync(replacement)
+    symlinkSync(env.sourcePath, targetPath)
+    upsertDeployment(
+      env.db,
+      env.skillId,
+      'codex',
+      targetPath,
+      'symlink',
+      env.sourcePath,
+      hashDir(env.sourcePath),
+      { sourceId: env.sourceId, targetId: env.targetId },
+      'observed'
+    )
+    const observed = getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)!
+    unlinkSync(targetPath)
+    symlinkSync(replacement, targetPath)
+
+    expect(await env.create().adopt(observed.id)).toMatchObject({
+      status: 'rejected', reason: 'observation-stale'
+    })
+    expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)).toMatchObject({
+      management: 'observed'
+    })
+  })
   test('redeploy of a modified managed target uses the aggregated confirmation plan', async () => {
     const env = setup()
     const facade = env.create()

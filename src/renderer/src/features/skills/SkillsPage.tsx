@@ -65,7 +65,7 @@ export function SkillsPage({
   const [visibleMenuSkill, setVisibleMenuSkill] = useState<SkillView | null>(null)
   const [viewMdTarget, setViewMdTarget] = useState<{ content: string; path: string; skillName: string } | null>(null)
   const [viewMdSourcePicker, setViewMdSourcePicker] = useState<SkillView | null>(null)
-  const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string }[] } | null>(null)
+  const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string; management: 'managed' | 'observed' }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
@@ -218,9 +218,10 @@ export function SkillsPage({
     setVisibleMenuSkill(null)
     setActionBusy(true)
     try {
-      const deployments = await window.api.getDeploymentsForSkill(skill.id)
+      const deployments = (await window.api.getDeploymentsForSkill(skill.id))
+        .filter((deployment) => deployment.management === 'managed')
       if (deployments.length === 0) {
-        info(`「${skill.name}」未部署到任何工具`)
+        info(`「${skill.name}」没有可取消的受管部署；外部订阅请先在工具页接管`)
         return
       }
       setUndeployFromTarget({ skill, deployments })
@@ -782,6 +783,11 @@ function DeploymentPanel({ skill }: { skill: SkillView }) {
                 <span className="text-2xs px-1 py-px rounded bg-surface-secondary text-foreground-secondary">
                   {dep.mode}
                 </span>
+                {dep.management === 'observed' && (
+                  <span className="text-2xs px-1.5 py-0.5 rounded bg-warning-subtle text-warning">
+                    外部订阅
+                  </span>
+                )}
               </div>
               <StatusDot variant={status.variant} label={status.label} />
             </div>

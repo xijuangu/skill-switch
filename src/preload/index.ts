@@ -31,6 +31,7 @@ const api = {
   // renderer 不传任何路径。
   redeploy: (deploymentId: number) => ipcRenderer.invoke('redeploy', deploymentId),
   undeploy: (deploymentId: number) => ipcRenderer.invoke('undeploy', deploymentId),
+  adoptDeployment: (deploymentId: number) => ipcRenderer.invoke('adoptDeployment', deploymentId),
   getTools: () => ipcRenderer.invoke('getTools'),
   // Drift + Remove from Registry(#8)
   removeFromManifest: (deploymentId: number) =>

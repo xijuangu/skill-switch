@@ -164,7 +164,7 @@ export type DeploymentOutcomeView =
     }
   | {
       status: 'rejected'
-      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy' | 'observed-read-only'
       message: string
     }
   | {
@@ -182,7 +182,7 @@ export type DeploymentOutcomeView =
 
 export type DeploymentMutationOutcomeView =
   | { status: 'completed'; deploymentId: number }
-  | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy'; message: string }
+  | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'observation-stale'; message: string }
   | Extract<DeploymentOutcomeView, { status: 'recovery-required' }>
 
 export type DeploymentRedeployOutcomeView =
@@ -195,6 +195,7 @@ export interface DeploymentView {
   target_tool: string
   target_path: string | null
   mode: DeployModeView
+  management: 'managed' | 'observed'
   source_path: string
   source_id: number | null
   target_id: string | null
@@ -271,6 +272,7 @@ declare global {
       // issue #22:漂移重新部署,target_path / source_path 由主进程从清单读取
       redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
       undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
+      adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       getTools: () => Promise<ToolWithDriftsView[]>
       // Drift + Remove from Registry (#8)
       removeFromManifest: (deploymentId: number) => Promise<void>

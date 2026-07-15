@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync } from 'fs'
 import { randomUUID } from 'crypto'
 import type { DB } from '../db/database'
-import { getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
+import { adoptObservedDeployment, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
 import { getSourceById } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
 import type { DeployMode, DeployResult, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
@@ -51,7 +51,7 @@ export type DeploymentOutcome =
     }
   | {
       status: 'rejected'
-      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy' | 'observed-read-only'
       message: string
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
@@ -60,7 +60,7 @@ export type DeploymentMutationOutcome =
   | { status: 'completed'; deploymentId: number }
   | {
       status: 'rejected'
-      reason: 'deployment-not-found' | 'unresolved' | 'target-busy'
+      reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'observation-stale'
       message: string
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
@@ -105,6 +105,7 @@ export interface DeploymentFacade {
   confirm(confirmationId: string): Promise<DeploymentOutcome>
   redeploy(deploymentId: number): Promise<DeploymentRedeployOutcome>
   undeploy(deploymentId: number): Promise<DeploymentMutationOutcome>
+  adopt(deploymentId: number): Promise<DeploymentMutationOutcome>
   inspect(deploymentId: number): DriftStatus | null
 }
 
@@ -406,6 +407,17 @@ export function createDeploymentFacade(options: {
 
   return {
     deploy(request) {
+      const requestedSource = getSourceById(options.db, request.sourceId)
+      const existing = requestedSource == null
+        ? undefined
+        : getDeploymentBySkillAndTargetId(options.db, requestedSource.skill_id, request.targetId)
+      if (existing?.management === 'observed') {
+        return Promise.resolve({
+          status: 'rejected',
+          reason: 'observed-read-only',
+          message: '该目标是外部订阅，请先显式接管。'
+        } as const)
+      }
       return withTargetLock(request.targetId, () => {
         const prepared = prepare(request)
         if (inspectRecoveryEvidence(prepared.resolved.targetPath)) return execute(prepared)
@@ -445,6 +457,9 @@ export function createDeploymentFacade(options: {
       const resolved = resolveExisting(deploymentId)
       if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
       const { deployment, source, target } = resolved
+      if (deployment.management === 'observed') {
+        return Promise.resolve({ status: 'rejected', reason: 'observed-read-only', message: '外部订阅尚未接管，拒绝重新部署。' } as const)
+      }
       return withTargetLock(deployment.target_id!, () => {
         const prepared = prepare({
           sourceId: source.id,
@@ -461,6 +476,9 @@ export function createDeploymentFacade(options: {
       if (!deployment) {
         return Promise.resolve({ status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' } as const)
       }
+      if (deployment.management === 'observed') {
+        return Promise.resolve({ status: 'rejected', reason: 'observed-read-only', message: '外部订阅尚未接管，拒绝取消部署。' } as const)
+      }
       if (deployment.target_id == null || deployment.target_path == null) {
         return Promise.resolve({ status: 'rejected', reason: 'unresolved', message: '部署目标身份尚未解析，拒绝执行文件系统操作。' } as const)
       }
@@ -476,6 +494,33 @@ export function createDeploymentFacade(options: {
           }
           throw error
         }
+      }) as Promise<DeploymentMutationOutcome>
+    },
+    adopt(deploymentId) {
+      const resolved = resolveExisting(deploymentId)
+      if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+      const { deployment, source, skill, target } = resolved
+      if (deployment.management === 'managed') {
+        return Promise.resolve({ status: 'completed', deploymentId: deployment.id } as const)
+      }
+      return withTargetLock(deployment.target_id!, () => {
+        const expectedTargetPath = resolveWithin(target.target.path, validateSkillName(skill.name))
+        try {
+          if (
+            deployment.mode !== 'symlink' ||
+            deployment.target_path !== expectedTargetPath ||
+            !lstatSync(expectedTargetPath).isSymbolicLink() ||
+            realpathSync(expectedTargetPath) !== realpathSync(source.path)
+          ) {
+            return { status: 'rejected', reason: 'observation-stale', message: '外部订阅已变化，拒绝接管。' } as const
+          }
+        } catch {
+          return { status: 'rejected', reason: 'observation-stale', message: '外部订阅已变化或不可访问，拒绝接管。' } as const
+        }
+        if (!adoptObservedDeployment(options.db, deployment.id)) {
+          return { status: 'rejected', reason: 'observation-stale', message: '外部订阅状态已变化，请刷新后重试。' } as const
+        }
+        return { status: 'completed', deploymentId: deployment.id } as const
       }) as Promise<DeploymentMutationOutcome>
     }
   }
