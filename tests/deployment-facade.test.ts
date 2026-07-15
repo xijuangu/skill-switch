@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -8,6 +8,8 @@ import { hashDir } from '../src/main/services/hash'
 import { createTempDb, createTempDir } from './helpers/temp'
 import type { DB } from '../src/main/db/database'
 import type { ToolConfig } from '../src/main/types'
+import type { DeploymentMutationHooks } from '../src/main/types'
+import { getDeploymentBySkillAndTargetId } from '../src/main/db/dao/deployments'
 
 const cleanups: Array<() => void> = []
 
@@ -36,6 +38,7 @@ function setup() {
     db?: DB
     tools?: ToolConfig[]
     runMutation?: <T>(mutation: () => T) => Promise<T>
+    mutationHooks?: DeploymentMutationHooks
   } = {}) => createDeploymentFacade({
     db: options.db ?? database.db,
     getRuntime: () => ({ tools: options.tools ?? [tool], platform: { platform: 'test', canSymlink: true, canJunction: false } }),
@@ -43,9 +46,10 @@ function setup() {
     now: () => now,
     createId: () => `confirmation-${++confirmationSequence}`,
     confirmationTtlMs: 100,
-    runMutation: options.runMutation
+    runMutation: options.runMutation,
+    mutationHooks: options.mutationHooks
   })
-  return { ...database, sourceId, targetId, targetRoot, sourcePath, create, advance: (ms: number) => { now += ms } }
+  return { ...database, skillId, sourceId, targetId, targetRoot, sourcePath, create, advance: (ms: number) => { now += ms } }
 }
 
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
@@ -187,5 +191,62 @@ describe('Deployment Facade', () => {
     const request = { sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' as const }
     await expect(facade.deploy(request)).rejects.toThrow('boom')
     expect(await facade.deploy(request)).toMatchObject({ status: 'completed' })
+  })
+
+  test.each(['afterStaging', 'afterMarker', 'afterRollback', 'afterSwitch', 'beforeManifest'] as const)(
+    'failure at %s restores the old target and manifest without transaction artifacts',
+    async (failurePoint) => {
+      const env = setup()
+      const request = { sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' as const }
+      await env.create().deploy(request)
+      const targetPath = join(env.targetRoot, 'demo')
+      const before = getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)!
+      writeFileSync(join(env.sourcePath, 'SKILL.md'), '# new source')
+      const hooks: DeploymentMutationHooks = {
+        operationId: () => `fail-${failurePoint}`,
+        [failurePoint]: () => { throw new Error(`fail ${failurePoint}`) }
+      }
+      await expect(env.create({ mutationHooks: hooks }).deploy(request)).rejects.toThrow(`fail ${failurePoint}`)
+      expect(readFileSync(join(targetPath, 'SKILL.md'), 'utf-8')).toBe('# demo')
+      expect(getDeploymentBySkillAndTargetId(env.db, before.skill_id, env.targetId)).toEqual(before)
+      expect(readdirSync(env.targetRoot).filter((name) => name.startsWith('.skill-switch-'))).toEqual([])
+    }
+  )
+
+  test('compensation failure returns recovery-required and later deploy diagnoses the evidence', async () => {
+    const env = setup()
+    const request = { sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' as const }
+    await env.create().deploy(request)
+    writeFileSync(join(env.sourcePath, 'SKILL.md'), '# new source')
+    const failed = await env.create({ mutationHooks: {
+      operationId: () => 'recovery-case',
+      afterSwitch: () => { throw new Error('switch failed') },
+      beforeCompensate: () => { throw new Error('compensation failed') }
+    } }).deploy(request)
+    expect(failed).toMatchObject({
+      status: 'recovery-required',
+      evidence: { operationId: 'recovery-case', phase: 'switched' }
+    })
+    expect(await env.create().deploy(request)).toMatchObject({
+      status: 'recovery-required',
+      evidence: { operationId: 'recovery-case' }
+    })
+  })
+
+  test('backup-stage failure leaves external target intact and removes transaction artifacts', async () => {
+    const env = setup()
+    const targetPath = join(env.targetRoot, 'demo')
+    mkdirSync(targetPath)
+    writeFileSync(join(targetPath, 'SKILL.md'), '# external')
+    const request = { sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' as const }
+    const hooks: DeploymentMutationHooks = { operationId: () => 'backup-failure' }
+    const planner = env.create({ mutationHooks: hooks })
+    const confirmation = await planner.deploy(request)
+    if (confirmation.status !== 'confirmation-required') throw new Error('expected confirmation')
+
+    hooks.afterBackup = () => { throw new Error('backup stage failed') }
+    await expect(planner.confirm(confirmation.confirmationId)).rejects.toThrow('backup stage failed')
+    expect(readFileSync(join(targetPath, 'SKILL.md'), 'utf-8')).toBe('# external')
+    expect(readdirSync(env.targetRoot).filter((name) => name.startsWith('.skill-switch-'))).toEqual([])
   })
 })

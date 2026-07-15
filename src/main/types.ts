@@ -183,6 +183,27 @@ export interface DeployOptions {
   /** Must be true only after an explicit external-overwrite confirmation. */
   allowExternalOverwrite?: boolean
   identity?: { sourceId: number; targetId: string }
+  mutationHooks?: DeploymentMutationHooks
+}
+
+export interface DeploymentMutationHooks {
+  operationId?: () => string
+  afterStaging?: () => void
+  afterMarker?: () => void
+  afterBackup?: () => void
+  afterRollback?: () => void
+  afterSwitch?: () => void
+  beforeManifest?: () => void
+  beforeCompensate?: () => void
+}
+
+export interface RecoveryEvidence {
+  operationId: string
+  targetPath: string
+  markerPath: string
+  stagingPath: string
+  rollbackPath: string
+  phase: string
 }
 
 /** 部署动作类型(用于 UI 反馈与测试断言) */

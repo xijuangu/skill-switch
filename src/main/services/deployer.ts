@@ -17,10 +17,14 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
+  renameSync,
   symlinkSync,
-  unlinkSync
+  unlinkSync,
+  writeFileSync,
+  readFileSync
 } from 'fs'
-import { join } from 'path'
+import { basename, dirname, join } from 'path'
+import { randomUUID } from 'crypto'
 import type { DB } from '../db/database'
 import type {
   DeployAction,
@@ -30,11 +34,13 @@ import type {
   DriftKind,
   DriftStatus
 } from '../types'
+import type { RecoveryEvidence } from '../types'
 import {
   deleteDeployment,
   getDeploymentBySkillAndTargetId,
   getDeploymentBySkillAndTool,
   getDeploymentsByTool,
+  restoreDeploymentSnapshot,
   upsertDeployment
 } from '../db/dao/deployments'
 import { getSkillById } from '../db/dao/skills'
@@ -85,33 +91,6 @@ function cleanupUnknown(targetPath: string): void {
   }
 }
 
-function cleanupManagedTarget(
-  targetPath: string,
-  recordedMode: DeployMode,
-  skillName: string,
-  targetTool: string,
-  backupsDir: string
-): void {
-  if (
-    (recordedMode === 'symlink' || recordedMode === 'junction') &&
-    pathEntryExists(targetPath) &&
-    !lstatSync(targetPath).isSymbolicLink()
-  ) {
-    // A managed link was replaced with real content. Preserve that content before repair.
-    if (lstatSync(targetPath).isDirectory()) {
-      createBackup({
-        skillName,
-        targetTool,
-        sourcePath: targetPath,
-        backupsDir
-      })
-    }
-    cleanupUnknown(targetPath)
-    return
-  }
-  cleanupByMode(targetPath, recordedMode)
-}
-
 function pathEntryExists(targetPath: string): boolean {
   try {
     lstatSync(targetPath)
@@ -119,6 +98,69 @@ function pathEntryExists(targetPath: string): boolean {
   } catch {
     return false
   }
+}
+
+export class RecoveryRequiredError extends Error {
+  constructor(
+    message: string,
+    readonly evidence: RecoveryEvidence,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options)
+    this.name = 'RecoveryRequiredError'
+  }
+}
+
+function markerForTarget(targetPath: string, operationId: string): RecoveryEvidence {
+  const parent = dirname(targetPath)
+  const name = basename(targetPath)
+  return {
+    operationId,
+    targetPath,
+    markerPath: join(parent, `.skill-switch-operation-${name}-${operationId}.json`),
+    stagingPath: join(parent, `.skill-switch-staging-${name}-${operationId}`),
+    rollbackPath: join(parent, `.skill-switch-rollback-${name}-${operationId}`),
+    phase: 'prepared'
+  }
+}
+
+function writeMarker(evidence: RecoveryEvidence, phase: string): void {
+  evidence.phase = phase
+  writeFileSync(evidence.markerPath, JSON.stringify(evidence, null, 2) + '\n', 'utf-8')
+}
+
+export function inspectRecoveryEvidence(targetPath: string): RecoveryEvidence | null {
+  const parent = dirname(targetPath)
+  const prefix = `.skill-switch-operation-${basename(targetPath)}-`
+  if (!existsSync(parent)) return null
+  for (const entry of readdirSync(parent)) {
+    if (!entry.startsWith(prefix) || !entry.endsWith('.json')) continue
+    const markerPath = join(parent, entry)
+    try {
+      const evidence = JSON.parse(readFileSync(markerPath, 'utf-8')) as RecoveryEvidence
+      if (evidence.targetPath === targetPath) return evidence
+    } catch {
+      return {
+        operationId: entry.slice(prefix.length, -'.json'.length),
+        targetPath,
+        markerPath,
+        stagingPath: '',
+        rollbackPath: '',
+        phase: 'marker-unreadable'
+      }
+    }
+  }
+  for (const kind of ['staging', 'rollback'] as const) {
+    const artifactPrefix = `.skill-switch-${kind}-${basename(targetPath)}-`
+    const artifact = readdirSync(parent).find((entry) => entry.startsWith(artifactPrefix))
+    if (artifact) {
+      const operationId = artifact.slice(artifactPrefix.length)
+      const evidence = markerForTarget(targetPath, operationId)
+      evidence.phase = `orphan-${kind}`
+      return evidence
+    }
+  }
+  return null
 }
 
 function targetMatchesDeployment(
@@ -255,7 +297,7 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
   let degradeReason = resolved.degradeReason
 
   // Step 3: 目标是否存在(existing 已在 Step 0 查过)
-  const targetExists = existsSync(opts.targetDir)
+  const targetExists = pathEntryExists(opts.targetDir)
   if (
     existing?.target_path != null &&
     existing.target_path !== opts.targetDir
@@ -270,23 +312,15 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
     )
   }
 
-  // Step 4: 判断 action 并执行清理(如需)— 基于实际 mode 比较(existing.mode vs actualMode)
+  // Step 4: determine the semantic action without mutating the target.
   let action: DeployAction
   let previousMode: DeployMode | undefined
   let needDeploy = true
 
   if (existing) {
     if (existing.mode !== actualMode) {
-      // 模式切换:按旧 mode 清理,按新 mode 部署
       action = 'mode-switched'
       previousMode = existing.mode
-      cleanupManagedTarget(
-        opts.targetDir,
-        existing.mode,
-        opts.skillName,
-        opts.targetTool,
-        opts.backupsDir
-      )
     } else if (
       existing.source_hash_at_deploy === sourceHash &&
       targetMatchesDeployment(
@@ -300,64 +334,124 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
       action = 'skipped'
       needDeploy = false
     } else {
-      // 自管覆盖:同 mode + hash 变了,清理旧 target 后重新部署
       action = 'updated'
-      cleanupManagedTarget(
-        opts.targetDir,
-        existing.mode,
-        opts.skillName,
-        opts.targetTool,
-        opts.backupsDir
-      )
     }
   } else if (targetExists) {
-    // 外部 skill:清单无记录但目标存在 → 备份后覆盖
     if (opts.allowExternalOverwrite !== true) {
       throw new Error('external skill overwrite requires explicit confirmation')
     }
     action = 'external-overwritten'
-    createBackup({
-      skillName: opts.skillName,
-      targetTool: opts.targetTool,
-      sourcePath: opts.targetDir,
-      backupsDir: opts.backupsDir
-    })
-    cleanupUnknown(opts.targetDir)
   } else {
     // 全新部署
     action = 'created'
   }
 
-  // Step 5: 部署文件 + 记录清单(skipped 不执行)
+  // Step 5: stage beside the target, switch by rename, then persist the manifest.
   if (needDeploy) {
-    if (actualMode === 'junction' && opts.mode === 'symlink' && !opts.canSymlink) {
-      // junction fallback(issue #9):symlink 不可用 → 尝试 junction,失败则降级 copy。
-      // 注:junction 创建失败(如跨卷)→catch→copy 的路径在 Mac 上无法可靠触发
-      // (symlinkSync(...,'junction') 在非 Windows 退化为普通 symlink,总是成功)。
-      // 该降级路径由 resolveActualMode 纯函数测试 + 此处 try/catch 保证逻辑正确。
-      try {
-        deployFiles('junction', opts.sourcePath, opts.targetDir)
-      } catch {
-        // junction 创建失败(如跨卷)→ 清理半成品后降级 copy
-        cleanupUnknown(opts.targetDir)
-        deployFiles('copy', opts.sourcePath, opts.targetDir)
-        actualMode = 'copy'
-        degradedFrom = 'symlink'
-        degradeReason = 'junction creation failed (possibly cross-volume); used copy instead.'
-      }
-    } else {
-      deployFiles(actualMode, opts.sourcePath, opts.targetDir)
-    }
-    upsertDeployment(
-      db,
-      opts.skillId,
-      opts.targetTool,
+    const evidence = markerForTarget(
       opts.targetDir,
-      actualMode,
-      opts.sourcePath,
-      sourceHash,
-      opts.identity
+      opts.mutationHooks?.operationId?.() ?? randomUUID()
     )
+    let markerWritten = false
+    let switched = false
+    let rolledBack = false
+    let manifestChanged = false
+    let committed = false
+    try {
+      if (actualMode === 'junction' && opts.mode === 'symlink' && !opts.canSymlink) {
+        try {
+          deployFiles('junction', opts.sourcePath, evidence.stagingPath)
+        } catch {
+          cleanupUnknown(evidence.stagingPath)
+          deployFiles('copy', opts.sourcePath, evidence.stagingPath)
+          actualMode = 'copy'
+          degradedFrom = 'symlink'
+          degradeReason = 'junction creation failed (possibly cross-volume); used copy instead.'
+        }
+      } else {
+        deployFiles(actualMode, opts.sourcePath, evidence.stagingPath)
+      }
+      opts.mutationHooks?.afterStaging?.()
+      writeMarker(evidence, 'staged')
+      markerWritten = true
+      opts.mutationHooks?.afterMarker?.()
+
+      if (action === 'external-overwritten') {
+        createBackup({
+          skillName: opts.skillName,
+          targetTool: opts.targetTool,
+          sourcePath: opts.targetDir,
+          backupsDir: opts.backupsDir
+        })
+        opts.mutationHooks?.afterBackup?.()
+      }
+      if (pathEntryExists(opts.targetDir)) {
+        renameSync(opts.targetDir, evidence.rollbackPath)
+        rolledBack = true
+        writeMarker(evidence, 'rollback-created')
+      }
+      opts.mutationHooks?.afterRollback?.()
+
+      renameSync(evidence.stagingPath, opts.targetDir)
+      switched = true
+      writeMarker(evidence, 'switched')
+      opts.mutationHooks?.afterSwitch?.()
+      opts.mutationHooks?.beforeManifest?.()
+      upsertDeployment(
+        db,
+        opts.skillId,
+        opts.targetTool,
+        opts.targetDir,
+        actualMode,
+        opts.sourcePath,
+        sourceHash,
+        opts.identity
+      )
+      manifestChanged = true
+      writeMarker(evidence, 'manifest-written')
+      rmSync(evidence.markerPath, { force: true })
+      markerWritten = false
+      committed = true
+      cleanupUnknown(evidence.rollbackPath)
+    } catch (error) {
+      if (committed) {
+        try {
+          writeMarker(evidence, 'cleanup-required')
+        } catch {
+          // The rollback artifact itself still remains as diagnostic evidence.
+        }
+        throw new RecoveryRequiredError(
+          'deployment committed but transaction artifact cleanup failed',
+          evidence,
+          { cause: error }
+        )
+      }
+      try {
+        opts.mutationHooks?.beforeCompensate?.()
+        if (manifestChanged) {
+          restoreDeploymentSnapshot(db, existing, {
+            skillId: opts.skillId,
+            targetTool: opts.targetTool,
+            targetId: opts.identity?.targetId
+          })
+        }
+        if (switched && pathEntryExists(opts.targetDir)) cleanupUnknown(opts.targetDir)
+        if (rolledBack && pathEntryExists(evidence.rollbackPath)) {
+          renameSync(evidence.rollbackPath, opts.targetDir)
+        } else if (rolledBack) {
+          throw new Error('rollback evidence is missing')
+        }
+        cleanupUnknown(evidence.stagingPath)
+        if (markerWritten) rmSync(evidence.markerPath, { force: true })
+      } catch (compensationError) {
+        throw new RecoveryRequiredError(
+          `deployment failed and compensation failed: ${String(compensationError)}`,
+          evidence,
+          { cause: error }
+        )
+      }
+      throw error
+    }
   }
 
   return {

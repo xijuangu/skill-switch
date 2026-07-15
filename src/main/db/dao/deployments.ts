@@ -123,3 +123,33 @@ export function deleteDeployment(
     targetTool
   )
 }
+
+/** Restore the exact manifest snapshot after a failed filesystem transaction. */
+export function restoreDeploymentSnapshot(
+  db: DB,
+  snapshot: Deployment | undefined,
+  identity: { skillId: number; targetTool: string; targetId?: string }
+): void {
+  if (!snapshot) {
+    if (identity.targetId) {
+      db.prepare('DELETE FROM deployments WHERE skill_id = ? AND target_id = ?').run(identity.skillId, identity.targetId)
+    } else {
+      db.prepare('DELETE FROM deployments WHERE skill_id = ? AND target_tool = ?').run(identity.skillId, identity.targetTool)
+    }
+    return
+  }
+  db.prepare(`UPDATE deployments SET
+    skill_id = ?, target_tool = ?, target_path = ?, mode = ?, source_path = ?, deployed_at = ?,
+    source_hash_at_deploy = ?, source_id = ?, target_id = ? WHERE id = ?`).run(
+    snapshot.skill_id,
+    snapshot.target_tool,
+    snapshot.target_path,
+    snapshot.mode,
+    snapshot.source_path,
+    snapshot.deployed_at,
+    snapshot.source_hash_at_deploy,
+    snapshot.source_id,
+    snapshot.target_id,
+    snapshot.id
+  )
+}

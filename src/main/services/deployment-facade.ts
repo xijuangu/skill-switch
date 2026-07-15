@@ -4,8 +4,8 @@ import type { DB } from '../db/database'
 import { getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
 import { getSourceById } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
-import type { DeployMode, DeployResult, PlatformInfo, ToolConfig } from '../types'
-import { deploySkill } from './deployer'
+import type { DeployMode, DeployResult, DeploymentMutationHooks, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
+import { deploySkill, inspectRecoveryEvidence, RecoveryRequiredError } from './deployer'
 import { hashDir } from './hash'
 import { resolveWithin, validateSkillName } from './path-safety'
 
@@ -28,6 +28,7 @@ export type DeploymentOutcome =
       reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy'
       message: string
     }
+  | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
 
 interface Runtime {
   tools: ToolConfig[]
@@ -55,6 +56,7 @@ export function createDeploymentFacade(options: {
   createId?: () => string
   confirmationTtlMs?: number
   runMutation?: <T>(mutation: () => T) => Promise<T>
+  mutationHooks?: DeploymentMutationHooks
 }): DeploymentFacade {
   const now = options.now ?? Date.now
   const createId = options.createId ?? randomUUID
@@ -107,19 +109,32 @@ export function createDeploymentFacade(options: {
 
   function execute(request: DeploymentRequest, allowExternalOverwrite: boolean): DeploymentOutcome {
     const plan = resolve(request)
-    const result = deploySkill(options.db, {
-      skillId: plan.skill.id,
-      skillName: plan.skill.name,
-      targetTool: plan.tool.key,
-      mode: request.requestedMode,
-      sourcePath: plan.source.path,
-      targetDir: plan.targetPath,
-      backupsDir: options.backupsDir,
-      canSymlink: plan.runtime.platform.canSymlink,
-      canJunction: plan.runtime.platform.canJunction,
-      allowExternalOverwrite,
-      identity: { sourceId: plan.source.id, targetId: plan.target.id }
-    })
+    const existingEvidence = inspectRecoveryEvidence(plan.targetPath)
+    if (existingEvidence) {
+      return { status: 'recovery-required', message: '检测到未完成的部署操作，请保留现场并人工选择恢复方向。', evidence: existingEvidence }
+    }
+    let result: DeployResult
+    try {
+      result = deploySkill(options.db, {
+        skillId: plan.skill.id,
+        skillName: plan.skill.name,
+        targetTool: plan.tool.key,
+        mode: request.requestedMode,
+        sourcePath: plan.source.path,
+        targetDir: plan.targetPath,
+        backupsDir: options.backupsDir,
+        canSymlink: plan.runtime.platform.canSymlink,
+        canJunction: plan.runtime.platform.canJunction,
+        allowExternalOverwrite,
+        identity: { sourceId: plan.source.id, targetId: plan.target.id },
+        mutationHooks: options.mutationHooks
+      })
+    } catch (error) {
+      if (error instanceof RecoveryRequiredError) {
+        return { status: 'recovery-required', message: '部署失败且自动补偿未完成，请保留现场并人工恢复。', evidence: error.evidence }
+      }
+      throw error
+    }
     const deployment = getDeploymentBySkillAndTargetId(options.db, plan.skill.id, plan.target.id)
     if (!deployment) throw new Error('deployment manifest was not persisted')
     return { status: 'completed', deploymentId: deployment.id, result }

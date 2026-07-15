@@ -147,6 +147,18 @@ export type DeploymentOutcomeView =
       reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy'
       message: string
     }
+  | {
+      status: 'recovery-required'
+      message: string
+      evidence: {
+        operationId: string
+        targetPath: string
+        markerPath: string
+        stagingPath: string
+        rollbackPath: string
+        phase: string
+      }
+    }
 
 export interface DeploymentView {
   id: number

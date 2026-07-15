@@ -167,6 +167,7 @@ export function DeployDialogContent({
         return
       }
       if (outcome.status === 'rejected') throw new Error(outcome.message)
+      if (outcome.status === 'recovery-required') throw new Error(`需要人工恢复：${outcome.message}\n${outcome.evidence.targetPath}`)
       await completeMutation(outcome.result, onDone)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -182,7 +183,7 @@ export function DeployDialogContent({
     try {
       const outcome = await window.api.deploymentConfirm(externalOverwritePlan.confirmationToken)
       if (outcome.status !== 'completed') {
-        throw new Error(outcome.status === 'rejected' ? outcome.message : '部署计划已变化，请重新确认')
+        throw new Error(outcome.status === 'confirmation-required' ? '部署计划已变化，请重新确认' : outcome.message)
       }
       setExternalOverwritePlan(null)
       await completeMutation(outcome.result, onDone)
