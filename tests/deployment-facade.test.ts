@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -75,6 +75,20 @@ describe('Deployment Facade', () => {
     })
     if (planned.status !== 'confirmation-required') throw new Error('expected confirmation')
     expect(await facade.confirm(planned.confirmationId)).toMatchObject({ status: 'completed' })
+  })
+
+  test('redeploy restores a missing managed target without overwrite confirmation', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+    rmSync(join(env.targetRoot, 'demo'), { recursive: true, force: true })
+
+    expect(await facade.redeploy(deployed.deploymentId)).toMatchObject({
+      status: 'completed',
+      deploymentId: deployed.deploymentId
+    })
+    expect(readFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), 'utf-8')).toBe('# demo')
   })
 
   test('inspect, redeploy and undeploy use only the stable deployment ID', async () => {
@@ -195,6 +209,29 @@ describe('Deployment Facade', () => {
     expect(await facade.confirm('confirmation-1')).toMatchObject({ status: 'rejected', reason: 'confirmation-used' })
   })
 
+  test.runIf(process.platform !== 'win32')('a broken external symlink still requires structured overwrite confirmation', async () => {
+    const env = setup()
+    symlinkSync(join(env.targetRoot, 'missing-source'), join(env.targetRoot, 'demo'))
+    const facade = env.create()
+
+    const outcome = await facade.deploy({
+      sourceId: env.sourceId,
+      targetId: env.targetId,
+      requestedMode: 'copy'
+    })
+
+    expect(outcome).toMatchObject({
+      status: 'confirmation-required',
+      facts: { reasons: ['external-overwrite'] }
+    })
+    if (outcome.status !== 'confirmation-required') throw new Error('expected confirmation')
+    expect(await facade.confirm(outcome.confirmationId)).toMatchObject({
+      status: 'completed',
+      result: { action: 'external-overwritten', mode: 'copy' }
+    })
+    expect(readFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), 'utf-8')).toBe('# demo')
+  })
+
   test('aggregates external overwrite and known linked-to-copy degradation in one confirmation', async () => {
     const env = setup()
     const external = join(env.targetRoot, 'demo')
@@ -273,6 +310,37 @@ describe('Deployment Facade', () => {
       })
     }
   )
+
+  test('a confirmed runtime junction fallback executes copy without retrying junction', async () => {
+    const env = setup()
+    let attempts = 0
+    const facade = env.create({
+      platform: { platform: 'test', canSymlink: false, canJunction: true },
+      mutationHooks: {
+        beforeJunctionStage: () => {
+          attempts++
+          if (attempts === 1) throw new Error('junction failed once')
+        }
+      }
+    })
+
+    const planned = await facade.deploy({
+      sourceId: env.sourceId,
+      targetId: env.targetId,
+      requestedMode: 'symlink'
+    })
+    expect(planned).toMatchObject({
+      status: 'confirmation-required',
+      facts: { requestedMode: 'symlink', actualMode: 'copy', reasons: ['mode-degraded'] }
+    })
+    if (planned.status !== 'confirmation-required') throw new Error('expected confirmation')
+
+    expect(await facade.confirm(planned.confirmationId)).toMatchObject({
+      status: 'completed',
+      result: { mode: 'copy', degradedFrom: 'symlink' }
+    })
+    expect(attempts).toBe(1)
+  })
 
   test('expired, restarted and changed confirmations are structured rejections', async () => {
     const env = setup()

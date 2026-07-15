@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'vitest'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir } from './helpers/temp'
 import {
@@ -21,6 +21,54 @@ function writeSkillDir(parent: string, name: string, content: string): string {
 }
 
 describe('backup service', () => {
+  test.runIf(process.platform !== 'win32')('backs up and restores dangling symbolic-link metadata', () => {
+    const root = createTempDir('backup-dangling-link-')
+    const backups = createTempDir('backup-dangling-link-store-')
+    const link = join(root.dir, 'demo')
+    const linkTarget = join(root.dir, 'missing-source')
+    symlinkSync(linkTarget, link)
+
+    const meta = createBackup({
+      skillName: 'demo',
+      targetTool: 'codex',
+      sourcePath: link,
+      backupsDir: backups.dir,
+      retention: 20
+    })
+    expect(meta.danglingSymlinkTarget).toBe(linkTarget)
+    unlinkSync(link)
+    restoreBackup(meta.backupId, link, backups.dir, 20)
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(link)).toBe(linkTarget)
+
+    root.cleanup()
+    backups.cleanup()
+  })
+
+  test.runIf(process.platform !== 'win32')('cleanup failure after restoring a dangling link does not attempt a false missing-target rollback', () => {
+    const root = createTempDir('backup-dangling-cleanup-')
+    const backups = createTempDir('backup-dangling-cleanup-store-')
+    const link = join(root.dir, 'demo')
+    const linkTarget = join(root.dir, 'missing-source')
+    symlinkSync(linkTarget, link)
+    const meta = createBackup({
+      skillName: 'demo', targetTool: 'codex', sourcePath: link,
+      backupsDir: backups.dir, retention: 20
+    })
+    unlinkSync(link)
+    mkdirSync(link)
+    writeFileSync(join(link, 'old.txt'), 'old')
+
+    expect(() => restoreBackup(meta.backupId, link, backups.dir, 20, {
+      beforeDisplacedCleanup: () => { throw new Error('cleanup failed') }
+    })).toThrow('cleanup failed')
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(link)).toBe(linkTarget)
+
+    root.cleanup()
+    backups.cleanup()
+  })
+
   test('createBackup copies source dir contents into backupsDir and writes sidecar meta', () => {
     const src = createTempDir('ss-src-')
     const backups = createTempDir('ss-backups-')

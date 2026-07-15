@@ -29,17 +29,14 @@ import type { DB } from '../db/database'
 import type {
   DeployAction,
   DeployMode,
-  DeployOptions,
+  PreparedDeploymentPlan,
   DeployResult,
-  DriftKind,
   DriftStatus
 } from '../types'
 import type { RecoveryEvidence } from '../types'
 import {
-  deleteDeployment,
   deleteDeploymentById,
   getDeploymentBySkillAndTargetId,
-  getDeploymentBySkillAndTool,
   getDeploymentsByTool,
   restoreDeploymentSnapshot,
   upsertDeployment
@@ -196,26 +193,6 @@ export function targetMatchesDeployment(
   }
 }
 
-export type DeployTargetKind =
-  | 'created'
-  | 'managed-update'
-  | 'mode-switch'
-  | 'external-overwrite'
-
-export function inspectDeployTarget(
-  db: DB,
-  skillId: number,
-  targetTool: string,
-  targetPath: string,
-  requestedMode: DeployMode
-): DeployTargetKind {
-  const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
-  if (deployment) {
-    return deployment.mode === requestedMode ? 'managed-update' : 'mode-switch'
-  }
-  return pathEntryExists(targetPath) ? 'external-overwrite' : 'created'
-}
-
 /**
  * 按新 mode 部署文件到 targetDir(调用前需确保 targetDir 已清理)。
  * - copy:cpSync recursive
@@ -239,7 +216,7 @@ function deployFiles(mode: DeployMode, sourcePath: string, targetDir: string): v
  *
  * 当请求 symlink 但平台无法创建 symlink(Windows 普通用户 canSymlink=false):
  * - canJunction=true 且 source 是目录 → 尝试 junction(junction 成功不算降级,
- *   它是 symlink 不可用时的预期回退;失败再降级 copy,由 deploySkill 的 try/catch 处理)。
+ *   它是 symlink 不可用时的预期回退;失败再降级 copy,由 Facade 重新规划并确认)。
  * - canJunction=false 或 source 不是目录 → 直接降级 copy。
  * 其余情况(非 symlink 请求,或 canSymlink=true)按请求 mode 原样使用。
  */
@@ -255,7 +232,7 @@ export function resolveActualMode(
   }
   // 请求 symlink 但 canSymlink=false(Windows 普通用户)
   if (canJunction && sourceIsDir) {
-    // 尝试 junction;实际成功/失败由 deploySkill 调用 symlinkSync 时判定
+    // 尝试 junction;实际成功/失败由底层执行器调用 symlinkSync 时判定
     return { actualMode: 'junction' }
   }
   // 无法 junction → 降级 copy
@@ -276,7 +253,8 @@ export function resolveActualMode(
  * - mode-switched:模式切换(清单有记录,mode 变了,先按旧 mode 清理再按新 mode 部署)
  * - external-overwritten:外部 skill 覆盖(清单无记录但目标存在,先备份再覆盖)
  */
-export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
+/** Facade-only filesystem executor. Callers must pass a fully resolved and confirmed plan. */
+export function executePreparedDeployment(db: DB, opts: PreparedDeploymentPlan): DeployResult {
   // Step 0 (issue #24): 拒绝自部署 / 父子目录重叠,在任何备份、清理、清单写入之前。
   // 该校验由主进程 service 强制执行,不依赖 UI。
   //
@@ -284,9 +262,7 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
   // 合法地等于 source(链接就是指向源的)。此时 mode-switch / 更新是合法操作
   // (cleanup 会先 unlink 旧链接,不会删源),因此传 allowExistingSymlinkToSource
   // 跳过 realpath-自部署 检查。lexical 包含检查始终执行。
-  const existing = opts.identity
-    ? getDeploymentBySkillAndTargetId(db, opts.skillId, opts.identity.targetId)
-    : getDeploymentBySkillAndTool(db, opts.skillId, opts.targetTool)
+  const existing = getDeploymentBySkillAndTargetId(db, opts.skillId, opts.identity.targetId)
   assertSafeDeployTarget(opts.sourcePath, opts.targetDir, {
     // 仅当现有部署是 symlink/junction 时,target 的 realpath 才合法地等于源
     // (链接指向源);copy 模式的 target 是独立目录,realpath 不同于源,无需豁免,
@@ -308,6 +284,10 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
   let actualMode = resolved.actualMode
   let degradedFrom = resolved.degradedFrom
   let degradeReason = resolved.degradeReason
+  if (actualMode === 'copy' && opts.approvedModeDegradation) {
+    degradedFrom = opts.approvedModeDegradation.from
+    degradeReason = opts.approvedModeDegradation.reason
+  }
   if (actualMode === 'copy' && degradedFrom != null) {
     const approval = opts.approvedModeDegradation
     if (approval?.from !== degradedFrom || approval.to !== 'copy') {
@@ -361,7 +341,7 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
     }
   } else if (targetExists) {
     if (opts.allowExternalOverwrite !== true) {
-      throw new Error('external skill overwrite requires explicit confirmation')
+      throw new Error('prepared deployment plan does not authorize target replacement')
     }
     action = 'external-overwritten'
   } else {
@@ -459,8 +439,7 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
         if (manifestChanged) {
           restoreDeploymentSnapshot(db, existing, {
             skillId: opts.skillId,
-            targetTool: opts.targetTool,
-            targetId: opts.identity?.targetId
+            targetId: opts.identity.targetId
           })
         }
         if (switched && pathEntryExists(opts.targetDir)) cleanupUnknown(opts.targetDir)
@@ -494,96 +473,11 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
 }
 
 /**
- * issue #22:漂移"重新部署"——从 deployment 清单读取精确 target_path 与
- * source_path,直接在原位置重建,不依赖当前工具配置重新推导,也不信任
- * renderer 提供的任意路径。
- *
- * 与 `deploySkill` 的区别:`deploy` 接收 renderer 传入的 targetRoot(工具根
- * 目录),由主进程拼接 skill name 得到 target_path;`redeploySkill` 完全不
- * 接收路径参数,target_path / source_path 均来自清单(首次部署时由主进程
- * 写入,是 trust anchor)。
- *
- * 失败语义(满足 issue #22 验收):source 缺失、target 父目录不可写等错误
- * 在 `deploySkill` 内部抛出,且发生在任何 `upsertDeployment` 之前,因此
- * deployment 清单不会被修改。
- *
- * @throws 无 deployment 记录(应改用 deploy)
- * @throws deployment.target_path 为 null(legacy unresolved 记录)
- */
-export interface RedeployOptions {
-  skillName: string
-  mode: DeployMode
-  backupsDir: string
-  canSymlink: boolean
-  canJunction: boolean
-}
-
-export function redeploySkill(
-  db: DB,
-  skillId: number,
-  targetTool: string,
-  opts: RedeployOptions
-): DeployResult {
-  const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
-  if (!deployment) {
-    throw new Error(
-      `no deployment record for skill ${opts.skillName} on tool ${targetTool}; use deploy instead`
-    )
-  }
-  if (deployment.target_path == null) {
-    throw new Error(
-      'deployment target path is unresolved; remove it from the manifest before redeploying'
-    )
-  }
-  // issue #22: 用清单记录的精确 target_path 与 source_path,不 re-derive,
-  // 不信任 renderer。target_path / source_path 由主进程在首次部署时写入。
-  const targetDir = assertAbsolutePath(deployment.target_path, 'recorded target_path')
-  return deploySkill(db, {
-    skillId,
-    skillName: opts.skillName,
-    targetTool,
-    mode: opts.mode,
-    sourcePath: deployment.source_path,
-    targetDir,
-    backupsDir: opts.backupsDir,
-    canSymlink: opts.canSymlink,
-    canJunction: opts.canJunction
-  })
-}
-
-/**
- * 从目标工具卸载 skill。
- *
- * 按 deployment.mode 清理 targetPath:
- * - symlink/junction → unlinkSync(只删链接,不删源)
- * - copy → rmSync recursive(删真实目录)
- *
- * 然后删除清单记录。如果清单无记录(外部 skill),抛错 — 不擅自删用户手动放的东西。
- */
-export function undeploySkill(
-  db: DB,
-  skillId: number,
-  targetTool: string
-): void {
-  const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
-  if (!deployment) {
-    throw new Error('not deployed by this tool, cannot undeploy external skill; please remove it manually')
-  }
-  if (deployment.target_path == null) {
-    throw new Error(
-      'deployment target path is unresolved; refusing destructive cleanup'
-    )
-  }
-  cleanupByMode(deployment.target_path, deployment.mode)
-  deleteDeployment(db, skillId, targetTool)
-}
-
-/**
  * Remove one Deployment by its stable identity using the same marker/rollback
  * protocol as deploy. The manifest is deleted only after the target has been
  * moved aside, and any pre-commit failure restores the exact target.
  */
-export function undeployDeployment(
+export function executePreparedUndeployment(
   db: DB,
   deployment: import('../types').Deployment,
   hooks?: import('../types').DeploymentMutationHooks
@@ -638,104 +532,18 @@ export function undeployDeployment(
 }
 
 /**
- * 检测单个部署点的漂移状态(清单 vs 实际磁盘)。
- *
- * 四种 kind:
- * - normal:清单有 + 目录有 + hash 一致(copy),或 symlink 模式(链接透明,源更新自动生效)
- * - source-updated:清单有 + 目录有 + 源 hash 变了(copy 模式,"源已更新,可重新部署")
- * - drift:清单有 + 目录无(用户手动删了)
- * - external:清单无 + 目录有(外部 skill)
- *
- * 注意:existsSync 跟随符号链接。对 broken symlink(源被删)返回 false → 视为 drift。
- */
-export function detectDrift(
-  db: DB,
-  skillId: number,
-  skillName: string,
-  targetTool: string,
-  targetPath: string
-): DriftStatus {
-  const deployment = getDeploymentBySkillAndTool(db, skillId, targetTool)
-  const actualTargetPath = deployment?.target_path ?? targetPath
-  const targetExists = pathEntryExists(actualTargetPath)
-
-  let kind: DriftKind
-  let currentSourceHash: string | null = null
-  let currentTargetHash: string | null = null
-
-  if (deployment == null && targetExists) {
-    // 外部 skill:清单无记录但目录存在
-    kind = 'external'
-  } else if (deployment == null && !targetExists) {
-    // 无部署无文件:正常空位,不算漂移
-    kind = 'normal'
-  } else if (deployment != null && deployment.target_path == null) {
-    kind = 'unresolved'
-  } else if (
-    deployment != null &&
-    !existsSync(deployment.source_path)
-  ) {
-    kind = 'source-missing'
-  } else if (deployment != null && !targetExists) {
-    // 漂移:清单有记录但目录被删了
-    kind = 'drift'
-  } else {
-    // deployment != null && targetExists
-    // 重算源 hash(源目录可能已删)
-    currentSourceHash = existsSync(deployment!.source_path)
-      ? hashDir(deployment!.source_path)
-      : null
-
-    if (deployment!.mode === 'symlink' || deployment!.mode === 'junction') {
-      kind = targetMatchesDeployment(
-        actualTargetPath,
-        deployment!.mode,
-        deployment!.source_path,
-        currentSourceHash!
-      )
-        ? 'normal'
-        : 'link-mismatch'
-    } else {
-      currentTargetHash = hashDir(actualTargetPath)
-      if (currentTargetHash !== deployment!.source_hash_at_deploy) {
-        kind = 'target-modified'
-      } else if (
-        currentSourceHash != null &&
-        currentSourceHash !== deployment!.source_hash_at_deploy
-      ) {
-        kind = 'source-updated'
-      } else {
-        kind = 'normal'
-      }
-    }
-  }
-
-  return {
-    skillId,
-    skillName,
-    targetTool,
-    targetPath: actualTargetPath,
-    deployment: deployment ?? null,
-    targetExists,
-    currentSourceHash,
-    currentTargetHash,
-    kind
-  }
-}
-
-/**
  * 扫描某工具目录下所有 skill 子目录,结合清单生成漂移列表(Tools 页用)。
  *
- * - 清单中的部署:逐个调 detectDrift(可能 normal / source-updated / drift)
+ * - 清单中的部署:统一委托 Facade.inspect
  * - 磁盘上有但清单无记录的子目录:标记为 external
  * - 清单中 skill 已被删(getSkillById 返回 undefined):跳过
  *   (ON DELETE CASCADE 理论已删 deployments,此处为防御性检查)
  */
-export function detectDriftsForTool(
+export function readToolDrifts(
   db: DB,
   targetTool: string,
   toolSkillDirs: string | string[],
-  inspectDeployment?: (deploymentId: number) => DriftStatus | null
+  inspectDeployment: (deploymentId: number) => DriftStatus | null
 ): DriftStatus[] {
   const directories = Array.isArray(toolSkillDirs)
     ? toolSkillDirs
@@ -751,10 +559,8 @@ export function detectDriftsForTool(
     const targetPath =
       dep.target_path ?? join(directories[0] ?? '', skill.name)
     managedTargetPaths.add(targetPath)
-    results.push(
-      inspectDeployment?.(dep.id) ??
-      detectDrift(db, dep.skill_id, skill.name, targetTool, targetPath)
-    )
+    const inspected = inspectDeployment(dep.id)
+    if (inspected) results.push(inspected)
   }
 
   // 磁盘上的外部 skill(不在清单中的子目录)

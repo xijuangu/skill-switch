@@ -14,19 +14,31 @@ import {
   filterSourcesByEnabledTools
 } from '../src/main/services/registry'
 import { getSkillByName, getSkillById, getAllSkills, upsertSkill } from '../src/main/db/dao/skills'
-import { getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
+import { getSourceByPath, getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
 import { getDeploymentById, getDeploymentsBySkillId } from '../src/main/db/dao/deployments'
-import { deploySkill, undeployDeployment } from '../src/main/services/deployer'
+import { executePreparedDeployment, executePreparedUndeployment } from '../src/main/services/deployer'
 import { listBackups } from '../src/main/services/backup'
 import { runInTransaction } from '../src/main/db/database'
 import type { ActiveScanDir } from '../src/main/services/tools-config'
-import type { SkillSource, ToolConfig } from '../src/main/types'
+import type { PreparedDeploymentPlan, SkillSource, ToolConfig } from '../src/main/types'
+
+function executeFixture(
+  db: import('../src/main/db/database').DB,
+  plan: Omit<PreparedDeploymentPlan, 'identity'>
+) {
+  const sourceId = getSourceByPath(db, plan.sourcePath)?.id
+  if (sourceId == null) throw new Error('fixture source missing')
+  return executePreparedDeployment(db, {
+    ...plan,
+    identity: { sourceId, targetId: `${plan.targetTool}:${plan.targetDir}` }
+  })
+}
 
 function undeployForTest(db: import('../src/main/db/database').DB) {
   return async (deploymentId: number) => {
     const deployment = getDeploymentById(db, deploymentId)
     if (!deployment) return { status: 'rejected' as const, message: 'missing deployment' }
-    undeployDeployment(db, deployment)
+    executePreparedUndeployment(db, deployment)
     return { status: 'completed' as const }
   }
 }
@@ -688,7 +700,7 @@ describe('removeFromRegistry', () => {
 
     // 部署到两个工具:copy + symlink
     const copyTargetDir = join(target1.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',
@@ -700,7 +712,7 @@ describe('removeFromRegistry', () => {
       canJunction: false
     })
     const symlinkTargetDir = join(target2.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'agents',
@@ -769,7 +781,7 @@ describe('removeFromRegistry', () => {
 
     // 部署到一个工具(copy)
     const targetDir = join(target.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',
@@ -825,7 +837,7 @@ describe('removeFromRegistry', () => {
 
     // 部署到 codex(copy 模式,目标为真实目录)
     const targetDir = join(target.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',

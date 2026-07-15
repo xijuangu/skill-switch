@@ -33,17 +33,6 @@ export function getDeploymentsByMode(db: DB, mode: DeployMode): Deployment[] {
     .all(mode) as Deployment[]
 }
 
-/** 按 (skill_id, target_tool) 唯一查部署(用于冲突检测:判断目标是否自管部署) */
-export function getDeploymentBySkillAndTool(
-  db: DB,
-  skillId: number,
-  targetTool: string
-): Deployment | undefined {
-  return db
-    .prepare('SELECT * FROM deployments WHERE skill_id = ? AND target_tool = ?')
-    .get(skillId, targetTool) as Deployment | undefined
-}
-
 export function getDeploymentBySkillAndTargetId(
   db: DB,
   skillId: number,
@@ -66,46 +55,21 @@ export function upsertDeployment(
   mode: DeployMode,
   sourcePath: string,
   sourceHashAtDeploy: string,
-  identity?: { sourceId: number; targetId: string }
+  identity: { sourceId: number; targetId: string }
 ): void {
-  if (identity) {
-    db.prepare(
-      `INSERT INTO deployments
-        (skill_id, target_tool, target_path, mode, source_path, deployed_at,
-         source_hash_at_deploy, source_id, target_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(skill_id, target_id) WHERE target_id IS NOT NULL DO UPDATE SET
-         target_tool = excluded.target_tool,
-         target_path = excluded.target_path,
-         mode = excluded.mode,
-         source_path = excluded.source_path,
-         deployed_at = excluded.deployed_at,
-         source_hash_at_deploy = excluded.source_hash_at_deploy,
-         source_id = excluded.source_id`
-    ).run(
-      skillId,
-      targetTool,
-      targetPath,
-      mode,
-      sourcePath,
-      new Date().toISOString(),
-      sourceHashAtDeploy,
-      identity.sourceId,
-      identity.targetId
-    )
-    return
-  }
-  const existing = getDeploymentBySkillAndTool(db, skillId, targetTool)
-  if (existing) {
-    db.prepare(
-      `UPDATE deployments SET target_path = ?, mode = ?, source_path = ?, deployed_at = ?,
-       source_hash_at_deploy = ? WHERE id = ?`
-    ).run(targetPath, mode, sourcePath, new Date().toISOString(), sourceHashAtDeploy, existing.id)
-    return
-  }
   db.prepare(
-    `INSERT INTO deployments (skill_id, target_tool, target_path, mode, source_path, deployed_at, source_hash_at_deploy)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO deployments
+      (skill_id, target_tool, target_path, mode, source_path, deployed_at,
+       source_hash_at_deploy, source_id, target_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(skill_id, target_id) WHERE target_id IS NOT NULL DO UPDATE SET
+       target_tool = excluded.target_tool,
+       target_path = excluded.target_path,
+       mode = excluded.mode,
+       source_path = excluded.source_path,
+       deployed_at = excluded.deployed_at,
+       source_hash_at_deploy = excluded.source_hash_at_deploy,
+       source_id = excluded.source_id`
   ).run(
     skillId,
     targetTool,
@@ -113,19 +77,9 @@ export function upsertDeployment(
     mode,
     sourcePath,
     new Date().toISOString(),
-    sourceHashAtDeploy
-  )
-}
-
-/** 按 (skill_id, target_tool) 删除部署记录(幂等:不存在不报错) */
-export function deleteDeployment(
-  db: DB,
-  skillId: number,
-  targetTool: string
-): void {
-  db.prepare('DELETE FROM deployments WHERE skill_id = ? AND target_tool = ?').run(
-    skillId,
-    targetTool
+    sourceHashAtDeploy,
+    identity.sourceId,
+    identity.targetId
   )
 }
 
@@ -138,14 +92,10 @@ export function deleteDeploymentById(db: DB, deploymentId: number): void {
 export function restoreDeploymentSnapshot(
   db: DB,
   snapshot: Deployment | undefined,
-  identity: { skillId: number; targetTool: string; targetId?: string }
+  identity: { skillId: number; targetId: string }
 ): void {
   if (!snapshot) {
-    if (identity.targetId) {
-      db.prepare('DELETE FROM deployments WHERE skill_id = ? AND target_id = ?').run(identity.skillId, identity.targetId)
-    } else {
-      db.prepare('DELETE FROM deployments WHERE skill_id = ? AND target_tool = ?').run(identity.skillId, identity.targetTool)
-    }
+    db.prepare('DELETE FROM deployments WHERE skill_id = ? AND target_id = ?').run(identity.skillId, identity.targetId)
     return
   }
   db.prepare(`UPDATE deployments SET

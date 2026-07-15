@@ -5,9 +5,9 @@ import { createTempDir, createTempDb } from './helpers/temp'
 import { scanAllTools } from '../src/main/services/scan-all'
 import { getSkillByName } from '../src/main/db/dao/skills'
 import { getAllSkills } from '../src/main/db/dao/skills'
-import { getSourcesBySkillId } from '../src/main/db/dao/skill-sources'
+import { getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
 import type { ActiveScanDir } from '../src/main/services/tools-config'
-import { deploySkill } from '../src/main/services/deployer'
+import { executePreparedDeployment } from '../src/main/services/deployer'
 import { upsertSkill } from '../src/main/db/dao/skills'
 
 describe('scan-all service', () => {
@@ -249,7 +249,9 @@ describe('scan-all service', () => {
       '---\nname: shared\n---\nexternal-second-path'
     )
     const skillId = upsertSkill(db, 'shared', source)
-    deploySkill(db, {
+    upsertSource(db, skillId, source, 'fixture-hash', Date.now(), 'indexed')
+    const sourceId = getSourcesBySkillId(db, skillId)[0].id
+    executePreparedDeployment(db, {
       skillId,
       skillName: 'shared',
       targetTool: 'trae',
@@ -258,7 +260,8 @@ describe('scan-all service', () => {
       targetDir: join(firstTool, 'shared'),
       backupsDir: backups.dir,
       canSymlink: true,
-      canJunction: false
+      canJunction: false,
+      identity: { sourceId, targetId: 'trae-0' }
     })
 
     scanAllTools(db, [
@@ -269,9 +272,10 @@ describe('scan-all service', () => {
       }
     ])
 
-    expect(getSourcesBySkillId(db, skillId).map((item) => item.path)).toEqual([
+    expect(getSourcesBySkillId(db, skillId).map((item) => item.path).sort()).toEqual([
+      source,
       join(secondTool, 'shared')
-    ])
+    ].sort())
 
     root.cleanup()
     backups.cleanup()

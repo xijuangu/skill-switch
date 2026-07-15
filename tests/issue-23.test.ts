@@ -13,13 +13,22 @@ import { mkdirSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
 import { upsertSkill } from '../src/main/db/dao/skills'
-import { upsertSource } from '../src/main/db/dao/skill-sources'
-import { deploySkill } from '../src/main/services/deployer'
+import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
+import { executePreparedDeployment } from '../src/main/services/deployer'
 import { readSkillsView } from '../src/main/ipc/index'
 import { reconcileDeploymentIdentities } from '../src/main/services/deployment-identities'
 import { createDeploymentFacade } from '../src/main/services/deployment-facade'
 import type { DB } from '../src/main/db/database'
-import type { ToolConfig } from '../src/main/types'
+import type { PreparedDeploymentPlan, ToolConfig } from '../src/main/types'
+
+function executeFixture(db: DB, plan: Omit<PreparedDeploymentPlan, 'identity'>) {
+  const sourceId = getSourceByPath(db, plan.sourcePath)?.id
+  if (sourceId == null) throw new Error('fixture source missing')
+  return executePreparedDeployment(db, {
+    ...plan,
+    identity: { sourceId, targetId: `${plan.targetTool}-0` }
+  })
+}
 
 /** 构造测试用 ToolConfig */
 function mkTool(key: string, paths: string[], enabled = true): ToolConfig {
@@ -66,7 +75,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
 
     // 部署到 codex(copy)和 agents(symlink)
     const codexTargetDir = join(codexTarget.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',
@@ -78,7 +87,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
       canJunction: false
     })
     const agentsTargetDir = join(agentsTarget.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'agents',
@@ -143,7 +152,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     upsertSource(db, skillId, skillDir, 'somehash', Date.now(), 'central-repo')
 
     const targetDir = join(target.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',
@@ -209,7 +218,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     upsertSource(db, skillId, skillDir, 'somehash', Date.now(), 'indexed')
 
     const targetDir = join(target.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',
@@ -250,7 +259,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     upsertSource(db, skillId, skillDir, 'somehash', Date.now(), 'indexed')
 
     const targetDir = join(target.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',
@@ -289,7 +298,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     const skillId = upsertSkill(db, skillName, skillDir)
     upsertSource(db, skillId, skillDir, 'hash', Date.now(), 'indexed')
     const targetDir = join(target.dir, skillName)
-    deploySkill(db, {
+    executeFixture(db, {
       skillId,
       skillName,
       targetTool: 'codex',

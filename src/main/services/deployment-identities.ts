@@ -27,9 +27,10 @@ export function reconcileDeploymentIdentities(db: DB, tools: ToolConfig[]): void
         .filter((tool) => tool.key === deployment.target_tool)
         .flatMap((tool) => tool.targets)
         .filter((target) => target.path === targetRoot)
+      const fullyResolved = sources.length === 1 && targets.length === 1
       update.run(
-        sources.length === 1 ? sources[0].id : null,
-        targets.length === 1 ? targets[0].id : null,
+        fullyResolved ? sources[0].id : null,
+        fullyResolved ? targets[0].id : null,
         deployment.id
       )
     }

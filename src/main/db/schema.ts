@@ -47,20 +47,6 @@ CREATE TABLE IF NOT EXISTS deployments (
 CREATE INDEX IF NOT EXISTS idx_skill_sources_skill_id ON skill_sources(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_skill_id ON deployments(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_tool);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_skill_target_id
-  ON deployments(skill_id, target_id) WHERE target_id IS NOT NULL;
-CREATE TRIGGER IF NOT EXISTS trg_deployments_identity_pair_insert
-BEFORE INSERT ON deployments
-WHEN (NEW.source_id IS NULL) != (NEW.target_id IS NULL)
-BEGIN
-  SELECT RAISE(ABORT, 'deployment source_id and target_id must resolve together');
-END;
-CREATE TRIGGER IF NOT EXISTS trg_deployments_identity_pair_update
-BEFORE UPDATE OF source_id, target_id ON deployments
-WHEN (NEW.source_id IS NULL) != (NEW.target_id IS NULL)
-BEGIN
-  SELECT RAISE(ABORT, 'deployment source_id and target_id must resolve together');
-END;
 `
 
 /**
@@ -88,7 +74,7 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
     db.exec('ALTER TABLE skill_sources ADD COLUMN source_tool TEXT')
   }
 
-  const deploymentCols = db.prepare('PRAGMA table_info(deployments)').all() as {
+  let deploymentCols = db.prepare('PRAGMA table_info(deployments)').all() as {
     name: string
   }[]
   if (!deploymentCols.some((column) => column.name === 'target_path')) {
@@ -101,6 +87,7 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
   if (!deploymentCols.some((column) => column.name === 'target_id')) {
     db.exec('ALTER TABLE deployments ADD COLUMN target_id TEXT')
   }
+  deploymentCols = db.prepare('PRAGMA table_info(deployments)').all() as { name: string }[]
 
   const deploymentSql = (
     db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'deployments'").get() as
@@ -167,6 +154,13 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
       WHEN (NEW.source_id IS NULL) != (NEW.target_id IS NULL)
       BEGIN
         SELECT RAISE(ABORT, 'deployment source_id and target_id must resolve together');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_skill_sources_unresolve_deployments_before_delete
+      BEFORE DELETE ON skill_sources
+      BEGIN
+        UPDATE deployments
+        SET source_id = NULL, target_id = NULL
+        WHERE source_id = OLD.id;
       END;
     `)
   }

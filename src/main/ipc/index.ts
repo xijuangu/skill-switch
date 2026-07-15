@@ -44,7 +44,7 @@ import {
   removeFromRegistry
 } from '../services/registry'
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
-import { detectDriftsForTool } from '../services/deployer'
+import { readToolDrifts } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
 import {
   deleteDeploymentById,
@@ -123,7 +123,7 @@ export function readDeployTargetOptions(
 export function readSkillsView(
   db: DB,
   toolConfigs: ToolConfig[],
-  inspectDeployment?: DeploymentFacade['inspect']
+  inspectDeployment: DeploymentFacade['inspect']
 ): SkillWithConflict[] {
   const skills = getAllSkills(db)
   const out: SkillWithConflict[] = []
@@ -136,7 +136,7 @@ export function readSkillsView(
       conflict: computeConflict(visibleSources, s.id),
       deployments: getDeploymentsBySkillId(db, s.id).map((d) => ({
         ...d,
-        status: inspectDeployment?.(d.id)?.kind ?? 'unresolved'
+        status: inspectDeployment(d.id)?.kind ?? 'unresolved'
       }))
     })
   }
@@ -146,13 +146,13 @@ export function readSkillsView(
 /**
  * issue #21:抽取出 getTools IPC handler 的纯读逻辑,使其可独立测试。
  * 输入 db + 已解析的 toolConfigs,返回 Tools 页权威视图(含 drift 检测)。
- * detectDriftsForTool 会读磁盘判断 target 状态,但这是 drift 检测的固有职责,
+ * readToolDrifts 会读磁盘枚举 external target；managed 状态统一委托 Facade.inspect。
  * 不是全量 skill 扫描 — refresh 调用此函数不会触发 scanAllTools。
  */
 export function readToolsView(
   db: DB,
   toolConfigs: ToolConfig[],
-  inspectDeployment?: DeploymentFacade['inspect']
+  inspectDeployment: DeploymentFacade['inspect']
 ): ToolWithDriftsView[] {
   return toolConfigs
     .filter((config) => config.enabled)
@@ -160,7 +160,7 @@ export function readToolsView(
       config,
       drifts:
         config.enabled && config.exists
-          ? detectDriftsForTool(db, config.key, config.existingPaths, inspectDeployment)
+          ? readToolDrifts(db, config.key, config.existingPaths, inspectDeployment)
           : []
     }))
 }

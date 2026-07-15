@@ -7,16 +7,20 @@
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'fs'
 import { basename, dirname, join } from 'path'
 import { homedir } from 'os'
+import { createHash } from 'crypto'
 import { hashDir } from './hash'
 import {
   assertAbsolutePath,
@@ -39,6 +43,8 @@ export interface BackupMeta {
   backupTime: string
   /** 备份目录名(= backupId) */
   dirName: string
+  /** Exact link text when the backed-up entry was a dangling symbolic link. */
+  danglingSymlinkTarget?: string
 }
 
 /** createBackup 入参(Option A:显式 backupsDir;retention 可选覆盖) */
@@ -51,7 +57,20 @@ export interface CreateBackupOptions {
   retention?: number
 }
 
+export interface RestoreBackupHooks {
+  beforeDisplacedCleanup?: () => void
+}
+
 const DEFAULT_RETENTION = 20
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
 
 function validateBackupTime(value: unknown): string {
   if (typeof value !== 'string') {
@@ -122,9 +141,17 @@ export function createBackup(opts: CreateBackupOptions): BackupMeta {
 
   const backupDir = resolveWithin(backupsDir, dirName)
   mkdirSync(backupDir, { recursive: true })
-  cpSync(sourcePath, backupDir, { recursive: true, force: true })
+  const danglingSymlinkTarget =
+    lstatSync(sourcePath).isSymbolicLink() && !existsSync(sourcePath)
+      ? readlinkSync(sourcePath)
+      : undefined
+  if (danglingSymlinkTarget === undefined) {
+    cpSync(sourcePath, backupDir, { recursive: true, force: true })
+  }
 
-  const sourceHash = hashDir(sourcePath)
+  const sourceHash = danglingSymlinkTarget === undefined
+    ? hashDir(sourcePath)
+    : createHash('sha256').update(`dangling-symlink:${danglingSymlinkTarget}`).digest('hex')
   const meta: BackupMeta = {
     backupId: dirName,
     skillName,
@@ -132,7 +159,8 @@ export function createBackup(opts: CreateBackupOptions): BackupMeta {
     sourcePath,
     sourceHash,
     backupTime: new Date().toISOString(),
-    dirName
+    dirName,
+    ...(danglingSymlinkTarget !== undefined ? { danglingSymlinkTarget } : {})
   }
   writeFileSync(
     resolveWithin(backupsDir, `${dirName}.meta.json`),
@@ -164,6 +192,10 @@ export function listBackups(backupsDir: string): BackupMeta[] {
         ) {
           continue
         }
+        const danglingSymlinkTarget = parsed.danglingSymlinkTarget
+        if (danglingSymlinkTarget !== undefined && typeof danglingSymlinkTarget !== 'string') {
+          continue
+        }
         metas.push({
           backupId,
           dirName: backupId,
@@ -183,7 +215,8 @@ export function listBackups(backupsDir: string): BackupMeta[] {
             parsed.sourceHash ?? '',
             'backup source hash'
           ),
-          backupTime: validateBackupTime(parsed.backupTime)
+          backupTime: validateBackupTime(parsed.backupTime),
+          ...(danglingSymlinkTarget !== undefined ? { danglingSymlinkTarget } : {})
         })
       } catch {
         // 损坏的 meta 跳过(不抛,保证列表稳定)
@@ -228,7 +261,8 @@ export function restoreBackup(
   backupId: string,
   destPath: string,
   backupsDir: string,
-  retention?: number
+  retention?: number,
+  hooks?: RestoreBackupHooks
 ): void {
   const safeId = validateBackupId(backupId)
   const backupDir = resolveWithin(backupsDir, safeId)
@@ -247,9 +281,15 @@ export function restoreBackup(
 
   try {
     // Copy the restore source before retention or destination mutations.
-    cpSync(backupDir, stagedDestination, { recursive: true, force: true })
+    const meta = listBackups(backupsDir).find((candidate) => candidate.backupId === safeId)
+    if (!meta) throw new Error(`backup metadata not found: ${backupId}`)
+    if (meta.danglingSymlinkTarget !== undefined) {
+      symlinkSync(meta.danglingSymlinkTarget, stagedDestination)
+    } else {
+      cpSync(backupDir, stagedDestination, { recursive: true, force: true })
+    }
 
-    if (existsSync(destPath)) {
+    if (pathEntryExists(destPath)) {
       createBackup({
         skillName: 'restore-pre-restore',
         targetTool: basename(destPath),
@@ -265,7 +305,7 @@ export function restoreBackup(
     try {
       renameSync(stagedDestination, destPath)
     } catch (error) {
-      if (displaced && !existsSync(destPath)) {
+      if (displaced && !pathEntryExists(destPath)) {
         renameSync(displacedDestination, destPath)
         displaced = false
       }
@@ -273,12 +313,13 @@ export function restoreBackup(
     }
 
     if (displaced) {
+      hooks?.beforeDisplacedCleanup?.()
       rmSync(displacedDestination, { recursive: true, force: true })
       displaced = false
     }
     pruneBackups(backupsDir, retention ?? getBackupRetention())
   } finally {
-    if (displaced && !existsSync(destPath)) {
+    if (displaced && !pathEntryExists(destPath)) {
       renameSync(displacedDestination, destPath)
     }
     rmSync(stagingRoot, { recursive: true, force: true })

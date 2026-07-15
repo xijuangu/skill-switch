@@ -28,7 +28,7 @@ type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number
 type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 
 type DeployFilter = 'all' | 'deployed' | 'undeployed'
-type DeployTarget = { skill: SkillView; sourcePath: string }
+type DeployTarget = { skill: SkillView; sourceId: number }
 
 export function SkillsPage({
   skills,
@@ -147,14 +147,14 @@ export function SkillsPage({
     } else {
       const primary = skill.conflict.primarySource
       if (primary) {
-        setDeployTarget({ skill, sourcePath: primary.path })
+        setDeployTarget({ skill, sourceId: primary.id })
       }
     }
   }
 
   const handleConflictConfirm = (source: SkillSourceView) => {
     if (!conflictTarget) return
-    setDeployTarget({ skill: conflictTarget, sourcePath: source.path })
+    setDeployTarget({ skill: conflictTarget, sourceId: source.id })
     setConflictTarget(null)
   }
 
@@ -483,7 +483,7 @@ export function SkillsPage({
       {deployTarget && (
         <DeployDialogContent
           skill={deployTarget.skill}
-          sourcePath={deployTarget.sourcePath}
+          sourceId={deployTarget.sourceId}
           onDone={handleDeployDone}
         />
       )}

@@ -165,7 +165,8 @@ export interface MultiScanResult {
 // ===== Deploy(切片 #6)=====
 
 /** deployer 入参:把 skill 从 sourcePath 部署到 targetDir */
-export interface DeployOptions {
+/** Internal resolved plan; only DeploymentFacade may construct this shape. */
+export interface PreparedDeploymentPlan {
   skillId: number
   skillName: string
   targetTool: string
@@ -184,7 +185,7 @@ export interface DeployOptions {
   allowExternalOverwrite?: boolean
   /** Exact linked-to-copy degradation approved by the Deployment Confirmation. */
   approvedModeDegradation?: { from: DeployMode; to: 'copy'; reason: string }
-  identity?: { sourceId: number; targetId: string }
+  identity: { sourceId: number; targetId: string }
   mutationHooks?: DeploymentMutationHooks
 }
 
@@ -218,7 +219,7 @@ export type DeployAction =
   | 'mode-switched' // 模式切换(先按旧 mode 清理再按新 mode 部署)
   | 'external-overwritten' // 外部 skill(清单无记录)备份后覆盖
 
-/** deploySkill 返回结果 */
+/** Facade 内部已确认执行计划的结果。 */
 export interface DeployResult {
   action: DeployAction
   mode: DeployMode

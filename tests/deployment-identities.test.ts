@@ -37,6 +37,17 @@ function tool(targets: Array<{ id: string; path: string }>): ToolConfig {
   }
 }
 
+function insertLegacyDeployment(
+  db: Database.Database,
+  skillId: number,
+  targetPath: string,
+  sourcePath: string
+): void {
+  db.prepare(`INSERT INTO deployments
+    (skill_id, target_tool, target_path, mode, source_path, deployed_at, source_hash_at_deploy)
+    VALUES (?, 'codex', ?, 'copy', ?, 'now', 'hash')`).run(skillId, targetPath, sourcePath)
+}
+
 afterEach(() => databases.splice(0).forEach((db) => db.close()))
 
 describe('deployment semantic identity expansion', () => {
@@ -49,7 +60,7 @@ describe('deployment semantic identity expansion', () => {
         VALUES (?, 'codex', '/target/demo', 'copy', '/src/demo', 'now', 'hash', ?)`)
         .run(skillId, sourceId)
     }).toThrow(/resolve together/)
-    expect(() => upsertDeployment(db, skillId, 'codex', '/target/demo', 'copy', '/src/demo', 'hash')).not.toThrow()
+    expect(() => insertLegacyDeployment(db, skillId, '/target/demo', '/src/demo')).not.toThrow()
   })
 
   test('new deployments can persist source and target IDs for multiple targets of one tool', () => {
@@ -63,7 +74,7 @@ describe('deployment semantic identity expansion', () => {
   test('legacy deployment is backfilled only from exact source and target snapshots', () => {
     const db = createDb()
     const { skillId, sourceId } = seed(db)
-    upsertDeployment(db, skillId, 'codex', '/targets/a/demo', 'copy', '/src/demo', 'hash')
+    insertLegacyDeployment(db, skillId, '/targets/a/demo', '/src/demo')
     reconcileDeploymentIdentities(db, [tool([{ id: 'target-a', path: '/targets/a' }])])
     expect(getDeploymentsBySkillId(db, skillId)[0]).toMatchObject({ source_id: sourceId, target_id: 'target-a' })
   })
@@ -71,11 +82,44 @@ describe('deployment semantic identity expansion', () => {
   test('ambiguous or missing legacy matches remain unresolved', () => {
     const db = createDb()
     const { skillId } = seed(db)
-    upsertDeployment(db, skillId, 'codex', '/targets/a/demo', 'copy', '/missing', 'hash')
+    insertLegacyDeployment(db, skillId, '/targets/a/demo', '/missing')
     reconcileDeploymentIdentities(db, [tool([
       { id: 'target-a', path: '/targets/a' },
       { id: 'target-duplicate', path: '/targets/a' }
     ])])
+    expect(getDeploymentsBySkillId(db, skillId)[0]).toMatchObject({ source_id: null, target_id: null })
+  })
+
+  test.each([
+    {
+      name: 'source only',
+      sourcePath: '/src/demo',
+      targetPath: '/missing/demo',
+      targets: [{ id: 'target-a', path: '/targets/a' }]
+    },
+    {
+      name: 'target only',
+      sourcePath: '/missing',
+      targetPath: '/targets/a/demo',
+      targets: [{ id: 'target-a', path: '/targets/a' }]
+    }
+  ])('one-sided legacy match ($name) remains fully unresolved', ({ sourcePath, targetPath, targets }) => {
+    const db = createDb()
+    const { skillId } = seed(db)
+    insertLegacyDeployment(db, skillId, targetPath, sourcePath)
+    expect(() => reconcileDeploymentIdentities(db, [tool(targets)])).not.toThrow()
+    expect(getDeploymentsBySkillId(db, skillId)[0]).toMatchObject({ source_id: null, target_id: null })
+  })
+
+  test('deleting a referenced source safely returns its deployment to unresolved legacy state', () => {
+    const db = createDb()
+    const { skillId, sourceId } = seed(db)
+    upsertDeployment(db, skillId, 'codex', '/targets/a/demo', 'copy', '/src/demo', 'hash', {
+      sourceId,
+      targetId: 'target-a'
+    })
+
+    expect(() => db.prepare('DELETE FROM skill_sources WHERE id = ?').run(sourceId)).not.toThrow()
     expect(getDeploymentsBySkillId(db, skillId)[0]).toMatchObject({ source_id: null, target_id: null })
   })
 })

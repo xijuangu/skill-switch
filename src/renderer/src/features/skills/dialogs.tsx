@@ -11,7 +11,6 @@ export type DeployResultView = Extract<
   { status: 'completed' }
 >['result']
 export type DeployTargetOptionView = Awaited<ReturnType<typeof window.api.getDeployTargets>>[number]
-export type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 export type InstallResultView = Awaited<ReturnType<typeof window.api.installFromGitHub>>
 
 export function sourceOriginLabel(origin: SkillSourceView['source_origin']): string {
@@ -90,14 +89,14 @@ export function ConflictDialog({
 
 export function DeployDialogContent({
   skill,
-  sourcePath,
+  sourceId,
   onDone
 }: {
   skill: SkillView
-  sourcePath: string
+  sourceId: number
   onDone: (result: DeployResultView | null) => Promise<void>
 }) {
-  const [settings, setSettings] = useState<SettingsView | null>(null)
+  const source = skill.sources.find((candidate) => candidate.id === sourceId)
   const [targetOptions, setTargetOptions] = useState<DeployTargetOptionView[]>([])
   const [selectedTargetId, setSelectedTargetId] = useState('')
   const [mode, setMode] = useState<DeployMode>('copy')
@@ -113,12 +112,8 @@ export function DeployDialogContent({
   } | null>(null)
 
   useEffect(() => {
-    Promise.all([
-      window.api.getSettings(),
-      window.api.getDeployTargets(skill.sources.find((source) => source.path === sourcePath)?.id ?? -1)
-    ])
-      .then(([s, options]) => {
-        setSettings(s)
+    window.api.getDeployTargets(sourceId)
+      .then((options) => {
         setTargetOptions(options)
         const existing = options.find(
           (o) => o.eligible &&
@@ -130,19 +125,15 @@ export function DeployDialogContent({
         } else if (firstSafe) {
           setSelectedTargetId(firstSafe.targetId)
         }
-        setMode(s.platform.canSymlink ? 'symlink' : 'copy')
       })
       .catch((loadError) => {
         setError(loadError instanceof Error ? loadError.message : String(loadError))
       })
-  }, [skill.id, skill.deployments, sourcePath])
+  }, [skill.id, skill.deployments, sourceId])
 
   const targetSelectionValid = targetOptions.some(
     (o) => o.targetId === selectedTargetId && o.eligible
   )
-  const canSymlink = settings?.platform.canSymlink ?? false
-  const canJunction = settings?.platform.canJunction ?? false
-  const isWindowsNormalUser = !canSymlink && canJunction
   const selectedDeployment = skill.deployments.find(
     (d) => d.target_id === selectedTargetId
   )
@@ -152,7 +143,6 @@ export function DeployDialogContent({
     setBusy(true)
     setError(null)
     try {
-      const source = skill.sources.find((candidate) => candidate.path === sourcePath)
       if (!source) throw new Error('所选来源已失效，请刷新后重试')
       const outcome = await window.api.deploymentDeploy({
         sourceId: source.id,
@@ -211,13 +201,13 @@ export function DeployDialogContent({
     >
       <div className="space-y-4">
         <p className="text-xs text-foreground-secondary font-mono break-all">
-          {sourcePath}
+          {source?.path ?? '来源已失效'}
         </p>
 
         {skill.conflict.hasConflict && (() => {
           // 一次 groupByHash 派生当前组与其他版本数,避免重复遍历(#62 review)
           const groups = groupByHash(skill.sources)
-          const currentGroup = findSourceGroup(skill.sources, sourcePath)
+          const currentGroup = source == null ? null : findSourceGroup(skill.sources, source.path)
           const otherVersions = groups.size - (currentGroup ? 1 : 0)
           return (
             <div className="px-3 py-2 rounded border border-warning-subtle bg-warning-subtle space-y-0.5">
@@ -273,16 +263,13 @@ export function DeployDialogContent({
         <div>
           <label className="block text-xs font-medium text-foreground mb-1">模式</label>
           <div className="flex gap-3">
-            <label
-              className={`flex items-center gap-1.5 text-xs cursor-pointer ${canSymlink || canJunction ? '' : 'opacity-50'}`}
-              title={isWindowsNormalUser ? '需要开启开发者模式或以管理员运行' : !canSymlink ? '此平台不支持 symlink' : ''}
-            >
+            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
               <input
                 type="radio"
                 name="deploy-mode"
                 checked={mode === 'symlink'}
                 onChange={() => setMode('symlink')}
-                disabled={(!canSymlink && !canJunction) || busy}
+                disabled={busy}
               />
               symlink
             </label>
@@ -299,7 +286,7 @@ export function DeployDialogContent({
           </div>
           <p className="text-2xs text-foreground-muted mt-1">
             {mode === 'symlink'
-              ? isWindowsNormalUser ? '将尝试 junction；如只能使用 copy，会先请求确认' : '源更新自动生效'
+              ? '请求链接部署；如平台只能使用 copy，会先请求确认'
               : '快照副本 — 源更新需手动重新部署'}
           </p>
         </div>

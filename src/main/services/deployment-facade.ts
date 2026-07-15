@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, realpathSync } from 'fs'
+import { existsSync, lstatSync, readlinkSync, realpathSync } from 'fs'
 import { randomUUID } from 'crypto'
 import type { DB } from '../db/database'
 import { getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
@@ -6,13 +6,13 @@ import { getSourceById } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
 import type { DeployMode, DeployResult, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
 import {
-  deploySkill,
+  executePreparedDeployment,
   inspectRecoveryEvidence,
   ModeDegradationRequiredError,
   RecoveryRequiredError,
   resolveActualMode,
   targetMatchesDeployment,
-  undeployDeployment
+  executePreparedUndeployment
 } from './deployer'
 import { hashDir } from './hash'
 import { resolveWithin, validateSkillName } from './path-safety'
@@ -80,6 +80,24 @@ interface ConfirmationPlan extends DeploymentRequest {
   fingerprint: string
   actualMode: DeployMode
   degradationReason?: string
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function fingerprintTarget(path: string): string {
+  try {
+    return hashDir(path)
+  } catch {
+    const stat = lstatSync(path)
+    return stat.isSymbolicLink() ? `symlink:${readlinkSync(path)}` : `unreadable:${stat.mode}`
+  }
 }
 
 export interface DeploymentFacade {
@@ -262,7 +280,7 @@ export function createDeploymentFacade(options: {
   ): PreparedPlan {
     const resolved = resolve(request)
     const existing = getDeploymentBySkillAndTargetId(options.db, resolved.skill.id, resolved.target.id)
-    const targetExists = existsSync(resolved.targetPath)
+    const targetExists = pathEntryExists(resolved.targetPath)
     const sourceHash = hashDir(resolved.source.path)
     const platformMode = resolveActualMode(
       request.requestedMode,
@@ -275,7 +293,7 @@ export function createDeploymentFacade(options: {
     const reasons: DeploymentConfirmationReason[] = []
     if (!existing && targetExists) reasons.push('external-overwrite')
     if (
-      existing &&
+      existing && targetExists &&
       !targetMatchesDeployment(
         resolved.targetPath,
         existing.mode,
@@ -284,7 +302,7 @@ export function createDeploymentFacade(options: {
       )
     ) reasons.push('target-modified')
     if (actualMode === 'copy' && request.requestedMode !== 'copy') reasons.push('mode-degraded')
-    const targetHash = targetExists ? hashDir(resolved.targetPath) : null
+    const targetHash = targetExists ? fingerprintTarget(resolved.targetPath) : null
     const fingerprint = JSON.stringify({
       sourceId: request.sourceId,
       targetId: request.targetId,
@@ -346,11 +364,11 @@ export function createDeploymentFacade(options: {
     }
     let result: DeployResult
     try {
-      result = deploySkill(options.db, {
+      result = executePreparedDeployment(options.db, {
         skillId: resolved.skill.id,
         skillName: resolved.skill.name,
         targetTool: resolved.tool.key,
-        mode: plan.request.requestedMode,
+        mode: plan.actualMode,
         sourcePath: resolved.source.path,
         targetDir: resolved.targetPath,
         backupsDir: options.backupsDir,
@@ -450,7 +468,7 @@ export function createDeploymentFacade(options: {
         const recovery = inspectRecoveryEvidence(deployment.target_path!)
         if (recovery) return { status: 'recovery-required', message: '检测到未完成的部署操作，请保留现场并人工选择恢复方向。', evidence: recovery }
         try {
-          undeployDeployment(options.db, deployment, options.mutationHooks)
+          executePreparedUndeployment(options.db, deployment, options.mutationHooks)
           return { status: 'completed', deploymentId: deployment.id }
         } catch (error) {
           if (error instanceof RecoveryRequiredError) {
