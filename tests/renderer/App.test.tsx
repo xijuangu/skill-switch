@@ -18,6 +18,10 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
       backupRetention: 5,
       platform: { platform: 'darwin', canSymlink: true, canJunction: false },
     }),
+    getSourceRoots: vi.fn().mockResolvedValue([]),
+    registerSourceRoot: vi.fn(),
+    rescanSourceRoot: vi.fn(),
+    detachSourceRoot: vi.fn(),
     getDeployTargets: vi.fn().mockResolvedValue([]),
     setPresetEnabled: vi.fn(),
     setPresetPaths: vi.fn(),
@@ -73,6 +77,24 @@ describe('App (integration)', () => {
     await userEvent.click(screen.getByRole('button', { name: '技能' }))
     // 切回 skills 时不抛错即可
     expect(screen.getByRole('button', { name: '技能' })).toBeInTheDocument()
+  })
+
+  it('shows registered authoritative Source Roots separately from tool targets', async () => {
+    mockWindowApi({
+      getSourceRoots: vi.fn().mockResolvedValue([{
+        id: 1,
+        path: '/canonical/skills',
+        created_at: '2026-07-15T00:00:00.000Z',
+        last_scanned_at: '2026-07-15T01:00:00.000Z',
+        last_scan_error: null
+      }])
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '设置' }))
+    expect(await screen.findByText('权威源码库')).toBeInTheDocument()
+    expect(screen.getByText('/canonical/skills')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新扫描' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '解除登记' })).toBeInTheDocument()
   })
 
   it('renders empty state on Skills page when no skills', async () => {

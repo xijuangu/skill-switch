@@ -1,9 +1,10 @@
 // scanner 服务:扫描工具目录,登记 skill 到注册表
 //
-// 收集语义 = 索引(不搬文件),source_type = 'indexed'。
+// 收集语义 = 索引(不搬文件),source_type = 'indexed'；目录链接仅用于发现,
+// Source 始终登记为链接解析后的权威真实目录。
 // 身份主键 = SKILL.md frontmatter 的 name;无 frontmatter 或无 name → 回退目录名。
 
-import { readdirSync, readFileSync, existsSync, statSync, type Dirent } from 'fs'
+import { readdirSync, readFileSync, existsSync, realpathSync, statSync, type Dirent } from 'fs'
 import { join, basename } from 'path'
 import matter from 'gray-matter'
 import type { DB } from '../db/database'
@@ -28,23 +29,30 @@ function resolveSkillName(skillDir: string): string {
   return validateSkillName(basename(skillDir))
 }
 
-function isScannableDirectoryEntry(parentDir: string, entry: Dirent): boolean {
-  if (entry.isDirectory()) return true
-  if (!entry.isSymbolicLink()) return false
+interface ScannableSkillDir {
+  path: string
+  linked: boolean
+}
+
+function resolveScannableSkillDir(parentDir: string, entry: Dirent): ScannableSkillDir | null {
+  const entryPath = join(parentDir, entry.name)
+  if (entry.isDirectory()) return { path: entryPath, linked: false }
+  if (!entry.isSymbolicLink()) return null
   try {
-    return statSync(join(parentDir, entry.name)).isDirectory()
+    if (!statSync(entryPath).isDirectory()) return null
+    return { path: realpathSync(entryPath), linked: true }
   } catch {
     // A broken or inaccessible link is not a scannable Skill Source.
-    return false
+    return null
   }
 }
 
 /**
- * 扫描工具目录,把每个子目录登记为 skill(索引模式,不搬文件)。
+ * 扫描工具目录,把每个真实子目录或外部目录链接的权威目标登记为 skill(索引模式,不搬文件)。
  * 重复扫描幂等:(skill_id, path) 唯一约束 + ON CONFLICT 更新 hash/mtime。
  *
- * @param skipPaths 要跳过的子目录绝对路径集合(如 copy 部署的目标目录,
- *                  避免副本被当成新 source 索引进来)。默认空集合。
+ * @param skipPaths 要跳过的子目录绝对路径集合(如 manifest 管理的 Deployment target,
+ *                  避免部署产物被当成新 source 索引进来)。默认空集合。
  */
 export function scanToolDir(
   db: DB,
@@ -52,16 +60,36 @@ export function scanToolDir(
   skipPaths: Set<string> = new Set(),
   sourceTool: string | null = null
 ): ScanResult {
-  const entries = readdirSync(toolDir, { withFileTypes: true })
-  const skillDirs = entries
-    .filter((entry) => isScannableDirectoryEntry(toolDir, entry))
-    .map((e) => join(toolDir, e.name))
-    // #3: 跳过 copy 部署的目标目录(副本不该被当成新 source)
-    .filter((dir) => !skipPaths.has(dir))
+  const skillDirsByPath = new Map<string, { path: string; sourceTool: string | null }>()
+  const observedSubscriptions: ScanResult['observedSubscriptions'] = []
+  for (const entry of readdirSync(toolDir, { withFileTypes: true })) {
+    const discoveryPath = join(toolDir, entry.name)
+    // #3: 必须先按 Discovery Target 跳过受管部署,再解析外部链接的权威路径。
+    if (skipPaths.has(discoveryPath)) continue
+    const candidate = resolveScannableSkillDir(toolDir, entry)
+    if (!candidate) continue
+    if (candidate.linked) {
+      observedSubscriptions.push({
+        discoveryPath,
+        sourcePath: candidate.path
+      })
+    }
+
+    const existing = skillDirsByPath.get(candidate.path)
+    // 外部目录链接只负责发现,不成为 Source,也不把权威 Source 绑定到某个工具。
+    // 若同一目录也以真实子目录出现,真实目录的 sourceTool 归属优先。
+    if (!existing || (!candidate.linked && existing.sourceTool == null)) {
+      skillDirsByPath.set(candidate.path, {
+        path: candidate.path,
+        sourceTool: candidate.linked ? null : sourceTool
+      })
+    }
+  }
+  const skillDirs = [...skillDirsByPath.values()]
 
   let upserted = 0
   const scannedPaths: string[] = []
-  for (const skillDir of skillDirs) {
+  for (const { path: skillDir, sourceTool: discoveredByTool } of skillDirs) {
     const name = resolveSkillName(skillDir)
     const hash = hashDir(skillDir)
     const mtime = Math.floor(statSync(skillDir).mtimeMs)
@@ -74,12 +102,12 @@ export function scanToolDir(
         hash,
         mtime,
         'indexed',
-        { origin: 'scan', tool: sourceTool }
+        { origin: 'scan', tool: discoveredByTool }
       )
       upserted++
     })
     scannedPaths.push(skillDir)
   }
 
-  return { scanned: skillDirs.length, upserted, scannedPaths }
+  return { scanned: skillDirs.length, upserted, scannedPaths, observedSubscriptions }
 }

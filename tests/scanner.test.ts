@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'vitest'
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
 import { scanToolDir } from '../src/main/services/scanner'
@@ -7,7 +7,7 @@ import { getSkillByName } from '../src/main/db/dao/skills'
 import { getSourcesBySkillId } from '../src/main/db/dao/skill-sources'
 
 describe('scanner', () => {
-  test.runIf(process.platform !== 'win32')('indexes a valid directory symlink while preserving its Discovery Target path', () => {
+  test.runIf(process.platform !== 'win32')('indexes a valid directory symlink as its authoritative real path', () => {
     const tool = createTempDir('scanner-link-tool-')
     const source = createTempDir('scanner-link-source-')
     const { db, cleanup: cleanupDb } = createTempDb()
@@ -19,11 +19,15 @@ describe('scanner', () => {
 
     const result = scanToolDir(db, tool.dir, new Set(), 'agents')
 
-    expect(result).toMatchObject({ scanned: 1, upserted: 1, scannedPaths: [linkedSkill] })
+    const authoritativePath = realpathSync(realSkill)
+    expect(result).toMatchObject({ scanned: 1, upserted: 1, scannedPaths: [authoritativePath] })
+    expect(result.observedSubscriptions).toEqual([
+      { discoveryPath: linkedSkill, sourcePath: authoritativePath }
+    ])
     const skill = getSkillByName(db, 'to-tickets')
     expect(skill).toBeDefined()
     expect(getSourcesBySkillId(db, skill!.id)).toMatchObject([
-      { path: linkedSkill, source_tool: 'agents', source_origin: 'scan' }
+      { path: authoritativePath, source_tool: null, source_origin: 'scan' }
     ])
 
     tool.cleanup()
@@ -42,14 +46,15 @@ describe('scanner', () => {
     expect(scanToolDir(db, tool.dir, new Set(), 'agents')).toEqual({
       scanned: 0,
       upserted: 0,
-      scannedPaths: []
+      scannedPaths: [],
+      observedSubscriptions: []
     })
 
     tool.cleanup()
     cleanupDb()
   })
 
-  test.runIf(process.platform !== 'win32')('registers distinct Source paths when two links discover the same real Skill', () => {
+  test.runIf(process.platform !== 'win32')('deduplicates two aliases that discover the same authoritative Skill directory', () => {
     const tool = createTempDir('scanner-multiple-links-')
     const source = createTempDir('scanner-shared-source-')
     const { db, cleanup: cleanupDb } = createTempDb()
@@ -61,11 +66,16 @@ describe('scanner', () => {
     symlinkSync(realSkill, firstLink)
     symlinkSync(realSkill, secondLink)
 
-    expect(scanToolDir(db, tool.dir, new Set(), 'agents').scanned).toBe(2)
+    const result = scanToolDir(db, tool.dir, new Set(), 'agents')
+    expect(result.scanned).toBe(1)
+    expect(result.observedSubscriptions).toEqual([
+      { discoveryPath: firstLink, sourcePath: realpathSync(realSkill) },
+      { discoveryPath: secondLink, sourcePath: realpathSync(realSkill) }
+    ])
     const skill = getSkillByName(db, 'shared')
-    expect(getSourcesBySkillId(db, skill!.id).map((item) => item.path).sort()).toEqual(
-      [firstLink, secondLink].sort()
-    )
+    expect(getSourcesBySkillId(db, skill!.id)).toMatchObject([
+      { path: realpathSync(realSkill), source_tool: null, source_origin: 'scan' }
+    ])
 
     tool.cleanup()
     source.cleanup()
@@ -85,7 +95,8 @@ describe('scanner', () => {
     expect(scanToolDir(db, tool.dir, new Set([linkedSkill]), 'agents')).toEqual({
       scanned: 0,
       upserted: 0,
-      scannedPaths: []
+      scannedPaths: [],
+      observedSubscriptions: []
     })
 
     tool.cleanup()

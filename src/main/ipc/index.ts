@@ -47,6 +47,13 @@ import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 import { readToolDrifts } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
 import {
+  detachSourceRoot,
+  listSourceRoots,
+  registerAndScanSourceRoot,
+  rescanSourceRoot
+} from '../services/source-roots'
+import { markSourceRootScanFailed } from '../db/dao/source-roots'
+import {
   deleteDeploymentById,
   getDeploymentBySkillAndTargetId,
   getDeploymentsBySkillId
@@ -261,6 +268,20 @@ export function registerIpcHandlers(db: DB): void {
     const settings = readSettings(SETTINGS_PATH)
     return buildSettingsView(settings)
   })
+
+  ipcMain.handle('getSourceRoots', async () => listSourceRoots(db))
+
+  ipcMain.handle('registerSourceRoot', async (_e, path: string) => {
+    return registerAndScanSourceRoot(db, assertAbsolutePath(path, 'Source Root path'))
+  })
+
+  ipcMain.handle('rescanSourceRoot', async (_e, rootId: number) =>
+    rescanSourceRoot(db, assertInteger(rootId, 'Source Root ID'))
+  )
+
+  ipcMain.handle('detachSourceRoot', async (_e, rootId: number) =>
+    detachSourceRoot(db, assertInteger(rootId, 'Source Root ID'))
+  )
 
   ipcMain.handle('getDeployTargets', async (_e, sourceId: number) => {
     const safeSourceId = assertInteger(sourceId, 'sourceId')
@@ -494,4 +515,13 @@ export function runStartupSequence(db: DB): void {
   reconcileDeploymentIdentities(db, resolveToolConfigs(withPlatform, homedir()))
   const dirs = getActiveScanDirs(withPlatform, homedir())
   scanAllTools(db, dirs)
+  for (const root of listSourceRoots(db)) {
+    try {
+      rescanSourceRoot(db, root.id)
+    } catch (error) {
+      // A temporarily unavailable external Source Root must not block app startup,
+      // but its stale state must remain visible to the user.
+      markSourceRootScanFailed(db, root.id, error instanceof Error ? error.message : String(error))
+    }
+  }
 }

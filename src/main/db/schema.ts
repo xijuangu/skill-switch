@@ -1,11 +1,19 @@
 // SQLite schema 定义 —— skill-switch 中央注册表
-// 三张表:skills / skill_sources / deployments
+// 四张表:source_roots / skills / skill_sources / deployments
 //
 // skill_sources 的 repo_url / commit_sha 列用于 GitHub 安装记录源仓库元数据
 // (MVP 不做更新检查,仅留元数据)。CREATE TABLE 里的列对新建 DB 生效;
 // 对已存在的旧 DB,runMigrations 用 ALTER TABLE ADD COLUMN 补列。
 
 export const SCHEMA = `
+CREATE TABLE IF NOT EXISTS source_roots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_scanned_at TEXT,
+  last_scan_error TEXT
+);
+
 CREATE TABLE IF NOT EXISTS skills (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -22,10 +30,12 @@ CREATE TABLE IF NOT EXISTS skill_sources (
   source_type TEXT NOT NULL,
   source_origin TEXT NOT NULL DEFAULT 'legacy',
   source_tool TEXT,
+  source_root_id INTEGER,
   discovered_at TEXT NOT NULL,
   repo_url TEXT,
   commit_sha TEXT,
   FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+  FOREIGN KEY (source_root_id) REFERENCES source_roots(id) ON DELETE CASCADE,
   UNIQUE (skill_id, path)
 );
 
@@ -72,6 +82,43 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
   }
   if (!names.has('source_tool')) {
     db.exec('ALTER TABLE skill_sources ADD COLUMN source_tool TEXT')
+  }
+  if (!names.has('source_root_id')) {
+    db.exec('ALTER TABLE skill_sources ADD COLUMN source_root_id INTEGER')
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS source_roots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      path TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      last_scanned_at TEXT,
+      last_scan_error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_sources_source_root_id
+      ON skill_sources(source_root_id);
+    CREATE TRIGGER IF NOT EXISTS trg_skill_sources_root_exists_insert
+    BEFORE INSERT ON skill_sources
+    WHEN NEW.source_root_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM source_roots WHERE id = NEW.source_root_id)
+    BEGIN
+      SELECT RAISE(ABORT, 'source root not found');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_skill_sources_root_exists_update
+    BEFORE UPDATE OF source_root_id ON skill_sources
+    WHEN NEW.source_root_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM source_roots WHERE id = NEW.source_root_id)
+    BEGIN
+      SELECT RAISE(ABORT, 'source root not found');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_source_roots_delete_sources
+    BEFORE DELETE ON source_roots
+    BEGIN
+      DELETE FROM skill_sources WHERE source_root_id = OLD.id;
+    END;
+  `)
+  const sourceRootColumns = db.prepare('PRAGMA table_info(source_roots)').all() as { name: string }[]
+  if (!sourceRootColumns.some((column) => column.name === 'last_scan_error')) {
+    db.exec('ALTER TABLE source_roots ADD COLUMN last_scan_error TEXT')
   }
 
   let deploymentCols = db.prepare('PRAGMA table_info(deployments)').all() as {

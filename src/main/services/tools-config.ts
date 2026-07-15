@@ -211,7 +211,9 @@ export function removeCustomTool(
 export interface ActiveScanDir {
   key: string
   displayName: string
+  /** Legacy test/service input; production callers also provide semantic targets. */
   paths: string[]
+  targets?: ToolConfig['existingTargets']
 }
 
 /**
@@ -230,7 +232,8 @@ export function getActiveScanDirs(
     active.push({
       key: cfg.key,
       displayName: cfg.displayName,
-      paths: cfg.existingPaths
+      paths: cfg.existingPaths,
+      targets: cfg.existingTargets
     })
   }
   return active

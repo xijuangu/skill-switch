@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Settings, Wrench, Database, Monitor } from 'lucide-react'
+import { Wrench, Database, Monitor, FolderTree } from 'lucide-react'
 import { Button, Input, StatusDot } from '../../shared'
 
 type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 type ToolConfigView = SettingsView['tools'][number]
+type SourceRootView = Awaited<ReturnType<typeof window.api.getSourceRoots>>[number]
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<SettingsView | null>(null)
@@ -13,10 +14,17 @@ export function SettingsPage() {
   const [newToolPaths, setNewToolPaths] = useState('')
   const [editingPaths, setEditingPaths] = useState<Record<string, string>>({})
   const [retention, setRetention] = useState<number>(20)
+  const [sourceRoots, setSourceRoots] = useState<SourceRootView[]>([])
+  const [sourceRootBusy, setSourceRootBusy] = useState(false)
+  const [sourceRootMessage, setSourceRootMessage] = useState<string | null>(null)
 
   const load = useCallback(async () => {
-    const s = await window.api.getSettings()
+    const [s, roots] = await Promise.all([
+      window.api.getSettings(),
+      window.api.getSourceRoots()
+    ])
     setSettings(s)
+    setSourceRoots(roots)
     setRetention(s.backupRetention)
     const pathsMap: Record<string, string> = {}
     for (const t of s.tools) {
@@ -76,6 +84,55 @@ export function SettingsPage() {
   const handleSaveRetention = () =>
     run(() => window.api.setBackupRetention(retention))
 
+  const refreshSourceRoots = async () => {
+    setSourceRoots(await window.api.getSourceRoots())
+  }
+
+  const handleAddSourceRoot = async () => {
+    const path = await window.api.selectLocalDir()
+    if (!path) return
+    setSourceRootBusy(true)
+    setSourceRootMessage(null)
+    try {
+      const result = await window.api.registerSourceRoot(path)
+      await refreshSourceRoots()
+      setSourceRootMessage(`已登记源码库，发现 ${result.discovered} 个 Skill`)
+    } catch (error) {
+      setSourceRootMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSourceRootBusy(false)
+    }
+  }
+
+  const handleRescanSourceRoot = async (rootId: number) => {
+    setSourceRootBusy(true)
+    setSourceRootMessage(null)
+    try {
+      const result = await window.api.rescanSourceRoot(rootId)
+      await refreshSourceRoots()
+      setSourceRootMessage(`重新扫描完成：发现 ${result.discovered} 个，移除 ${result.removed} 条失效来源`)
+    } catch (error) {
+      setSourceRootMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSourceRootBusy(false)
+    }
+  }
+
+  const handleDetachSourceRoot = async (root: SourceRootView) => {
+    if (!window.confirm(`解除登记「${root.path}」？\n不会删除源码库中的任何文件。`)) return
+    setSourceRootBusy(true)
+    setSourceRootMessage(null)
+    try {
+      const result = await window.api.detachSourceRoot(root.id)
+      await refreshSourceRoots()
+      setSourceRootMessage(`已解除登记，移除 ${result.detachedSources} 条来源元数据；源码文件未删除`)
+    } catch (error) {
+      setSourceRootMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSourceRootBusy(false)
+    }
+  }
+
   if (!settings) {
     return (
       <div className="space-y-3 p-1 h-full overflow-auto">
@@ -134,6 +191,57 @@ export function SettingsPage() {
             添加
           </Button>
         </div>
+      </section>
+
+      <section className="mb-8">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <FolderTree className="h-4 w-4 text-foreground-secondary" />
+            <h2 className="text-sm font-semibold">权威源码库</h2>
+          </div>
+          <Button variant="primary" onClick={handleAddSourceRoot} disabled={sourceRootBusy} size="sm">
+            登记源码库
+          </Button>
+        </div>
+        <p className="text-xs text-foreground-secondary mb-3">
+          递归发现源码库中的 Skill，但不复制、不移动，也不会自动部署到任何工具。
+        </p>
+        {sourceRootMessage && (
+          <div className="mb-3 px-3 py-2 rounded border border-border bg-surface-secondary text-xs text-foreground-secondary">
+            {sourceRootMessage}
+          </div>
+        )}
+        {sourceRoots.length === 0 ? (
+          <div className="border border-dashed border-border rounded-md p-4 text-xs text-foreground-muted">
+            尚未登记源码库。
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {sourceRoots.map((root) => (
+              <li key={root.id} className="border border-border rounded-md p-3">
+                <div className="font-mono text-xs text-foreground break-all">{root.path}</div>
+                <div className="text-2xs text-foreground-muted mt-1 mb-2">
+                  {root.last_scanned_at
+                    ? `上次扫描：${new Date(root.last_scanned_at).toLocaleString()}`
+                    : '尚未扫描'}
+                </div>
+                {root.last_scan_error && (
+                  <div className="text-2xs text-danger mb-2 break-all">
+                    扫描失败：{root.last_scan_error}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <Button variant="secondary" size="sm" disabled={sourceRootBusy} onClick={() => handleRescanSourceRoot(root.id)}>
+                    重新扫描
+                  </Button>
+                  <Button variant="danger" size="sm" disabled={sourceRootBusy} onClick={() => handleDetachSourceRoot(root)}>
+                    解除登记
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="mb-8">

@@ -3,9 +3,12 @@
 ## 技能
 
 - 扫描后，技能行显示 source 类型、source 数量和已部署工具。
-- Discovery Target 中指向有效 Skill 目录的软链接会被扫描为 Source；broken link 与文件 link 被安全跳过，不中断整次扫描。
+- Discovery Target 中未受 manifest 管理、且指向有效 Skill 目录的软链接会导入为 observed symlink Deployment；Source 路径必须是 `realpath` 后的权威目录，link path 不得成为 Source。两个 Target 的 alias 指向同一目录时应显示一个 Source、两个订阅，且均可独立取消；copy / symlink / junction managed target 均不反向登记为 Source，broken link 与文件 link 被安全跳过且不中断整次扫描。
 - 展开 Source 后，“发现时间”按当前系统本地时区显示，不直接展示 UTC `Z` 字符串。
 - “安装”默认打开 GitHub 安装；“添加本地”直接打开本地目录页。
+- 在“设置 → 权威源码库”登记一个包含多层目录和多个 `SKILL.md` 的 Root；系统递归发现每个真实 Skill，但不向任何工具自动写入文件。
+- 对同一个 Root 重新扫描可发现新增 Skill；解除登记只删除注册元数据，Root 和 Skill 文件仍保留在磁盘。
+- 从 Root 发现两个 Skill 后，只部署其中一个到选定 Discovery Target；未选择的 Skill 不应出现在该工具，取消单个订阅不删除 Source 或其他 Target 的订阅。
 - 多 source 冲突时，部署和查看 SKILL.md 都要求选择具体 source。
 - 多版本冲突时，详情列来源按 hash 分组渲染（版本 A / 版本 B 标题 + 来源数 + hash 短码），单版本保持平铺。
 - 部署弹窗在冲突 skill 上显示当前所选 Source 所属版本组（组内来源数、hash 短码）与其他版本数量。

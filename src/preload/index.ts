@@ -5,6 +5,10 @@ const api = {
   scan: () => ipcRenderer.invoke('scan'),
   getSkills: () => ipcRenderer.invoke('getSkills'),
   getSettings: () => ipcRenderer.invoke('getSettings'),
+  getSourceRoots: () => ipcRenderer.invoke('getSourceRoots'),
+  registerSourceRoot: (path: string) => ipcRenderer.invoke('registerSourceRoot', path),
+  rescanSourceRoot: (rootId: number) => ipcRenderer.invoke('rescanSourceRoot', rootId),
+  detachSourceRoot: (rootId: number) => ipcRenderer.invoke('detachSourceRoot', rootId),
   getDeployTargets: (sourceId: number) =>
     ipcRenderer.invoke('getDeployTargets', sourceId),
   setPresetEnabled: (key: string, enabled: boolean) =>

@@ -15,6 +15,15 @@ export interface Skill {
   created_at: string
 }
 
+/** 用户登记的权威内容根目录。 */
+export interface SourceRoot {
+  id: number
+  path: string
+  created_at: string
+  last_scanned_at: string | null
+  last_scan_error: string | null
+}
+
 /** skill 的某个 source(一对多) */
 export interface SkillSource {
   id: number
@@ -25,6 +34,8 @@ export interface SkillSource {
   source_type: SourceType
   source_origin: SourceOrigin
   source_tool: string | null
+  /** 由 Source Root 发现时指向所属根；其他来源为空。 */
+  source_root_id: number | null
   discovered_at: string
   /** GitHub 安装记录的源仓库 URL(仅 central-repo + GitHub 来源有值) */
   repo_url: string | null
@@ -89,6 +100,11 @@ export interface ScanResult {
   upserted: number
   /** 本次扫描 upsert 的 source 路径列表(用于清理失效 source) */
   scannedPaths: string[]
+  /** 在 Discovery Target 中观察到、但尚未由 manifest 管理的目录链接。 */
+  observedSubscriptions: Array<{
+    discoveryPath: string
+    sourcePath: string
+  }>
 }
 
 /** 内置工具预设(代码内固定,displayName + internal key + 默认路径) */

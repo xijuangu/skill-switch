@@ -51,6 +51,7 @@ function mkSrc(partial: Partial<SkillSource> & Pick<SkillSource, 'id' | 'path' |
     source_type: 'indexed',
     source_origin: 'legacy',
     source_tool: null,
+    source_root_id: null,
     discovered_at: '2026-01-01T00:00:00.000Z',
     repo_url: null,
     commit_sha: null,

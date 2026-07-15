@@ -6,25 +6,29 @@
 // (scanner 本身同步,这里用顺序循环保证确定性与幂等)。
 //
 // #1: 扫描后清理失效的 indexed source(路径已不在扫描列表里,如用户改了工具路径)。
-// #3: 扫描时跳过 copy 部署的目标目录(副本不该被当成新 source 索引进来)。
+// #3: 扫描时跳过 manifest 管理的全部 Deployment target,避免部署产物反向成为 Source。
 
 import { existsSync } from 'fs'
 import type { DB } from '../db/database'
 import type { MultiScanResult, ToolScanResult } from '../types'
 import { scanToolDir } from './scanner'
 import type { ActiveScanDir } from './tools-config'
-import { getDeploymentsByMode } from '../db/dao/deployments'
+import {
+  getAllDeployments,
+  getDeploymentBySkillAndTargetId,
+  upsertDeployment
+} from '../db/dao/deployments'
+import { getSourceByPath } from '../db/dao/skill-sources'
 import { reconcileIndexedSources } from './registry'
 
 /**
- * 构建本次扫描要跳过的路径集合(copy 部署的目标目录)。
- * copy 副本不该被当成新 source 索引,否则 scan 后 source 会多出目标目录。
- * symlink/junction 部署不跳过(链接透明,扫描源目录等于扫描链接目标,不产生新 source)。
+ * 构建本次扫描要跳过的 manifest-managed Deployment target 集合。
+ * copy、symlink、junction 都是部署产物,不能反向登记为新的 Source；只有清单之外的
+ * 外部目录或目录链接才属于发现结果。
  */
 function buildSkipPaths(db: DB): Set<string> {
   const skip = new Set<string>()
-  const copyDeployments = getDeploymentsByMode(db, 'copy')
-  for (const dep of copyDeployments) {
+  for (const dep of getAllDeployments(db)) {
     if (dep.target_path) skip.add(dep.target_path)
   }
   return skip
@@ -33,7 +37,7 @@ function buildSkipPaths(db: DB): Set<string> {
 /**
  * 对多个工具目录做聚合扫描。
  * @param db 数据库连接
- * @param tools 待扫描工具列表(每个含 key / displayName / 已探测存在的 paths)
+ * @param tools 待扫描工具列表(每个含 key / displayName / 已探测存在的语义 targets)
  * @returns 每个路径的扫描结果 + 总计
  */
 export function scanAllTools(
@@ -44,14 +48,19 @@ export function scanAllTools(
   let totalScanned = 0
   let totalUpserted = 0
 
-  // #3: 扫描前构建 skipPaths(copy 部署的目标目录)
+  // #3: 扫描前构建所有 manifest-managed Deployment target 的 skipPaths
   const skipPaths = buildSkipPaths(db)
   // #1: 收集本次扫描实际 upsert 的 source 路径,用于清理失效 source
   const allScannedSourcePaths: string[] = []
   const successfullyScannedDirs: string[] = []
 
   for (const tool of tools) {
-    for (const dir of tool.paths) {
+    const targets = tool.targets ?? tool.paths.map((path, index) => ({
+      id: `legacy-scan:${tool.key}:${index}`,
+      path
+    }))
+    for (const target of targets) {
+      const dir = target.path
       if (!existsSync(dir)) {
         results.push({
           key: tool.key,
@@ -63,6 +72,24 @@ export function scanAllTools(
         continue
       }
       const r = scanToolDir(db, dir, skipPaths, tool.key)
+      for (const observation of r.observedSubscriptions) {
+        const source = getSourceByPath(db, observation.sourcePath)
+        if (!source) continue
+        if (getDeploymentBySkillAndTargetId(db, source.skill_id, target.id)) continue
+        upsertDeployment(
+          db,
+          source.skill_id,
+          tool.key,
+          observation.discoveryPath,
+          'symlink',
+          source.path,
+          source.hash,
+          { sourceId: source.id, targetId: target.id }
+        )
+        // Prevent another configured target that aliases the same physical root
+        // from importing this exact filesystem entry a second time in this scan.
+        skipPaths.add(observation.discoveryPath)
+      }
       successfullyScannedDirs.push(dir)
       results.push({
         key: tool.key,

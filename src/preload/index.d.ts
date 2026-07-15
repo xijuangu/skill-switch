@@ -92,6 +92,22 @@ export interface SettingsView {
   platform: PlatformInfoView
 }
 
+export interface SourceRootView {
+  id: number
+  path: string
+  created_at: string
+  last_scanned_at: string | null
+  last_scan_error: string | null
+}
+
+export interface SourceRootScanResultView {
+  root: SourceRootView
+  discovered: number
+  upserted: number
+  removed: number
+  sources: SkillSourceView[]
+}
+
 export interface CustomToolInput {
   key: string
   displayName: string
@@ -232,6 +248,10 @@ declare global {
       scan: () => Promise<MultiScanResultView>
       getSkills: () => Promise<SkillWithConflictView[]>
       getSettings: () => Promise<SettingsView>
+      getSourceRoots: () => Promise<SourceRootView[]>
+      registerSourceRoot: (path: string) => Promise<SourceRootScanResultView>
+      rescanSourceRoot: (rootId: number) => Promise<SourceRootScanResultView>
+      detachSourceRoot: (rootId: number) => Promise<{ detachedSources: number }>
       getDeployTargets: (sourceId: number) => Promise<DeployTargetOptionView[]>
       setPresetEnabled: (key: string, enabled: boolean) => Promise<SettingsView>
       setPresetPaths: (key: string, paths: string[]) => Promise<SettingsView>

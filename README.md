@@ -9,7 +9,9 @@ Modern AI coding tools each maintain their own local skill directory (`~/.trae-c
 ## Core Flow
 
 ```
-Scan each tool's skill dir (discover existing skills)
+Register an authoritative Source Root and recursively discover its Skills
+         ↓
+Scan tool skill dirs to import unmanaged legacy content and observed link subscriptions
          ↓
 Index into central registry (~/.skill-switch/ccswitch.db — hybrid: index-only for existing, central-repo for newly installed)
          ↓
@@ -24,7 +26,8 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 
 ## Scope (MVP)
 
-- Scan & index skills from multiple tool directories, including valid directory symlinks (no file moving for existing skills)
+- Scan skills from multiple tool directories, including unmanaged valid directory symlinks; linked aliases discover the authoritative real Source and are imported as observed symlink Deployments for their semantic Discovery Targets, while manifest-managed targets are excluded from re-import (no file moving for existing skills)
+- Register external authoritative Source Roots, recursively discover multiple Skills, rescan or detach metadata without deleting source files
 - Install new skills from GitHub repo (single + subpath), ZIP, or local directory
 - Deploy via copy / symlink / Windows junction; every linked-to-copy degradation requires confirmation
 - Stable Source / Discovery Target / Deployment identities; renderer mutation calls never submit paths
@@ -96,7 +99,7 @@ Spec'd via `/grill-me` → `/to-prd` → `/to-issues`. See:
 ## Design Principles
 
 Aligned with cc-switch's validated patterns:
-- SSOT (central SQLite)
+- SSOT (authoritative content roots for files; central SQLite for identities and deployment relations)
 - Dual-layer storage (SQLite for syncable, JSON for device settings)
 - Atomic writes (temp file + rename)
 - Path-free renderer mutations (semantic IDs only)

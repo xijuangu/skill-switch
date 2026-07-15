@@ -4,7 +4,7 @@ import type { SkillSource, SourceOrigin, SourceType } from '../../types'
 
 /**
  * Upsert 一个 source:按 (skill_id, path) UNIQUE 约束。
- * 不存在则插入;存在则更新 hash / mtime / source_type / discovered_at / repo_url / commit_sha。
+ * 不存在则插入;存在则更新可变元数据。discovered_at 表示首次发现时间，重复扫描不得刷新。
  * repo_url / commit_sha 可选,仅 GitHub 安装的 source 带值;未传时写 null(不覆盖已有 null)。
  */
 export function upsertSource(
@@ -19,20 +19,30 @@ export function upsertSource(
     commitSha?: string
     origin?: SourceOrigin
     tool?: string | null
+    rootId?: number | null
   } = {}
 ): void {
   const sourceOrigin = metadata.origin ?? 'legacy'
   const sourceTool = metadata.tool ?? null
+  const sourceRootId = metadata.rootId ?? null
   db.prepare(
-    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, source_origin, source_tool, discovered_at, repo_url, commit_sha)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, source_origin, source_tool, source_root_id, discovered_at, repo_url, commit_sha)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(skill_id, path) DO UPDATE SET
        hash = excluded.hash,
        mtime = excluded.mtime,
        source_type = excluded.source_type,
-       source_origin = excluded.source_origin,
-       source_tool = excluded.source_tool,
-       discovered_at = excluded.discovered_at,
+       source_origin = CASE
+         WHEN skill_sources.source_root_id IS NOT NULL AND excluded.source_root_id IS NULL
+           THEN skill_sources.source_origin
+         ELSE excluded.source_origin
+       END,
+       source_tool = CASE
+         WHEN skill_sources.source_root_id IS NOT NULL AND excluded.source_root_id IS NULL
+           THEN skill_sources.source_tool
+         ELSE excluded.source_tool
+       END,
+       source_root_id = COALESCE(excluded.source_root_id, skill_sources.source_root_id),
        repo_url = excluded.repo_url,
        commit_sha = excluded.commit_sha`
   ).run(
@@ -43,10 +53,34 @@ export function upsertSource(
     sourceType,
     sourceOrigin,
     sourceTool,
+    sourceRootId,
     new Date().toISOString(),
     metadata.repoUrl ?? null,
     metadata.commitSha ?? null
   )
+}
+
+export function getSourcesByRootId(db: DB, rootId: number): SkillSource[] {
+  return db
+    .prepare('SELECT * FROM skill_sources WHERE source_root_id = ? ORDER BY path ASC')
+    .all(rootId) as SkillSource[]
+}
+
+export function moveSourceToSkill(
+  db: DB,
+  sourceId: number,
+  skillId: number,
+  hash: string,
+  mtime: number,
+  rootId: number
+): void {
+  db.prepare(
+    `UPDATE skill_sources
+     SET skill_id = ?, hash = ?, mtime = ?, source_type = 'indexed',
+         source_origin = 'local', source_tool = NULL, source_root_id = ?,
+         repo_url = NULL, commit_sha = NULL
+     WHERE id = ?`
+  ).run(skillId, hash, mtime, rootId, sourceId)
 }
 
 /** 按 skill_id 查所有 source */
