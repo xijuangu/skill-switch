@@ -144,7 +144,7 @@ export type DeploymentOutcomeView =
     }
   | {
       status: 'rejected'
-      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy'
       message: string
     }
 

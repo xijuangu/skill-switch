@@ -25,7 +25,7 @@ export type DeploymentOutcome =
     }
   | {
       status: 'rejected'
-      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy'
       message: string
     }
 
@@ -43,8 +43,8 @@ interface ConfirmationPlan extends DeploymentRequest {
 }
 
 export interface DeploymentFacade {
-  deploy(request: DeploymentRequest): DeploymentOutcome
-  confirm(confirmationId: string): DeploymentOutcome
+  deploy(request: DeploymentRequest): Promise<DeploymentOutcome>
+  confirm(confirmationId: string): Promise<DeploymentOutcome>
 }
 
 export function createDeploymentFacade(options: {
@@ -54,12 +54,33 @@ export function createDeploymentFacade(options: {
   now?: () => number
   createId?: () => string
   confirmationTtlMs?: number
+  runMutation?: <T>(mutation: () => T) => Promise<T>
 }): DeploymentFacade {
   const now = options.now ?? Date.now
   const createId = options.createId ?? randomUUID
   const ttl = options.confirmationTtlMs ?? 5 * 60_000
   const confirmations = new Map<string, ConfirmationPlan>()
   const consumed = new Set<string>()
+  const lockedTargets = new Set<string>()
+  const runMutation = options.runMutation ?? (async (mutation) => {
+    await Promise.resolve()
+    return mutation()
+  })
+
+  async function withTargetLock(
+    targetId: string,
+    mutation: () => DeploymentOutcome
+  ): Promise<DeploymentOutcome> {
+    if (lockedTargets.has(targetId)) {
+      return { status: 'rejected', reason: 'target-busy', message: '目标正在执行其他部署操作，请稍后重试。' }
+    }
+    lockedTargets.add(targetId)
+    try {
+      return await runMutation(mutation)
+    } finally {
+      lockedTargets.delete(targetId)
+    }
+  }
 
   function resolve(request: DeploymentRequest) {
     const source = getSourceById(options.db, request.sourceId)
@@ -106,57 +127,62 @@ export function createDeploymentFacade(options: {
 
   return {
     deploy(request) {
-      const plan = resolve(request)
-      const existing = getDeploymentBySkillAndTargetId(options.db, plan.skill.id, plan.target.id)
-      if (!existing && existsSync(plan.targetPath)) {
-        const confirmationId = createId()
-        const expiresAt = now() + ttl
-        confirmations.set(confirmationId, {
-          ...request,
-          expiresAt,
-          sourcePath: plan.source.path,
-          sourceHash: hashDir(plan.source.path),
-          targetPath: plan.targetPath,
-          targetHash: hashDir(plan.targetPath)
-        })
-        return {
-          status: 'confirmation-required',
-          confirmationId,
-          expiresAt,
-          facts: { skillName: plan.skill.name, targetPath: plan.targetPath, reason: 'external-overwrite' }
+      return withTargetLock(request.targetId, () => {
+        const plan = resolve(request)
+        const existing = getDeploymentBySkillAndTargetId(options.db, plan.skill.id, plan.target.id)
+        if (!existing && existsSync(plan.targetPath)) {
+          const confirmationId = createId()
+          const expiresAt = now() + ttl
+          confirmations.set(confirmationId, {
+            ...request,
+            expiresAt,
+            sourcePath: plan.source.path,
+            sourceHash: hashDir(plan.source.path),
+            targetPath: plan.targetPath,
+            targetHash: hashDir(plan.targetPath)
+          })
+          return {
+            status: 'confirmation-required',
+            confirmationId,
+            expiresAt,
+            facts: { skillName: plan.skill.name, targetPath: plan.targetPath, reason: 'external-overwrite' }
+          }
         }
-      }
-      return execute(request, false)
+        return execute(request, false)
+      })
     },
     confirm(confirmationId) {
       if (consumed.has(confirmationId)) {
-        return { status: 'rejected', reason: 'confirmation-used', message: '确认已使用，请重新发起部署。' }
+        return Promise.resolve({ status: 'rejected', reason: 'confirmation-used', message: '确认已使用，请重新发起部署。' })
       }
       const stored = confirmations.get(confirmationId)
       if (!stored) {
-        return { status: 'rejected', reason: 'confirmation-invalid', message: '确认无效或应用已重启，请重新发起部署。' }
+        return Promise.resolve({ status: 'rejected', reason: 'confirmation-invalid', message: '确认无效或应用已重启，请重新发起部署。' })
       }
-      confirmations.delete(confirmationId)
-      consumed.add(confirmationId)
-      if (stored.expiresAt <= now()) {
-        return { status: 'rejected', reason: 'confirmation-expired', message: '确认已过期，请重新发起部署。' }
-      }
-      try {
-        const current = resolve(stored)
-        const changed =
-          current.source.path !== stored.sourcePath ||
-          current.targetPath !== stored.targetPath ||
-          !existsSync(current.targetPath) ||
-          hashDir(current.source.path) !== stored.sourceHash ||
-          hashDir(current.targetPath) !== stored.targetHash ||
-          getDeploymentBySkillAndTargetId(options.db, current.skill.id, current.target.id) != null
-        if (changed) {
+      return withTargetLock(stored.targetId, () => {
+        // Consume only after this confirmation owns the target lock.
+        confirmations.delete(confirmationId)
+        consumed.add(confirmationId)
+        if (stored.expiresAt <= now()) {
+          return { status: 'rejected', reason: 'confirmation-expired', message: '确认已过期，请重新发起部署。' }
+        }
+        try {
+          const current = resolve(stored)
+          const changed =
+            current.source.path !== stored.sourcePath ||
+            current.targetPath !== stored.targetPath ||
+            !existsSync(current.targetPath) ||
+            hashDir(current.source.path) !== stored.sourceHash ||
+            hashDir(current.targetPath) !== stored.targetHash ||
+            getDeploymentBySkillAndTargetId(options.db, current.skill.id, current.target.id) != null
+          if (changed) {
+            return { status: 'rejected', reason: 'plan-changed', message: '部署计划已变化，请重新检查并确认。' }
+          }
+        } catch {
           return { status: 'rejected', reason: 'plan-changed', message: '部署计划已变化，请重新检查并确认。' }
         }
-      } catch {
-        return { status: 'rejected', reason: 'plan-changed', message: '部署计划已变化，请重新检查并确认。' }
-      }
-      return execute(stored, true)
+        return execute(stored, true)
+      })
     }
   }
 }
