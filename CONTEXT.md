@@ -31,6 +31,10 @@ _Avoid_: Deployment, file operation
 用户对某一个完整且仍有效的 Deployment Request 风险计划所作的一次性授权，可同时包含外部内容覆盖和模式降级。
 _Avoid_: Overwrite flag, reusable permission
 
+**Path-free Mutation（无路径变更请求）**:
+renderer 发起 Deployment 变更时只提交 Source ID、Discovery Target ID、Deployment ID 或 Confirmation ID；路径、平台能力、覆盖标记和备份位置均由主进程 Facade 解析。
+_Avoid_: Path DTO, renderer-side deployment plan
+
 **Recovery-required Deployment（待恢复部署）**:
 部署操作中断或补偿失败后，无法安全自动判断应保留哪一侧内容的 Deployment 状态，需要用户检查、重试或从备份恢复。
 _Avoid_: Drift, automatic rollback

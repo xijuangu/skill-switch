@@ -40,6 +40,18 @@ function tool(targets: Array<{ id: string; path: string }>): ToolConfig {
 afterEach(() => databases.splice(0).forEach((db) => db.close()))
 
 describe('deployment semantic identity expansion', () => {
+  test('resolved identity columns are enforced as an all-or-nothing pair', () => {
+    const db = createDb()
+    const { skillId, sourceId } = seed(db)
+    expect(() => {
+      db.prepare(`INSERT INTO deployments
+        (skill_id, target_tool, target_path, mode, source_path, deployed_at, source_hash_at_deploy, source_id)
+        VALUES (?, 'codex', '/target/demo', 'copy', '/src/demo', 'now', 'hash', ?)`)
+        .run(skillId, sourceId)
+    }).toThrow(/resolve together/)
+    expect(() => upsertDeployment(db, skillId, 'codex', '/target/demo', 'copy', '/src/demo', 'hash')).not.toThrow()
+  })
+
   test('new deployments can persist source and target IDs for multiple targets of one tool', () => {
     const db = createDb()
     const { skillId, sourceId } = seed(db)

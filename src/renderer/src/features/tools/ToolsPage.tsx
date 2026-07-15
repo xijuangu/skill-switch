@@ -20,7 +20,7 @@ export function ToolsPage({
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [busyKey, setBusyKey] = useState<DriftKey | null>(null)
   const [confirmUndeploy, setConfirmUndeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
-  const [confirmRemoveManifest, setConfirmRemoveManifest] = useState<{ skillId: number; targetTool: string; skillName: string } | null>(null)
+  const [confirmRemoveManifest, setConfirmRemoveManifest] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmRedeploy, setConfirmRedeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [redeployRisk, setRedeployRisk] = useState<ConfirmationRequiredView | null>(null)
 
@@ -55,10 +55,10 @@ export function ToolsPage({
 
   const handleRemoveFromManifest = async () => {
     if (!confirmRemoveManifest) return
-    const { skillId, targetTool } = confirmRemoveManifest
+    const { deploymentId, skillId, targetTool } = confirmRemoveManifest
     setBusyKey({ skillId, targetTool })
     try {
-      await window.api.removeFromManifest(skillId, targetTool)
+      await window.api.removeFromManifest(deploymentId)
       await onRefresh()
       success('已从清单移除')
       setConfirmRemoveManifest(null)
@@ -120,7 +120,7 @@ export function ToolsPage({
       'target-modified': '部署目标已被修改，将用当前来源覆盖。',
       'mode-degraded': `请求模式 ${redeployRisk.facts.requestedMode} 不可用，实际将使用 ${redeployRisk.facts.actualMode}。`
     })[reason]),
-    `目标：${redeployRisk.facts.targetPath}`,
+    `目标：${redeployRisk.facts.targetDisplayName}`,
     redeployRisk.facts.backup.required
       ? `覆盖前会备份到：${redeployRisk.facts.backup.directory ?? '应用备份目录'}`
       : '本次不会创建外部内容备份。'
@@ -163,7 +163,7 @@ export function ToolsPage({
               busyKey={busyKey}
               onUndeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmUndeploy({ deploymentId, skillId, targetTool, skillName })}
               onRedeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmRedeploy({ deploymentId, skillId, targetTool, skillName })}
-              onRemoveFromManifest={(skillId, targetTool, skillName) => setConfirmRemoveManifest({ skillId, targetTool, skillName })}
+              onRemoveFromManifest={(deploymentId, skillId, targetTool, skillName) => setConfirmRemoveManifest({ deploymentId, skillId, targetTool, skillName })}
             />
           ))}
         </ul>
@@ -230,7 +230,7 @@ function ToolCard({
   busyKey: DriftKey | null
   onUndeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
   onRedeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
-  onRemoveFromManifest: (skillId: number, targetTool: string, skillName: string) => void
+  onRemoveFromManifest: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
 }) {
   const { config, drifts } = tool
   const managed = drifts.filter((d) => d.kind !== 'external')
@@ -299,7 +299,7 @@ function ToolCard({
                       busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
                       onUndeploy={() => d.deployment && onUndeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                       onRedeploy={() => d.deployment && onRedeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
-                      onRemoveFromManifest={() => onRemoveFromManifest(d.skillId, d.targetTool, d.skillName)}
+                      onRemoveFromManifest={() => d.deployment && onRemoveFromManifest(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                     />
                   ))}
                 </ul>

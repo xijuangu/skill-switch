@@ -30,15 +30,19 @@ export type DeploymentConfirmationReason =
 
 export interface DeploymentConfirmationFacts {
   skillName: string
-  targetPath: string
+  targetDisplayName: string
   reasons: DeploymentConfirmationReason[]
   requestedMode: DeployMode
   actualMode: DeployMode
   backup: { required: boolean; directory: string | null }
 }
 
+export type DeploymentCompletedResult = Omit<DeployResult, 'targetPath' | 'sourceHashAtDeploy'> & {
+  targetDisplayName: string
+}
+
 export type DeploymentOutcome =
-  | { status: 'completed'; deploymentId: number; result: DeployResult }
+  | { status: 'completed'; deploymentId: number; result: DeploymentCompletedResult }
   | {
       status: 'confirmation-required'
       confirmationId: string
@@ -325,7 +329,7 @@ export function createDeploymentFacade(options: {
       expiresAt,
       facts: {
         skillName: plan.resolved.skill.name,
-        targetPath: plan.resolved.targetPath,
+        targetDisplayName: plan.resolved.tool.displayName,
         reasons: plan.reasons,
         requestedMode: plan.request.requestedMode,
         actualMode: plan.actualMode,
@@ -374,7 +378,12 @@ export function createDeploymentFacade(options: {
     }
     const deployment = getDeploymentBySkillAndTargetId(options.db, resolved.skill.id, resolved.target.id)
     if (!deployment) throw new Error('deployment manifest was not persisted')
-    return { status: 'completed', deploymentId: deployment.id, result }
+    const { targetPath: _targetPath, sourceHashAtDeploy: _sourceHash, ...safeResult } = result
+    return {
+      status: 'completed',
+      deploymentId: deployment.id,
+      result: { ...safeResult, targetDisplayName: resolved.tool.displayName }
+    }
   }
 
   return {

@@ -8,3 +8,6 @@ Deployment 的资格判断、确认、模式降级、目标互斥、文件系统
 - 外部覆盖与模式降级合并为一次限时、单次 Deployment Confirmation，确认后执行前必须重新校验计划。
 - 同一 Discovery Target 上的 mutation 互斥，不同目标可以并行；进程内失败执行补偿，崩溃后只报告 Recovery-required Deployment，不自动猜测恢复方向。
 - 预期业务分支返回结构化结果，只有数据库损坏、未知文件系统错误或不变量破坏等非预期故障才抛异常。
+- Contract 阶段删除旧 `prepareDeploy`、路径型 `deploy` 和 IPC confirmation map；renderer 的 deploy/confirm/redeploy/undeploy 只提交语义 ID。
+- Source ID 与 Discovery Target ID 必须成对解析；未能精确迁移的旧 Deployment 保持成对为空并显示 `unresolved`，禁止半解析状态。
+- redeploy、undeploy、单个 inspect 和删除 Skill 时的级联取消部署均经过同一 Facade，不允许 registry 或读取流程绕过生命周期规则。

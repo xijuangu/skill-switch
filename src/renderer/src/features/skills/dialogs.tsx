@@ -6,7 +6,10 @@ import { groupByHash, shortHash, findSourceGroup } from './sourceGrouping'
 export type DeployMode = 'copy' | 'symlink'
 export type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
 export type SkillSourceView = SkillView['sources'][number]
-export type DeployResultView = Awaited<ReturnType<typeof window.api.deploy>>
+export type DeployResultView = Extract<
+  Awaited<ReturnType<typeof window.api.deploymentDeploy>>,
+  { status: 'completed' }
+>['result']
 export type DeployTargetOptionView = Awaited<ReturnType<typeof window.api.getDeployTargets>>[number]
 export type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 export type InstallResultView = Awaited<ReturnType<typeof window.api.installFromGitHub>>
@@ -96,15 +99,13 @@ export function DeployDialogContent({
 }) {
   const [settings, setSettings] = useState<SettingsView | null>(null)
   const [targetOptions, setTargetOptions] = useState<DeployTargetOptionView[]>([])
-  const [selectedTool, setSelectedTool] = useState('')
-  const [selectedTargetRoot, setSelectedTargetRoot] = useState('')
   const [selectedTargetId, setSelectedTargetId] = useState('')
   const [mode, setMode] = useState<DeployMode>('copy')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmationPlan, setConfirmationPlan] = useState<{
-    targetPath: string
-    confirmationToken: string
+    targetDisplayName: string
+    confirmationId: string
     reasons: Array<'external-overwrite' | 'target-modified' | 'mode-degraded'>
     requestedMode: 'copy' | 'symlink' | 'junction'
     actualMode: 'copy' | 'symlink' | 'junction'
@@ -114,23 +115,19 @@ export function DeployDialogContent({
   useEffect(() => {
     Promise.all([
       window.api.getSettings(),
-      window.api.getDeployTargets(skill.id, sourcePath)
+      window.api.getDeployTargets(skill.sources.find((source) => source.path === sourcePath)?.id ?? -1)
     ])
       .then(([s, options]) => {
         setSettings(s)
         setTargetOptions(options)
         const existing = options.find(
           (o) => o.eligible &&
-            skill.deployments.some((d) => d.target_path === o.targetPath)
+            skill.deployments.some((d) => d.target_id === o.targetId)
         )
         const firstSafe = options.find((o) => o.eligible)
         if (existing) {
-          setSelectedTool(existing.targetTool)
-          setSelectedTargetRoot(existing.targetRoot)
           setSelectedTargetId(existing.targetId)
         } else if (firstSafe) {
-          setSelectedTool(firstSafe.targetTool)
-          setSelectedTargetRoot(firstSafe.targetRoot)
           setSelectedTargetId(firstSafe.targetId)
         }
         setMode(s.platform.canSymlink ? 'symlink' : 'copy')
@@ -141,17 +138,17 @@ export function DeployDialogContent({
   }, [skill.id, skill.deployments, sourcePath])
 
   const targetSelectionValid = targetOptions.some(
-    (o) => o.targetRoot === selectedTargetRoot && o.eligible
+    (o) => o.targetId === selectedTargetId && o.eligible
   )
   const canSymlink = settings?.platform.canSymlink ?? false
   const canJunction = settings?.platform.canJunction ?? false
   const isWindowsNormalUser = !canSymlink && canJunction
   const selectedDeployment = skill.deployments.find(
-    (d) => d.target_tool === selectedTool
+    (d) => d.target_id === selectedTargetId
   )
 
   const handleDeploy = async () => {
-    if (!selectedTool || !selectedTargetRoot || !selectedTargetId || !targetSelectionValid) return
+    if (!selectedTargetId || !targetSelectionValid) return
     setBusy(true)
     setError(null)
     try {
@@ -164,8 +161,8 @@ export function DeployDialogContent({
       })
       if (outcome.status === 'confirmation-required') {
         setConfirmationPlan({
-          targetPath: outcome.facts.targetPath,
-          confirmationToken: outcome.confirmationId,
+          targetDisplayName: outcome.facts.targetDisplayName,
+          confirmationId: outcome.confirmationId,
           reasons: outcome.facts.reasons,
           requestedMode: outcome.facts.requestedMode,
           actualMode: outcome.facts.actualMode,
@@ -189,7 +186,7 @@ export function DeployDialogContent({
     setBusy(true)
     setError(null)
     try {
-      const outcome = await window.api.deploymentConfirm(confirmationPlan.confirmationToken)
+      const outcome = await window.api.deploymentConfirm(confirmationPlan.confirmationId)
       if (outcome.status !== 'completed') {
         throw new Error(outcome.status === 'confirmation-required' ? '部署计划已变化，请重新确认' : outcome.message)
       }
@@ -249,12 +246,9 @@ export function DeployDialogContent({
         <div>
           <label className="block text-xs font-medium text-foreground mb-1">目标工具</label>
           <select
-            value={selectedTargetRoot}
+            value={selectedTargetId}
             onChange={(e) => {
-              const selected = targetOptions.find((o) => o.targetRoot === e.target.value)
-              setSelectedTargetRoot(e.target.value)
-              setSelectedTool(selected?.targetTool ?? '')
-              setSelectedTargetId(selected?.targetId ?? '')
+              setSelectedTargetId(e.target.value)
             }}
             disabled={busy}
             className="w-full h-8 border border-border rounded bg-surface px-2.5 text-xs text-foreground focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
@@ -263,8 +257,8 @@ export function DeployDialogContent({
               <option value="" disabled>无可用工具目标</option>
             )}
             {targetOptions.map((o) => (
-              <option key={`${o.targetTool}:${o.targetRoot}`} value={o.targetRoot} disabled={!o.eligible}>
-                {o.displayName} — {o.targetRoot}
+              <option key={o.targetId} value={o.targetId} disabled={!o.eligible}>
+                {o.displayName}
                 {!o.eligible ? ` (不可用：${o.reason})` : ''}
               </option>
             ))}
@@ -321,7 +315,7 @@ export function DeployDialogContent({
             'target-modified': '已部署目标被外部修改，将用当前来源覆盖。',
             'mode-degraded': `请求模式 ${confirmationPlan.requestedMode} 不可用，实际将使用 ${confirmationPlan.actualMode}。`
           })[reason]),
-          `目标：${confirmationPlan.targetPath}`,
+          `目标：${confirmationPlan.targetDisplayName}`,
           confirmationPlan.backup.required
             ? `覆盖前会备份到：${confirmationPlan.backup.directory ?? '应用备份目录'}`
             : '本次不会创建外部内容备份。'

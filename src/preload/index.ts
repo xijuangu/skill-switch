@@ -5,8 +5,8 @@ const api = {
   scan: () => ipcRenderer.invoke('scan'),
   getSkills: () => ipcRenderer.invoke('getSkills'),
   getSettings: () => ipcRenderer.invoke('getSettings'),
-  getDeployTargets: (skillId: number, sourcePath: string) =>
-    ipcRenderer.invoke('getDeployTargets', skillId, sourcePath),
+  getDeployTargets: (sourceId: number) =>
+    ipcRenderer.invoke('getDeployTargets', sourceId),
   setPresetEnabled: (key: string, enabled: boolean) =>
     ipcRenderer.invoke('setPresetEnabled', key, enabled),
   setPresetPaths: (key: string, paths: string[]) =>
@@ -23,18 +23,14 @@ const api = {
     ipcRenderer.invoke('deployment:deploy', request),
   deploymentConfirm: (confirmationId: string) =>
     ipcRenderer.invoke('deployment:confirm', confirmationId),
-  prepareDeploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction', sourcePath: string, targetRoot?: string) =>
-    ipcRenderer.invoke('prepareDeploy', skillId, targetTool, mode, sourcePath, targetRoot),
-  deploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction', sourcePath: string, targetRoot?: string, confirmationToken?: string) =>
-    ipcRenderer.invoke('deploy', skillId, targetTool, mode, sourcePath, targetRoot, confirmationToken),
   // issue #22:漂移重新部署,target_path / source_path 由主进程从清单读取,
   // renderer 不传任何路径。
   redeploy: (deploymentId: number) => ipcRenderer.invoke('redeploy', deploymentId),
   undeploy: (deploymentId: number) => ipcRenderer.invoke('undeploy', deploymentId),
   getTools: () => ipcRenderer.invoke('getTools'),
   // Drift + Remove from Registry(#8)
-  removeFromManifest: (skillId: number, targetTool: string) =>
-    ipcRenderer.invoke('removeFromManifest', skillId, targetTool),
+  removeFromManifest: (deploymentId: number) =>
+    ipcRenderer.invoke('removeFromManifest', deploymentId),
   getDeploymentsForSkill: (skillId: number) =>
     ipcRenderer.invoke('getDeploymentsForSkill', skillId),
   viewSkillMd: (skillId: number, sourcePath?: string) =>

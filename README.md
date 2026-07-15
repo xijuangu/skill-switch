@@ -15,9 +15,9 @@ Index into central registry (~/.skill-switch/ccswitch.db — hybrid: index-only 
          ↓
 User picks a skill → "Deploy to..."
          ↓
-Pick target tool + mode (copy / symlink / Windows junction)
+Pick a semantic Discovery Target + requested mode (copy / symlink / Windows junction)
          ↓
-skill-switch copies or symlinks the skill into the target tool dir, writes deployment manifest
+The Deployment Facade validates IDs, confirms all risks, stages and atomically switches files, then writes the manifest
          ↓
 On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 ```
@@ -26,11 +26,13 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 
 - Scan & index skills from multiple tool directories (no file moving for existing skills)
 - Install new skills from GitHub repo (single + subpath), ZIP, or local directory
-- Deploy via copy / symlink / Windows junction (with auto-degrade on Windows)
-- Deployment manifest + drift detection (normal / drifted / external)
-- Conflict handling: self-managed overwrite / external backup-then-overwrite / mode-switch cleanup
+- Deploy via copy / symlink / Windows junction; every linked-to-copy degradation requires confirmation
+- Stable Source / Discovery Target / Deployment identities; renderer mutation calls never submit paths
+- Deployment manifest + authoritative per-Deployment inspection, including recovery-required crash evidence
+- Aggregated confirmation for external overwrite, modified targets, and mode degradation
+- Per-target mutation lock plus staging / rollback / manifest-last compensation
 - Backup system with rotation
-- Cross-platform: macOS + Windows
+- Cross-platform: macOS + Windows + Linux
 
 ## Tech Stack
 
@@ -77,6 +79,7 @@ Spec'd via `/grill-me` → `/to-prd` → `/to-issues`. See:
 - UI 可用性与浅色视觉系统升级 PRD: [issue #29](https://github.com/xijuangu/skill-switch/issues/29)
 - UI 升级 Slices: [issues #30–#34](https://github.com/xijuangu/skill-switch/issues)
 - Review 后修复与增强: [issues #52–#62](https://github.com/xijuangu/skill-switch/issues)（白屏、滚动条、Skeleton 静态化、ADR 0002 分层落实、来源按 hash 分组展示等）
+- Deployment 生命周期深模块: [issues #69–#78](https://github.com/xijuangu/skill-switch/issues)（稳定语义 ID、Facade、聚合确认、目标锁、可补偿文件系统事务与 contract 收口）
 
 ## Out of Scope (MVP)
 
@@ -96,6 +99,8 @@ Aligned with cc-switch's validated patterns:
 - SSOT (central SQLite)
 - Dual-layer storage (SQLite for syncable, JSON for device settings)
 - Atomic writes (temp file + rename)
+- Path-free renderer mutations (semantic IDs only)
+- Manifest-last filesystem transactions with explicit recovery evidence
 - Mutex-protected DB connection
 - Layered architecture (Commands → Services → DAO → Database)
 - Minimal intrusion (uninstalling skill-switch doesn't break tool skill dirs)

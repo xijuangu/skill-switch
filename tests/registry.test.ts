@@ -15,12 +15,21 @@ import {
 } from '../src/main/services/registry'
 import { getSkillByName, getSkillById, getAllSkills, upsertSkill } from '../src/main/db/dao/skills'
 import { getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
-import { getDeploymentsBySkillId } from '../src/main/db/dao/deployments'
-import { deploySkill } from '../src/main/services/deployer'
+import { getDeploymentById, getDeploymentsBySkillId } from '../src/main/db/dao/deployments'
+import { deploySkill, undeployDeployment } from '../src/main/services/deployer'
 import { listBackups } from '../src/main/services/backup'
 import { runInTransaction } from '../src/main/db/database'
 import type { ActiveScanDir } from '../src/main/services/tools-config'
 import type { SkillSource, ToolConfig } from '../src/main/types'
+
+function undeployForTest(db: import('../src/main/db/database').DB) {
+  return async (deploymentId: number) => {
+    const deployment = getDeploymentById(db, deploymentId)
+    if (!deployment) return { status: 'rejected' as const, message: 'missing deployment' }
+    undeployDeployment(db, deployment)
+    return { status: 'completed' as const }
+  }
+}
 
 /** 测试用:构造完整 SkillSource(repo_url/commit_sha 默认 null) */
 function mkSrc(partial: Partial<SkillSource> & Pick<SkillSource, 'id' | 'path' | 'hash'>): SkillSource {
@@ -707,7 +716,8 @@ describe('removeFromRegistry', () => {
 
     const result = await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir
+      backupsDir: backups.dir,
+      undeployDeployment: undeployForTest(db)
     })
 
     expect(result.skillName).toBe(skillName)
@@ -775,7 +785,8 @@ describe('removeFromRegistry', () => {
 
     const result = await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir
+      backupsDir: backups.dir,
+      undeployDeployment: undeployForTest(db)
     })
 
     expect(result.skillName).toBe(skillName)
@@ -830,7 +841,8 @@ describe('removeFromRegistry', () => {
     // 当前工具配置不可用,仍应使用 manifest.target_path
     const result = await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir
+      backupsDir: backups.dir,
+      undeployDeployment: undeployForTest(db)
     })
 
     expect(result.undeployedTools).toEqual(['codex'])
@@ -854,7 +866,8 @@ describe('removeFromRegistry', () => {
     await expect(
       removeFromRegistry(db, 99999, {
         centralSkillsDir: central.dir,
-        backupsDir: backups.dir
+        backupsDir: backups.dir,
+        undeployDeployment: undeployForTest(db)
       })
     ).rejects.toThrow(/skill not found/)
 
@@ -879,7 +892,8 @@ describe('removeFromRegistry', () => {
 
     const opts = {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir
+      backupsDir: backups.dir,
+      undeployDeployment: undeployForTest(db)
     }
 
     // 第一次调用成功

@@ -167,8 +167,8 @@ export function SkillsPage({
       ? ` (请求 ${result.degradedFrom}，使用 ${result.mode}: ${result.degradeReason ?? '已降级'})`
       : ''
     const msg = result.action === 'skipped'
-      ? `跳过 — ${result.targetPath} 已是最新`
-      : `已部署 (${result.action}) 到 ${result.targetPath}${degradeNote}`
+      ? `跳过 — ${result.targetDisplayName} 已是最新`
+      : `已部署 (${result.action}) 到 ${result.targetDisplayName}${degradeNote}`
     success(msg)
     await onRefresh()
     setDeployTarget(null)

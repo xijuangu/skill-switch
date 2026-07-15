@@ -16,6 +16,9 @@ import { upsertSkill } from '../src/main/db/dao/skills'
 import { upsertSource } from '../src/main/db/dao/skill-sources'
 import { deploySkill } from '../src/main/services/deployer'
 import { readSkillsView } from '../src/main/ipc/index'
+import { reconcileDeploymentIdentities } from '../src/main/services/deployment-identities'
+import { createDeploymentFacade } from '../src/main/services/deployment-facade'
+import type { DB } from '../src/main/db/database'
 import type { ToolConfig } from '../src/main/types'
 
 /** 构造测试用 ToolConfig */
@@ -31,6 +34,19 @@ function mkTool(key: string, paths: string[], enabled = true): ToolConfig {
     isCustom: false,
     exists: true
   }
+}
+
+function readView(db: DB, tools: ToolConfig[]) {
+  reconcileDeploymentIdentities(db, tools)
+  const facade = createDeploymentFacade({
+    db,
+    backupsDir: '/tmp',
+    getRuntime: () => ({
+      tools,
+      platform: { platform: 'test', canSymlink: true, canJunction: false }
+    })
+  })
+  return readSkillsView(db, tools, facade.inspect)
 }
 
 describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态', () => {
@@ -79,7 +95,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
       mkTool('codex', [codexTarget.dir]),
       mkTool('agents', [agentsTarget.dir])
     ]
-    const view = readSkillsView(db, toolConfigs)
+    const view = readView(db, toolConfigs)
     const skill = view.find((s) => s.id === skillId)!
     expect(skill).toBeDefined()
     expect(skill.deployments).toHaveLength(2)
@@ -139,7 +155,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
       canJunction: false
     })
 
-    const view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    const view = readView(db, [mkTool('codex', [target.dir])])
     const skill = view.find((s) => s.id === skillId)!
 
     // source 是 central-repo 类型,路径在中央仓库
@@ -170,7 +186,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     const skillId = upsertSkill(db, skillName, skillDir)
     upsertSource(db, skillId, skillDir, 'somehash', Date.now(), 'indexed')
 
-    const view = readSkillsView(db, [])
+    const view = readView(db, [])
     const skill = view.find((s) => s.id === skillId)!
     expect(skill.deployments).toHaveLength(0)
 
@@ -206,12 +222,12 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     })
 
     // 部署后 status = 目标存在(副本)
-    let view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    let view = readView(db, [mkTool('codex', [target.dir])])
     expect(view[0].deployments[0].status).toBe('normal')
 
     // 删 target → status 变为 目标缺失
     rmSync(targetDir, { recursive: true, force: true })
-    view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    view = readView(db, [mkTool('codex', [target.dir])])
     expect(view[0].deployments[0].status).toBe('drift')
 
     source.cleanup()
@@ -247,12 +263,12 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     })
 
     // 部署后 status = 目标存在(链接)
-    let view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    let view = readView(db, [mkTool('codex', [target.dir])])
     expect(view[0].deployments[0].status).toBe('normal')
 
     // 删源 → symlink 断裂 → status = 链接断裂
     rmSync(skillDir, { recursive: true, force: true })
-    view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    view = readView(db, [mkTool('codex', [target.dir])])
     expect(view[0].deployments[0].status).toBe('source-missing')
 
     source.cleanup()
@@ -287,7 +303,7 @@ describe('issue #23: readSkillsView 区分 source 与 deployment,含当前状态
     unlinkSync(targetDir)
     mkdirSync(targetDir)
 
-    const view = readSkillsView(db, [mkTool('codex', [target.dir])])
+    const view = readView(db, [mkTool('codex', [target.dir])])
     expect(view[0].deployments[0].status).toBe('link-mismatch')
 
     source.cleanup()

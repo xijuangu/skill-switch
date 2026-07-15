@@ -7,7 +7,6 @@
 
 import { ipcMain, dialog } from 'electron'
 import { homedir, tmpdir } from 'os'
-import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
 import type { DB } from '../db/database'
 import type {
@@ -36,6 +35,7 @@ import { scanAllTools } from '../services/scan-all'
 import { reconcileDeploymentIdentities } from '../services/deployment-identities'
 import { createDeploymentFacade, type DeploymentFacade } from '../services/deployment-facade'
 import { getAllSkills, getSkillById } from '../db/dao/skills'
+import { getSourceById } from '../db/dao/skill-sources'
 import {
   assertRegisteredSkillSource,
   computeConflict,
@@ -44,16 +44,11 @@ import {
   removeFromRegistry
 } from '../services/registry'
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
-import {
-  deploySkill,
-  detectDrift,
-  detectDriftsForTool,
-  inspectDeployTarget,
-} from '../services/deployer'
+import { detectDriftsForTool } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
 import {
-  deleteDeployment,
-  getDeploymentBySkillAndTool,
+  deleteDeploymentById,
+  getDeploymentBySkillAndTargetId,
   getDeploymentsBySkillId
 } from '../db/dao/deployments'
 import {
@@ -82,43 +77,29 @@ export interface DeployTargetOption {
   targetId: string
   targetTool: string
   displayName: string
-  targetRoot: string
-  targetPath: string
   eligible: boolean
   reason: string | null
 }
 
 export function readDeployTargetOptions(
   db: DB,
-  skillId: number,
-  skillName: string,
-  sourcePath: string,
+  sourceId: number,
   toolConfigs: ToolConfig[]
 ): DeployTargetOption[] {
+  const source = getSourceById(db, sourceId)
+  if (!source) throw new Error(`source not found: ${sourceId}`)
+  const skill = getSkillById(db, source.skill_id)
+  if (!skill) throw new Error(`skill not found for source: ${sourceId}`)
   return toolConfigs
     .filter((tool) => tool.enabled && tool.exists)
     .flatMap((tool) =>
-      tool.existingTargets.map(({ id: targetId, path: targetRoot }) => {
+      tool.existingTargets.map(({ id: targetId, path: targetRoot }, index) => {
         const targetPath = resolveWithin(
           targetRoot,
-          validateSkillName(skillName)
+          validateSkillName(skill.name)
         )
-        const existing = getDeploymentBySkillAndTool(db, skillId, tool.key)
-        if (
-          existing?.target_path != null &&
-          existing.target_path !== targetPath
-        ) {
-          return {
-            targetId,
-            targetTool: tool.key,
-            displayName: tool.displayName,
-            targetRoot,
-            targetPath,
-            eligible: false,
-            reason: `已部署到 ${existing.target_path}，更换路径前请先卸载`
-          }
-        }
-        const assessment = assessSafeDeployTarget(sourcePath, targetPath, {
+        const existing = getDeploymentBySkillAndTargetId(db, skill.id, targetId)
+        const assessment = assessSafeDeployTarget(source.path, targetPath, {
           allowExistingSymlinkToSource:
             existing != null &&
             (existing.mode === 'symlink' || existing.mode === 'junction')
@@ -126,9 +107,7 @@ export function readDeployTargetOptions(
         return {
           targetId,
           targetTool: tool.key,
-          displayName: tool.displayName,
-          targetRoot,
-          targetPath,
+          displayName: tool.existingTargets.length > 1 ? `${tool.displayName} (${index + 1})` : tool.displayName,
           ...assessment
         }
       })
@@ -157,9 +136,7 @@ export function readSkillsView(
       conflict: computeConflict(visibleSources, s.id),
       deployments: getDeploymentsBySkillId(db, s.id).map((d) => ({
         ...d,
-        status: (inspectDeployment?.(d.id) ?? detectDrift(
-          db, s.id, s.name, d.target_tool, d.target_path ?? ''
-        )).kind
+        status: inspectDeployment?.(d.id)?.kind ?? 'unresolved'
       }))
     })
   }
@@ -252,44 +229,7 @@ function assertDeployMode(value: unknown): DeployMode {
   return value
 }
 
-/** 解析目标工具的第一个存在路径(部署目标目录)。不存在抛错。 */
-function resolveToolSkillDir(targetTool: string, requestedPath?: string): string {
-  const safeTool = validateToolKey(targetTool)
-  const settings = readSettings(SETTINGS_PATH)
-  const configs = resolveToolConfigs(settings, homedir())
-  const tool = configs.find((c) => c.key === safeTool && c.enabled && c.exists)
-  if (!tool || tool.existingPaths.length === 0) {
-    throw new Error(`tool not available: ${safeTool}`)
-  }
-  const existing = tool.existingPaths.map((path) =>
-    assertAbsolutePath(path, 'tool skill directory')
-  )
-  if (requestedPath !== undefined) {
-    const requested = assertAbsolutePath(requestedPath, 'target tool path')
-    if (!existing.includes(requested)) {
-      throw new Error(`target path is not configured for tool ${safeTool}`)
-    }
-    return requested
-  }
-  if (existing.length !== 1) {
-    throw new Error(`tool ${safeTool} has multiple paths; choose an exact target path`)
-  }
-  return existing[0]
-}
-
 export function registerIpcHandlers(db: DB): void {
-  const confirmationTtlMs = 5 * 60_000
-  const maxDeployConfirmations = 100
-  const deployConfirmations = new Map<
-    string,
-    {
-      skillId: number
-      targetTool: string
-      sourcePath: string
-      targetRoot: string
-      expiresAt: number
-    }
-  >()
   const deploymentFacade = createDeploymentFacade({
     db,
     backupsDir: BACKUPS_DIR,
@@ -322,17 +262,12 @@ export function registerIpcHandlers(db: DB): void {
     return buildSettingsView(settings)
   })
 
-  ipcMain.handle('getDeployTargets', async (_e, skillId: number, sourcePath: string) => {
-    const safeSkillId = assertInteger(skillId, 'skillId')
-    const skill = getSkillById(db, safeSkillId)
-    if (!skill) throw new Error(`skill not found: ${safeSkillId}`)
-    const safeSource = assertRegisteredSkillSource(db, safeSkillId, sourcePath)
+  ipcMain.handle('getDeployTargets', async (_e, sourceId: number) => {
+    const safeSourceId = assertInteger(sourceId, 'sourceId')
     const settings = readSettings(SETTINGS_PATH)
     return readDeployTargetOptions(
       db,
-      safeSkillId,
-      skill.name,
-      safeSource,
+      safeSourceId,
       resolveToolConfigs(settings, homedir())
     )
   })
@@ -433,101 +368,6 @@ export function registerIpcHandlers(db: DB): void {
     deploymentFacade.confirm(assertNonEmptyString(confirmationId, 'confirmationId'))
   )
 
-  ipcMain.handle('prepareDeploy', async (_e, skillId: number, targetTool: string, mode: DeployMode, sourcePath: string, targetRoot?: string) => {
-    const safeSkillId = assertInteger(skillId, 'skillId')
-    const safeTool = validateToolKey(targetTool)
-    const safeMode = assertDeployMode(mode)
-    const skill = getSkillById(db, safeSkillId)
-    if (!skill) throw new Error(`skill not found: ${safeSkillId}`)
-    const safeSource = assertRegisteredSkillSource(db, safeSkillId, sourcePath)
-    const safeTargetRoot = resolveToolSkillDir(safeTool, targetRoot)
-    const targetPath = resolveWithin(
-      safeTargetRoot,
-      validateSkillName(skill.name)
-    )
-    const kind = inspectDeployTarget(
-      db,
-      safeSkillId,
-      safeTool,
-      targetPath,
-      safeMode
-    )
-    let confirmationToken: string | null = null
-    if (kind === 'external-overwrite') {
-      const now = Date.now()
-      for (const [token, confirmation] of deployConfirmations) {
-        if (confirmation.expiresAt <= now) deployConfirmations.delete(token)
-      }
-      while (deployConfirmations.size >= maxDeployConfirmations) {
-        const oldestToken = deployConfirmations.keys().next().value
-        if (typeof oldestToken !== 'string') break
-        deployConfirmations.delete(oldestToken)
-      }
-      confirmationToken = randomUUID()
-      deployConfirmations.set(confirmationToken, {
-        skillId: safeSkillId,
-        targetTool: safeTool,
-        sourcePath: safeSource,
-        targetRoot: safeTargetRoot,
-        expiresAt: now + confirmationTtlMs
-      })
-    }
-    return { kind, targetPath, confirmationToken }
-  })
-
-  ipcMain.handle('deploy', async (_e, skillId: number, targetTool: string, mode: DeployMode, sourcePath: string, targetRoot?: string, confirmationToken?: string) => {
-    const safeSkillId = assertInteger(skillId, 'skillId')
-    const safeTool = validateToolKey(targetTool)
-    const safeMode = assertDeployMode(mode)
-    const skill = getSkillById(db, safeSkillId)
-    if (!skill) {
-      throw new Error(`skill not found: ${safeSkillId}`)
-    }
-    const safeSource = assertRegisteredSkillSource(db, safeSkillId, sourcePath)
-    const toolSkillDir = resolveToolSkillDir(safeTool, targetRoot)
-    const targetDir = resolveWithin(toolSkillDir, validateSkillName(skill.name))
-    const targetKind = inspectDeployTarget(
-      db,
-      safeSkillId,
-      safeTool,
-      targetDir,
-      safeMode
-    )
-    let allowExternalOverwrite = false
-    if (targetKind === 'external-overwrite') {
-      const token =
-        typeof confirmationToken === 'string'
-          ? deployConfirmations.get(confirmationToken)
-          : undefined
-      if (
-        !token ||
-        token.expiresAt < Date.now() ||
-        token.skillId !== safeSkillId ||
-        token.targetTool !== safeTool ||
-        token.sourcePath !== safeSource ||
-        token.targetRoot !== toolSkillDir
-      ) {
-        throw new Error('external skill overwrite requires a valid confirmation token')
-      }
-      deployConfirmations.delete(confirmationToken!)
-      allowExternalOverwrite = true
-    }
-    // #9: 从 settings 注入平台能力,deployer 据此决定 junction fallback
-    const settings = readSettings(SETTINGS_PATH)
-    return deploySkill(db, {
-      skillId: safeSkillId,
-      skillName: skill.name,
-      targetTool: safeTool,
-      mode: safeMode,
-      sourcePath: safeSource,
-      targetDir,
-      backupsDir: BACKUPS_DIR,
-      canSymlink: settings.platform.canSymlink,
-      canJunction: settings.platform.canJunction,
-      allowExternalOverwrite
-    })
-  })
-
   ipcMain.handle('undeploy', async (_e, deploymentId: number) =>
     deploymentFacade.undeploy(assertInteger(deploymentId, 'deploymentId'))
   )
@@ -545,13 +385,9 @@ export function registerIpcHandlers(db: DB): void {
    * 用于 ⚠️drift 状态(目标已被用户手动删了,清单与现实对齐)。
    * 与 undeploy 的区别:undeploy 同时做 fs 清理 + 删记录;removeFromManifest 只删记录。
    */
-  ipcMain.handle('removeFromManifest', async (_e, skillId: number, targetTool: string) => {
-    deleteDeployment(
-      db,
-      assertInteger(skillId, 'skillId'),
-      validateToolKey(targetTool)
-    )
-  })
+  ipcMain.handle('removeFromManifest', async (_e, deploymentId: number) =>
+    deleteDeploymentById(db, assertInteger(deploymentId, 'deploymentId'))
+  )
 
   /**
    * 查 skill 的所有部署(用于 Skills 页 "Undeploy from..." 子菜单列出目标工具)。

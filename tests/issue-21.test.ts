@@ -11,12 +11,13 @@ import { join } from 'path'
 import { createTempDir, createTempDb } from './helpers/temp'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { upsertSource } from '../src/main/db/dao/skill-sources'
-import { getDeploymentsBySkillId, getDeploymentsByTool } from '../src/main/db/dao/deployments'
+import { getDeploymentById, getDeploymentsBySkillId, getDeploymentsByTool } from '../src/main/db/dao/deployments'
 import { removeFromRegistry } from '../src/main/services/registry'
 import {
   deploySkill,
   undeploySkill,
-  redeploySkill
+  redeploySkill,
+  undeployDeployment
 } from '../src/main/services/deployer'
 import { deleteDeployment } from '../src/main/db/dao/deployments'
 // issue #21: 直接 import IPC 层抽出的真实读函数,不再本地重实现
@@ -205,7 +206,13 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     // removeFromRegistry
     await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
-      backupsDir: backups.dir
+      backupsDir: backups.dir,
+      undeployDeployment: async (deploymentId) => {
+        const deployment = getDeploymentById(db, deploymentId)
+        if (!deployment) return { status: 'rejected', message: 'missing deployment' }
+        undeployDeployment(db, deployment)
+        return { status: 'completed' }
+      }
     })
 
     // getSkills 不含该 skill

@@ -187,7 +187,7 @@ describe('Deployment Facade', () => {
     const outcome = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
     expect(outcome).toMatchObject({
       status: 'confirmation-required', confirmationId: 'confirmation-1',
-      facts: { targetPath: external, reasons: ['external-overwrite'] }
+      facts: { targetDisplayName: 'Codex', reasons: ['external-overwrite'] }
     })
     expect(await facade.confirm('confirmation-1')).toMatchObject({
       status: 'completed', result: { action: 'external-overwritten' }
@@ -207,7 +207,7 @@ describe('Deployment Facade', () => {
     expect(outcome).toMatchObject({
       status: 'confirmation-required',
       facts: {
-        targetPath: external,
+        targetDisplayName: 'Codex',
         requestedMode: 'symlink',
         actualMode: 'copy',
         reasons: ['external-overwrite', 'mode-degraded'],

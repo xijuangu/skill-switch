@@ -76,8 +76,6 @@ export interface DeployTargetOptionView {
   targetId: string
   targetTool: string
   displayName: string
-  targetRoot: string
-  targetPath: string
   eligible: boolean
   reason: string | null
 }
@@ -125,8 +123,7 @@ export type DeployActionView =
 export interface DeployResultView {
   action: DeployActionView
   mode: DeployModeView
-  targetPath: string
-  sourceHashAtDeploy: string
+  targetDisplayName: string
   previousMode?: DeployModeView
   /** #9: 原始请求 mode,仅当降级(实际 mode ≠ 请求 mode)时设置 */
   degradedFrom?: DeployModeView
@@ -142,7 +139,7 @@ export type DeploymentOutcomeView =
       expiresAt: number
       facts: {
         skillName: string
-        targetPath: string
+        targetDisplayName: string
         reasons: Array<'external-overwrite' | 'target-modified' | 'mode-degraded'>
         requestedMode: DeployModeView
         actualMode: DeployModeView
@@ -235,10 +232,7 @@ declare global {
       scan: () => Promise<MultiScanResultView>
       getSkills: () => Promise<SkillWithConflictView[]>
       getSettings: () => Promise<SettingsView>
-      getDeployTargets: (
-        skillId: number,
-        sourcePath: string
-      ) => Promise<DeployTargetOptionView[]>
+      getDeployTargets: (sourceId: number) => Promise<DeployTargetOptionView[]>
       setPresetEnabled: (key: string, enabled: boolean) => Promise<SettingsView>
       setPresetPaths: (key: string, paths: string[]) => Promise<SettingsView>
       addCustomTool: (tool: CustomToolInput) => Promise<SettingsView>
@@ -254,35 +248,12 @@ declare global {
         requestedMode: DeployModeView
       }) => Promise<DeploymentOutcomeView>
       deploymentConfirm: (confirmationId: string) => Promise<DeploymentOutcomeView>
-      prepareDeploy: (
-        skillId: number,
-        targetTool: string,
-        mode: DeployModeView,
-        sourcePath: string,
-        targetRoot?: string
-      ) => Promise<{
-        kind:
-          | 'created'
-          | 'managed-update'
-          | 'mode-switch'
-          | 'external-overwrite'
-        targetPath: string
-        confirmationToken: string | null
-      }>
-      deploy: (
-        skillId: number,
-        targetTool: string,
-        mode: DeployModeView,
-        sourcePath: string,
-        targetRoot?: string,
-        confirmationToken?: string
-      ) => Promise<DeployResultView>
       // issue #22:漂移重新部署,target_path / source_path 由主进程从清单读取
       redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
       undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       getTools: () => Promise<ToolWithDriftsView[]>
       // Drift + Remove from Registry (#8)
-      removeFromManifest: (skillId: number, targetTool: string) => Promise<void>
+      removeFromManifest: (deploymentId: number) => Promise<void>
       getDeploymentsForSkill: (skillId: number) => Promise<DeploymentView[]>
       viewSkillMd: (skillId: number, sourcePath?: string) => Promise<{ content: string; path: string } | null>
       removeFromRegistry: (

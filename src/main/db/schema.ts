@@ -49,6 +49,18 @@ CREATE INDEX IF NOT EXISTS idx_deployments_skill_id ON deployments(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_tool);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_skill_target_id
   ON deployments(skill_id, target_id) WHERE target_id IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS trg_deployments_identity_pair_insert
+BEFORE INSERT ON deployments
+WHEN (NEW.source_id IS NULL) != (NEW.target_id IS NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'deployment source_id and target_id must resolve together');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_deployments_identity_pair_update
+BEFORE UPDATE OF source_id, target_id ON deployments
+WHEN (NEW.source_id IS NULL) != (NEW.target_id IS NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'deployment source_id and target_id must resolve together');
+END;
 `
 
 /**
@@ -144,6 +156,18 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
       CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_tool);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_skill_target_id
         ON deployments(skill_id, target_id) WHERE target_id IS NOT NULL;
+      CREATE TRIGGER IF NOT EXISTS trg_deployments_identity_pair_insert
+      BEFORE INSERT ON deployments
+      WHEN (NEW.source_id IS NULL) != (NEW.target_id IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'deployment source_id and target_id must resolve together');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_deployments_identity_pair_update
+      BEFORE UPDATE OF source_id, target_id ON deployments
+      WHEN (NEW.source_id IS NULL) != (NEW.target_id IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'deployment source_id and target_id must resolve together');
+      END;
     `)
   }
 }

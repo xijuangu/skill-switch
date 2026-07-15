@@ -3,6 +3,7 @@ import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { createTempDb, createTempDir } from './helpers/temp'
 import { upsertSkill } from '../src/main/db/dao/skills'
+import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { readDeployTargetOptions } from '../src/main/ipc/index'
 import type { ToolConfig } from '../src/main/types'
 
@@ -29,12 +30,12 @@ describe('deploy target options', () => {
     const sourcePath = join(sourceRoot.dir, skillName)
     mkdirSync(sourcePath)
     const skillId = upsertSkill(db, skillName, sourcePath)
+    upsertSource(db, skillId, sourcePath, 'hash', 0, 'indexed')
+    const sourceId = getSourceByPath(db, sourcePath)!.id
 
     const options = readDeployTargetOptions(
       db,
-      skillId,
-      skillName,
-      sourcePath,
+      sourceId,
       [tool('self', sourceRoot.dir), tool('safe', safeRoot.dir)]
     )
 
@@ -43,7 +44,7 @@ describe('deploy target options', () => {
     })
     expect(options.find((option) => option.targetTool === 'safe')).toMatchObject({
       eligible: true,
-      targetPath: join(safeRoot.dir, skillName)
+      targetId: 'target-safe'
     })
 
     sourceRoot.cleanup()

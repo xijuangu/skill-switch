@@ -25,11 +25,9 @@ import {
   updatePrimarySourcePath
 } from '../db/dao/skills'
 import {
-  getDeploymentsBySkillId,
-  deleteDeployment
+  getDeploymentsBySkillId
 } from '../db/dao/deployments'
 import { runInTransaction } from '../db/database'
-import { undeploySkill } from './deployer'
 import { createBackup } from './backup'
 import {
   assertAbsolutePath,
@@ -201,7 +199,7 @@ export interface RemoveFromRegistryOptions {
   centralSkillsDir: string
   backupsDir: string
   /** Production callers route every deployment mutation through the Facade. */
-  undeployDeployment?: (deploymentId: number) => Promise<{
+  undeployDeployment: (deploymentId: number) => Promise<{
     status: 'completed' | 'rejected' | 'recovery-required'
     message?: string
   }>
@@ -272,18 +270,9 @@ export async function removeFromRegistry(
   const undeployedTools: string[] = []
   const deployments = getDeploymentsBySkillId(db, skillId)
   for (const dep of deployments) {
-    if (opts.undeployDeployment) {
-      const outcome = await opts.undeployDeployment(dep.id)
-      if (outcome.status !== 'completed') {
-        throw new Error(outcome.message ?? `unable to undeploy deployment ${dep.id}`)
-      }
-    } else {
-      // Expand-phase compatibility for non-IPC callers; #78 removes this path.
-      if (dep.target_path == null) {
-        deleteDeployment(db, skillId, dep.target_tool)
-      } else {
-        undeploySkill(db, skillId, dep.target_tool)
-      }
+    const outcome = await opts.undeployDeployment(dep.id)
+    if (outcome.status !== 'completed') {
+      throw new Error(outcome.message ?? `unable to undeploy deployment ${dep.id}`)
     }
     undeployedTools.push(dep.target_tool)
   }
