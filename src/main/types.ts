@@ -182,6 +182,7 @@ export interface DeployOptions {
   canJunction: boolean
   /** Must be true only after an explicit external-overwrite confirmation. */
   allowExternalOverwrite?: boolean
+  identity?: { sourceId: number; targetId: string }
 }
 
 /** 部署动作类型(用于 UI 反馈与测试断言) */

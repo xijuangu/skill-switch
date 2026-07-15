@@ -63,6 +63,10 @@ export function getSourceByPath(db: DB, path: string): SkillSource | undefined {
     .get(path) as SkillSource | undefined
 }
 
+export function getSourceById(db: DB, id: number): SkillSource | undefined {
+  return db.prepare('SELECT * FROM skill_sources WHERE id = ?').get(id) as SkillSource | undefined
+}
+
 /** 按 skill_id 删除所有 source */
 export function deleteSourcesBySkillId(db: DB, skillId: number): void {
   db.prepare('DELETE FROM skill_sources WHERE skill_id = ?').run(skillId)

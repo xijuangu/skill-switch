@@ -32,6 +32,7 @@ import type {
 } from '../types'
 import {
   deleteDeployment,
+  getDeploymentBySkillAndTargetId,
   getDeploymentBySkillAndTool,
   getDeploymentsByTool,
   upsertDeployment
@@ -228,7 +229,9 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
   // 合法地等于 source(链接就是指向源的)。此时 mode-switch / 更新是合法操作
   // (cleanup 会先 unlink 旧链接,不会删源),因此传 allowExistingSymlinkToSource
   // 跳过 realpath-自部署 检查。lexical 包含检查始终执行。
-  const existing = getDeploymentBySkillAndTool(db, opts.skillId, opts.targetTool)
+  const existing = opts.identity
+    ? getDeploymentBySkillAndTargetId(db, opts.skillId, opts.identity.targetId)
+    : getDeploymentBySkillAndTool(db, opts.skillId, opts.targetTool)
   assertSafeDeployTarget(opts.sourcePath, opts.targetDir, {
     // 仅当现有部署是 symlink/junction 时,target 的 realpath 才合法地等于源
     // (链接指向源);copy 模式的 target 是独立目录,realpath 不同于源,无需豁免,
@@ -352,7 +355,8 @@ export function deploySkill(db: DB, opts: DeployOptions): DeployResult {
       opts.targetDir,
       actualMode,
       opts.sourcePath,
-      sourceHash
+      sourceHash,
+      opts.identity
     )
   }
 

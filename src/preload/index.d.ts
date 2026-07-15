@@ -134,6 +134,20 @@ export interface DeployResultView {
   degradeReason?: string
 }
 
+export type DeploymentOutcomeView =
+  | { status: 'completed'; deploymentId: number; result: DeployResultView }
+  | {
+      status: 'confirmation-required'
+      confirmationId: string
+      expiresAt: number
+      facts: { skillName: string; targetPath: string; reason: 'external-overwrite' }
+    }
+  | {
+      status: 'rejected'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed'
+      message: string
+    }
+
 export interface DeploymentView {
   id: number
   skill_id: number
@@ -205,6 +219,12 @@ declare global {
       restoreBackup: (backupId: string) => Promise<void>
       deleteBackup: (backupId: string) => Promise<void>
       // Deploy
+      deploymentDeploy: (request: {
+        sourceId: number
+        targetId: string
+        requestedMode: DeployModeView
+      }) => Promise<DeploymentOutcomeView>
+      deploymentConfirm: (confirmationId: string) => Promise<DeploymentOutcomeView>
       prepareDeploy: (
         skillId: number,
         targetTool: string,

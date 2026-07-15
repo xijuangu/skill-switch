@@ -98,6 +98,7 @@ export function DeployDialogContent({
   const [targetOptions, setTargetOptions] = useState<DeployTargetOptionView[]>([])
   const [selectedTool, setSelectedTool] = useState('')
   const [selectedTargetRoot, setSelectedTargetRoot] = useState('')
+  const [selectedTargetId, setSelectedTargetId] = useState('')
   const [mode, setMode] = useState<DeployMode>('copy')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -122,9 +123,11 @@ export function DeployDialogContent({
         if (existing) {
           setSelectedTool(existing.targetTool)
           setSelectedTargetRoot(existing.targetRoot)
+          setSelectedTargetId(existing.targetId)
         } else if (firstSafe) {
           setSelectedTool(firstSafe.targetTool)
           setSelectedTargetRoot(firstSafe.targetRoot)
+          setSelectedTargetId(firstSafe.targetId)
         }
         setMode(s.platform.canSymlink ? 'symlink' : 'copy')
       })
@@ -144,28 +147,27 @@ export function DeployDialogContent({
   )
 
   const handleDeploy = async () => {
-    if (!selectedTool || !selectedTargetRoot || !targetSelectionValid) return
+    if (!selectedTool || !selectedTargetRoot || !selectedTargetId || !targetSelectionValid) return
     setBusy(true)
     setError(null)
     try {
-      const plan = await window.api.prepareDeploy(
-        skill.id, selectedTool, mode, sourcePath, selectedTargetRoot
-      )
-      if (plan.kind === 'external-overwrite') {
-        if (!plan.confirmationToken) {
-          throw new Error('无法获取外部覆盖确认令牌')
-        }
+      const source = skill.sources.find((candidate) => candidate.path === sourcePath)
+      if (!source) throw new Error('所选来源已失效，请刷新后重试')
+      const outcome = await window.api.deploymentDeploy({
+        sourceId: source.id,
+        targetId: selectedTargetId,
+        requestedMode: mode
+      })
+      if (outcome.status === 'confirmation-required') {
         setExternalOverwritePlan({
-          targetPath: plan.targetPath,
-          confirmationToken: plan.confirmationToken
+          targetPath: outcome.facts.targetPath,
+          confirmationToken: outcome.confirmationId
         })
         setBusy(false)
         return
       }
-      const result = await window.api.deploy(
-        skill.id, selectedTool, mode, sourcePath, selectedTargetRoot
-      )
-      await completeMutation(result, onDone)
+      if (outcome.status === 'rejected') throw new Error(outcome.message)
+      await completeMutation(outcome.result, onDone)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -174,16 +176,16 @@ export function DeployDialogContent({
   }
 
   const handleExternalOverwriteConfirm = async () => {
-    if (!externalOverwritePlan || !selectedTool || !selectedTargetRoot) return
+    if (!externalOverwritePlan) return
     setBusy(true)
     setError(null)
     try {
-      const result = await window.api.deploy(
-        skill.id, selectedTool, mode, sourcePath, selectedTargetRoot,
-        externalOverwritePlan.confirmationToken
-      )
+      const outcome = await window.api.deploymentConfirm(externalOverwritePlan.confirmationToken)
+      if (outcome.status !== 'completed') {
+        throw new Error(outcome.status === 'rejected' ? outcome.message : '部署计划已变化，请重新确认')
+      }
       setExternalOverwritePlan(null)
-      await completeMutation(result, onDone)
+      await completeMutation(outcome.result, onDone)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -243,6 +245,7 @@ export function DeployDialogContent({
               const selected = targetOptions.find((o) => o.targetRoot === e.target.value)
               setSelectedTargetRoot(e.target.value)
               setSelectedTool(selected?.targetTool ?? '')
+              setSelectedTargetId(selected?.targetId ?? '')
             }}
             disabled={busy}
             className="w-full h-8 border border-border rounded bg-surface px-2.5 text-xs text-foreground focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"

@@ -34,6 +34,7 @@ import {
 } from '../services/tools-config'
 import { scanAllTools } from '../services/scan-all'
 import { reconcileDeploymentIdentities } from '../services/deployment-identities'
+import { createDeploymentFacade } from '../services/deployment-facade'
 import { getAllSkills, getSkillById } from '../db/dao/skills'
 import {
   assertRegisteredSkillSource,
@@ -293,6 +294,17 @@ export function registerIpcHandlers(db: DB): void {
       expiresAt: number
     }
   >()
+  const deploymentFacade = createDeploymentFacade({
+    db,
+    backupsDir: BACKUPS_DIR,
+    getRuntime: () => {
+      const settings = readSettings(SETTINGS_PATH)
+      return {
+        tools: resolveToolConfigs(settings, homedir()),
+        platform: settings.platform
+      }
+    }
+  })
 
   ipcMain.handle('scan', async () => {
     const settings = readSettings(SETTINGS_PATH)
@@ -410,6 +422,20 @@ export function registerIpcHandlers(db: DB): void {
   })
 
   // ===== Deploy(切片 #6 + #9 junction fallback)=====
+
+  ipcMain.handle('deployment:deploy', async (_e, request: unknown) => {
+    if (typeof request !== 'object' || request === null) throw new Error('deployment request must be an object')
+    const dto = request as Record<string, unknown>
+    return deploymentFacade.deploy({
+      sourceId: assertInteger(dto.sourceId, 'sourceId'),
+      targetId: assertNonEmptyString(dto.targetId, 'targetId'),
+      requestedMode: assertDeployMode(dto.requestedMode)
+    })
+  })
+
+  ipcMain.handle('deployment:confirm', async (_e, confirmationId: unknown) =>
+    deploymentFacade.confirm(assertNonEmptyString(confirmationId, 'confirmationId'))
+  )
 
   ipcMain.handle('prepareDeploy', async (_e, skillId: number, targetTool: string, mode: DeployMode, sourcePath: string, targetRoot?: string) => {
     const safeSkillId = assertInteger(skillId, 'skillId')

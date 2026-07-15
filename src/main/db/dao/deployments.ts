@@ -39,6 +39,16 @@ export function getDeploymentBySkillAndTool(
     .get(skillId, targetTool) as Deployment | undefined
 }
 
+export function getDeploymentBySkillAndTargetId(
+  db: DB,
+  skillId: number,
+  targetId: string
+): Deployment | undefined {
+  return db
+    .prepare('SELECT * FROM deployments WHERE skill_id = ? AND target_id = ?')
+    .get(skillId, targetId) as Deployment | undefined
+}
+
 /**
  * Upsert 部署记录:按 (skill_id, target_tool) UNIQUE。
  * 不存在则插入;存在则更新 mode / source_path / deployed_at / source_hash_at_deploy。
