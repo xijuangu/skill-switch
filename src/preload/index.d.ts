@@ -167,6 +167,15 @@ export type DeploymentOutcomeView =
       }
     }
 
+export type DeploymentMutationOutcomeView =
+  | { status: 'completed'; deploymentId: number }
+  | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy'; message: string }
+  | Extract<DeploymentOutcomeView, { status: 'recovery-required' }>
+
+export type DeploymentRedeployOutcomeView =
+  | DeploymentOutcomeView
+  | Extract<DeploymentMutationOutcomeView, { status: 'rejected' }>
+
 export interface DeploymentView {
   id: number
   skill_id: number
@@ -189,6 +198,7 @@ export type DriftKindView =
   | 'unresolved'
   | 'drift'
   | 'external'
+  | 'recovery-required'
 
 export interface DriftStatusView {
   skillId: number
@@ -268,12 +278,8 @@ declare global {
         confirmationToken?: string
       ) => Promise<DeployResultView>
       // issue #22:漂移重新部署,target_path / source_path 由主进程从清单读取
-      redeploy: (
-        skillId: number,
-        targetTool: string,
-        mode: DeployModeView
-      ) => Promise<DeployResultView>
-      undeploy: (skillId: number, targetTool: string) => Promise<void>
+      redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
+      undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       getTools: () => Promise<ToolWithDriftsView[]>
       // Drift + Remove from Registry (#8)
       removeFromManifest: (skillId: number, targetTool: string) => Promise<void>

@@ -29,10 +29,8 @@ const api = {
     ipcRenderer.invoke('deploy', skillId, targetTool, mode, sourcePath, targetRoot, confirmationToken),
   // issue #22:漂移重新部署,target_path / source_path 由主进程从清单读取,
   // renderer 不传任何路径。
-  redeploy: (skillId: number, targetTool: string, mode: 'copy' | 'symlink' | 'junction') =>
-    ipcRenderer.invoke('redeploy', skillId, targetTool, mode),
-  undeploy: (skillId: number, targetTool: string) =>
-    ipcRenderer.invoke('undeploy', skillId, targetTool),
+  redeploy: (deploymentId: number) => ipcRenderer.invoke('redeploy', deploymentId),
+  undeploy: (deploymentId: number) => ipcRenderer.invoke('undeploy', deploymentId),
   getTools: () => ipcRenderer.invoke('getTools'),
   // Drift + Remove from Registry(#8)
   removeFromManifest: (skillId: number, targetTool: string) =>

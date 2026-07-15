@@ -1,17 +1,18 @@
-import { existsSync, lstatSync } from 'fs'
+import { existsSync, lstatSync, realpathSync } from 'fs'
 import { randomUUID } from 'crypto'
 import type { DB } from '../db/database'
-import { getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
+import { getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
 import { getSourceById } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
-import type { DeployMode, DeployResult, DeploymentMutationHooks, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
+import type { DeployMode, DeployResult, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
 import {
   deploySkill,
   inspectRecoveryEvidence,
   ModeDegradationRequiredError,
   RecoveryRequiredError,
   resolveActualMode,
-  targetMatchesDeployment
+  targetMatchesDeployment,
+  undeployDeployment
 } from './deployer'
 import { hashDir } from './hash'
 import { resolveWithin, validateSkillName } from './path-safety'
@@ -51,6 +52,20 @@ export type DeploymentOutcome =
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
 
+export type DeploymentMutationOutcome =
+  | { status: 'completed'; deploymentId: number }
+  | {
+      status: 'rejected'
+      reason: 'deployment-not-found' | 'unresolved' | 'target-busy'
+      message: string
+    }
+  | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
+
+type TargetBusyOutcome = { status: 'rejected'; reason: 'target-busy'; message: string }
+export type DeploymentRedeployOutcome =
+  | DeploymentOutcome
+  | Extract<DeploymentMutationOutcome, { status: 'rejected' }>
+
 interface Runtime {
   tools: ToolConfig[]
   platform: PlatformInfo
@@ -66,6 +81,9 @@ interface ConfirmationPlan extends DeploymentRequest {
 export interface DeploymentFacade {
   deploy(request: DeploymentRequest): Promise<DeploymentOutcome>
   confirm(confirmationId: string): Promise<DeploymentOutcome>
+  redeploy(deploymentId: number): Promise<DeploymentRedeployOutcome>
+  undeploy(deploymentId: number): Promise<DeploymentMutationOutcome>
+  inspect(deploymentId: number): DriftStatus | null
 }
 
 export function createDeploymentFacade(options: {
@@ -99,10 +117,10 @@ export function createDeploymentFacade(options: {
     fingerprint: string
   }
 
-  async function withTargetLock(
+  async function withTargetLock<T extends DeploymentOutcome | DeploymentMutationOutcome>(
     targetId: string,
-    mutation: () => DeploymentOutcome
-  ): Promise<DeploymentOutcome> {
+    mutation: () => T
+  ): Promise<T | TargetBusyOutcome> {
     if (lockedTargets.has(targetId)) {
       return { status: 'rejected', reason: 'target-busy', message: '目标正在执行其他部署操作，请稍后重试。' }
     }
@@ -112,6 +130,102 @@ export function createDeploymentFacade(options: {
     } finally {
       lockedTargets.delete(targetId)
     }
+  }
+
+  function inspect(deploymentId: number): DriftStatus | null {
+    const deployment = getDeploymentById(options.db, deploymentId)
+    if (!deployment) return null
+    const skill = getSkillById(options.db, deployment.skill_id)
+    if (!skill) return null
+    const targetPath = deployment.target_path ?? ''
+    const recovery = deployment.target_path == null ? null : inspectRecoveryEvidence(deployment.target_path)
+    if (recovery) {
+      return {
+        skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
+        targetPath, deployment, targetExists: existsSync(targetPath), currentSourceHash: null,
+        currentTargetHash: null, kind: 'recovery-required', recovery
+      }
+    }
+    if (deployment.source_id == null || deployment.target_id == null || deployment.target_path == null) {
+      return {
+        skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
+        targetPath, deployment, targetExists: false, currentSourceHash: null,
+        currentTargetHash: null, kind: 'unresolved'
+      }
+    }
+    const targetKnown = options.getRuntime().tools.some((tool) =>
+      tool.targets.some((target) => target.id === deployment.target_id)
+    )
+    if (!targetKnown) {
+      return {
+        skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
+        targetPath, deployment, targetExists: false, currentSourceHash: null,
+        currentTargetHash: null, kind: 'unresolved'
+      }
+    }
+    const source = getSourceById(options.db, deployment.source_id)
+    const sourcePath = source?.path ?? deployment.source_path
+    const targetExists = (() => { try { lstatSync(targetPath); return true } catch { return false } })()
+    if (!source || source.skill_id !== deployment.skill_id || !existsSync(sourcePath)) {
+      return {
+        skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
+        targetPath, deployment, targetExists, currentSourceHash: null,
+        currentTargetHash: null, kind: 'source-missing'
+      }
+    }
+    if (!targetExists) {
+      return {
+        skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
+        targetPath, deployment, targetExists: false, currentSourceHash: null,
+        currentTargetHash: null, kind: 'drift'
+      }
+    }
+    const currentSourceHash = hashDir(sourcePath)
+    if (deployment.mode === 'symlink' || deployment.mode === 'junction') {
+      let matches = false
+      try {
+        matches = lstatSync(targetPath).isSymbolicLink() && realpathSync(targetPath) === realpathSync(sourcePath)
+      } catch { /* mismatch */ }
+      return {
+        skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
+        targetPath, deployment, targetExists: true, currentSourceHash,
+        currentTargetHash: null, kind: matches ? 'normal' : 'link-mismatch'
+      }
+    }
+    const currentTargetHash = hashDir(targetPath)
+    const kind = currentTargetHash !== deployment.source_hash_at_deploy
+      ? 'target-modified'
+      : currentSourceHash !== deployment.source_hash_at_deploy
+        ? 'source-updated'
+        : 'normal'
+    return {
+      skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
+      targetPath, deployment, targetExists: true, currentSourceHash, currentTargetHash, kind
+    }
+  }
+
+  function resolveExisting(deploymentId: number):
+    | { rejection: Extract<DeploymentMutationOutcome, { status: 'rejected' }> }
+    | {
+        deployment: NonNullable<ReturnType<typeof getDeploymentById>>
+        source: NonNullable<ReturnType<typeof getSourceById>>
+        skill: NonNullable<ReturnType<typeof getSkillById>>
+        target: { tool: ToolConfig; target: ToolConfig['targets'][number] }
+      } {
+    const deployment = getDeploymentById(options.db, deploymentId)
+    if (!deployment) return { rejection: { status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' } as const }
+    if (deployment.source_id == null || deployment.target_id == null || deployment.target_path == null) {
+      return { rejection: { status: 'rejected', reason: 'unresolved', message: '部署身份尚未解析，拒绝执行文件系统操作。' } as const }
+    }
+    const source = getSourceById(options.db, deployment.source_id)
+    const skill = getSkillById(options.db, deployment.skill_id)
+    const target = options.getRuntime().tools
+      .flatMap((tool) => tool.targets.map((candidate) => ({ tool, target: candidate })))
+      .find(({ target: candidate }) => candidate.id === deployment.target_id)
+    if (!source || source.skill_id !== deployment.skill_id || !skill || !target) {
+      return { rejection: { status: 'rejected', reason: 'unresolved', message: '部署关联的 Source 或 Discovery Target 不可解析。' } as const }
+    }
+    return { deployment, source, skill, target }
   }
 
   function resolve(request: DeploymentRequest) {
@@ -298,6 +412,44 @@ export function createDeploymentFacade(options: {
         }
         return execute(current)
       })
+    },
+    inspect,
+    redeploy(deploymentId) {
+      const resolved = resolveExisting(deploymentId)
+      if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+      const { deployment, source, target } = resolved
+      return withTargetLock(deployment.target_id!, () => {
+        const prepared = prepare({
+          sourceId: source.id,
+          targetId: target.target.id,
+          requestedMode: deployment.mode
+        })
+        if (inspectRecoveryEvidence(prepared.resolved.targetPath)) return execute(prepared)
+        if (prepared.reasons.length > 0) return requireConfirmation(prepared)
+        return execute(prepared)
+      })
+    },
+    undeploy(deploymentId) {
+      const deployment = getDeploymentById(options.db, deploymentId)
+      if (!deployment) {
+        return Promise.resolve({ status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' } as const)
+      }
+      if (deployment.target_id == null || deployment.target_path == null) {
+        return Promise.resolve({ status: 'rejected', reason: 'unresolved', message: '部署目标身份尚未解析，拒绝执行文件系统操作。' } as const)
+      }
+      return withTargetLock(deployment.target_id!, () => {
+        const recovery = inspectRecoveryEvidence(deployment.target_path!)
+        if (recovery) return { status: 'recovery-required', message: '检测到未完成的部署操作，请保留现场并人工选择恢复方向。', evidence: recovery }
+        try {
+          undeployDeployment(options.db, deployment, options.mutationHooks)
+          return { status: 'completed', deploymentId: deployment.id }
+        } catch (error) {
+          if (error instanceof RecoveryRequiredError) {
+            return { status: 'recovery-required', message: '取消部署失败且自动补偿未完成，请保留现场并人工恢复。', evidence: error.evidence }
+          }
+          throw error
+        }
+      }) as Promise<DeploymentMutationOutcome>
     }
   }
 }

@@ -7,6 +7,11 @@ export function getAllDeployments(db: DB): Deployment[] {
   return db.prepare('SELECT * FROM deployments ORDER BY deployed_at DESC').all() as Deployment[]
 }
 
+/** Stable primary-key lookup used by the Deployment Facade. */
+export function getDeploymentById(db: DB, deploymentId: number): Deployment | undefined {
+  return db.prepare('SELECT * FROM deployments WHERE id = ?').get(deploymentId) as Deployment | undefined
+}
+
 /** 按 target_tool 查部署 */
 export function getDeploymentsByTool(db: DB, targetTool: string): Deployment[] {
   return db
@@ -122,6 +127,11 @@ export function deleteDeployment(
     skillId,
     targetTool
   )
+}
+
+/** Delete exactly one semantic Deployment, independent of tool/path aliases. */
+export function deleteDeploymentById(db: DB, deploymentId: number): void {
+  db.prepare('DELETE FROM deployments WHERE id = ?').run(deploymentId)
 }
 
 /** Restore the exact manifest snapshot after a failed filesystem transaction. */

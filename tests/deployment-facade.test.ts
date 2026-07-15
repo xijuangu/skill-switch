@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -10,6 +10,8 @@ import type { DB } from '../src/main/db/database'
 import type { ToolConfig } from '../src/main/types'
 import type { DeploymentMutationHooks } from '../src/main/types'
 import { getDeploymentBySkillAndTargetId } from '../src/main/db/dao/deployments'
+import { removeFromRegistry } from '../src/main/services/registry'
+import { dirname } from 'path'
 
 const cleanups: Array<() => void> = []
 
@@ -59,6 +61,110 @@ function setup() {
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
 
 describe('Deployment Facade', () => {
+  test('redeploy of a modified managed target uses the aggregated confirmation plan', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+    writeFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), '# modified target')
+
+    const planned = await facade.redeploy(deployed.deploymentId)
+    expect(planned).toMatchObject({
+      status: 'confirmation-required',
+      facts: { reasons: ['target-modified'], requestedMode: 'copy', actualMode: 'copy' }
+    })
+    if (planned.status !== 'confirmation-required') throw new Error('expected confirmation')
+    expect(await facade.confirm(planned.confirmationId)).toMatchObject({ status: 'completed' })
+  })
+
+  test('inspect, redeploy and undeploy use only the stable deployment ID', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+
+    expect(facade.inspect(deployed.deploymentId)).toMatchObject({ kind: 'normal', deployment: { id: deployed.deploymentId } })
+    writeFileSync(join(env.sourcePath, 'SKILL.md'), '# changed')
+    expect(facade.inspect(deployed.deploymentId)).toMatchObject({ kind: 'source-updated' })
+    expect(await facade.redeploy(deployed.deploymentId)).toMatchObject({ status: 'completed', deploymentId: deployed.deploymentId })
+    expect(facade.inspect(deployed.deploymentId)).toMatchObject({ kind: 'normal' })
+
+    expect(await facade.undeploy(deployed.deploymentId)).toMatchObject({ status: 'completed', deploymentId: deployed.deploymentId })
+    expect(facade.inspect(deployed.deploymentId)).toBeNull()
+  })
+
+  test('undeploy remains available when the Source content is missing', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+    rmSync(env.sourcePath, { recursive: true })
+    expect(facade.inspect(deployed.deploymentId)).toMatchObject({ kind: 'source-missing' })
+    expect(await facade.undeploy(deployed.deploymentId)).toMatchObject({ status: 'completed' })
+  })
+
+  test('inspect and mutations report recovery evidence for the deployment target', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+    const targetPath = join(env.targetRoot, 'demo')
+    const markerPath = join(env.targetRoot, '.skill-switch-operation-demo-crash.json')
+    writeFileSync(markerPath, JSON.stringify({
+      operationId: 'crash', targetPath, markerPath,
+      stagingPath: join(env.targetRoot, '.skill-switch-staging-demo-crash'),
+      rollbackPath: join(env.targetRoot, '.skill-switch-rollback-demo-crash'), phase: 'switched'
+    }))
+
+    expect(facade.inspect(deployed.deploymentId)).toMatchObject({ kind: 'recovery-required', recovery: { operationId: 'crash' } })
+    expect(await facade.redeploy(deployed.deploymentId)).toMatchObject({ status: 'recovery-required' })
+    expect(await facade.undeploy(deployed.deploymentId)).toMatchObject({ status: 'recovery-required' })
+  })
+
+  test('redeploy and undeploy share the discovery-target lock', async () => {
+    const env = setup()
+    const initial = await env.create().deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (initial.status !== 'completed') throw new Error('expected deployment')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const facade = env.create({ runMutation: async (mutation) => { await gate; return mutation() } })
+    const redeploy = facade.redeploy(initial.deploymentId)
+    expect(await facade.undeploy(initial.deploymentId)).toMatchObject({ status: 'rejected', reason: 'target-busy' })
+    release()
+    expect(await redeploy).toMatchObject({ status: 'completed' })
+  })
+
+  test('registry removal cascades every filesystem mutation through the Facade', async () => {
+    const env = setup()
+    const facade = env.create()
+    await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    const result = await removeFromRegistry(env.db, env.skillId, {
+      centralSkillsDir: dirname(env.sourcePath),
+      backupsDir: join(env.targetRoot, '..', 'registry-backups'),
+      undeployDeployment: (deploymentId) => facade.undeploy(deploymentId)
+    })
+    expect(result.undeployedTools).toEqual(['codex'])
+    expect(facade.inspect(1)).toBeNull()
+  })
+
+  test('undeploy compensates before commit and reports failed compensation', async () => {
+    const compensated = setup()
+    const first = await compensated.create().deploy({ sourceId: compensated.sourceId, targetId: compensated.targetId, requestedMode: 'copy' })
+    if (first.status !== 'completed') throw new Error('expected deployment')
+    const failing = compensated.create({ mutationHooks: { afterRollback: () => { throw new Error('stop') } } })
+    await expect(failing.undeploy(first.deploymentId)).rejects.toThrow('stop')
+    expect(failing.inspect(first.deploymentId)).toMatchObject({ kind: 'normal' })
+
+    const recovery = compensated.create({ mutationHooks: {
+      operationId: () => 'undeploy-recovery',
+      afterRollback: () => { throw new Error('stop') },
+      beforeCompensate: () => { throw new Error('compensation failed') }
+    } })
+    expect(await recovery.undeploy(first.deploymentId)).toMatchObject({
+      status: 'recovery-required', evidence: { operationId: 'undeploy-recovery' }
+    })
+  })
+
   test('deploys and updates using only source ID, target ID and requested mode', async () => {
     const env = setup()
     const facade = env.create()

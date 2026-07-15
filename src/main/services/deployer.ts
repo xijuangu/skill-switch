@@ -37,6 +37,7 @@ import type {
 import type { RecoveryEvidence } from '../types'
 import {
   deleteDeployment,
+  deleteDeploymentById,
   getDeploymentBySkillAndTargetId,
   getDeploymentBySkillAndTool,
   getDeploymentsByTool,
@@ -578,6 +579,65 @@ export function undeploySkill(
 }
 
 /**
+ * Remove one Deployment by its stable identity using the same marker/rollback
+ * protocol as deploy. The manifest is deleted only after the target has been
+ * moved aside, and any pre-commit failure restores the exact target.
+ */
+export function undeployDeployment(
+  db: DB,
+  deployment: import('../types').Deployment,
+  hooks?: import('../types').DeploymentMutationHooks
+): void {
+  if (deployment.target_path == null) {
+    throw new Error('deployment target path is unresolved; refusing destructive cleanup')
+  }
+  const targetPath = assertAbsolutePath(deployment.target_path, 'recorded target_path')
+  if (!pathEntryExists(targetPath)) {
+    deleteDeploymentById(db, deployment.id)
+    return
+  }
+  const evidence = markerForTarget(targetPath, hooks?.operationId?.() ?? randomUUID())
+  let markerWritten = false
+  let rolledBack = false
+  let manifestDeleted = false
+  try {
+    writeMarker(evidence, 'prepared')
+    markerWritten = true
+    hooks?.afterMarker?.()
+    renameSync(targetPath, evidence.rollbackPath)
+    rolledBack = true
+    writeMarker(evidence, 'rollback-created')
+    hooks?.afterRollback?.()
+    hooks?.beforeManifest?.()
+    deleteDeploymentById(db, deployment.id)
+    manifestDeleted = true
+    writeMarker(evidence, 'manifest-written')
+    cleanupUnknown(evidence.rollbackPath)
+    rolledBack = false
+    rmSync(evidence.markerPath, { force: true })
+    markerWritten = false
+  } catch (error) {
+    if (manifestDeleted) {
+      // The old content may already be partially removed, so preserve evidence
+      // instead of guessing a recovery direction.
+      throw new RecoveryRequiredError('undeploy committed but cleanup failed', evidence, { cause: error })
+    }
+    try {
+      hooks?.beforeCompensate?.()
+      if (rolledBack && pathEntryExists(evidence.rollbackPath)) renameSync(evidence.rollbackPath, targetPath)
+      if (markerWritten) rmSync(evidence.markerPath, { force: true })
+    } catch (compensationError) {
+      throw new RecoveryRequiredError(
+        `undeploy failed and compensation failed: ${String(compensationError)}`,
+        evidence,
+        { cause: error }
+      )
+    }
+    throw error
+  }
+}
+
+/**
  * 检测单个部署点的漂移状态(清单 vs 实际磁盘)。
  *
  * 四种 kind:
@@ -674,7 +734,8 @@ export function detectDrift(
 export function detectDriftsForTool(
   db: DB,
   targetTool: string,
-  toolSkillDirs: string | string[]
+  toolSkillDirs: string | string[],
+  inspectDeployment?: (deploymentId: number) => DriftStatus | null
 ): DriftStatus[] {
   const directories = Array.isArray(toolSkillDirs)
     ? toolSkillDirs
@@ -690,7 +751,10 @@ export function detectDriftsForTool(
     const targetPath =
       dep.target_path ?? join(directories[0] ?? '', skill.name)
     managedTargetPaths.add(targetPath)
-    results.push(detectDrift(db, dep.skill_id, skill.name, targetTool, targetPath))
+    results.push(
+      inspectDeployment?.(dep.id) ??
+      detectDrift(db, dep.skill_id, skill.name, targetTool, targetPath)
+    )
   }
 
   // 磁盘上的外部 skill(不在清单中的子目录)

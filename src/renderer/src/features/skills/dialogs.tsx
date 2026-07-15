@@ -550,9 +550,9 @@ export function UndeployDialog({
   onClose
 }: {
   skill: SkillView
-  deployments: { target_tool: string; mode: string }[]
+  deployments: { id: number; target_tool: string; mode: string; target_path?: string | null }[]
   busy: boolean
-  onUndeploy: (targetTool: string) => void
+  onUndeploy: (deploymentId: number) => void
   onClose: () => void
 }) {
   return (
@@ -566,12 +566,17 @@ export function UndeployDialog({
     >
       <div className="space-y-2 max-h-48 overflow-auto">
         {deployments.map((d) => (
-          <div key={d.target_tool} className="flex items-center justify-between border border-border rounded px-2.5 py-2">
+          <div key={d.id} className="flex items-center justify-between border border-border rounded px-2.5 py-2">
             <div className="flex items-center gap-2 min-w-0">
-              <span className="text-xs font-medium">{d.target_tool}</span>
-              <span className="text-2xs px-1 py-px rounded bg-surface-secondary text-foreground-secondary">{d.mode}</span>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium">{d.target_tool}</span>
+                  <span className="text-2xs px-1 py-px rounded bg-surface-secondary text-foreground-secondary">{d.mode}</span>
+                </div>
+                {d.target_path && <div className="text-2xs text-foreground-muted truncate">{d.target_path}</div>}
+              </div>
             </div>
-            <Button variant="danger" size="sm" onClick={() => onUndeploy(d.target_tool)} disabled={busy}>
+            <Button variant="danger" size="sm" onClick={() => onUndeploy(d.id)} disabled={busy}>
               取消部署
             </Button>
           </div>

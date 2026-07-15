@@ -6,6 +6,7 @@ import { type DriftKey, driftKeyEquals } from './driftKey'
 
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 type DriftStatusView = ToolWithDriftsView['drifts'][number]
+type ConfirmationRequiredView = Extract<Awaited<ReturnType<typeof window.api.deploymentConfirm>>, { status: 'confirmation-required' }>
 
 export function ToolsPage({
   tools,
@@ -18,9 +19,10 @@ export function ToolsPage({
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [busyKey, setBusyKey] = useState<DriftKey | null>(null)
-  const [confirmUndeploy, setConfirmUndeploy] = useState<{ skillId: number; targetTool: string; skillName: string } | null>(null)
+  const [confirmUndeploy, setConfirmUndeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmRemoveManifest, setConfirmRemoveManifest] = useState<{ skillId: number; targetTool: string; skillName: string } | null>(null)
-  const [confirmRedeploy, setConfirmRedeploy] = useState<{ skillId: number; targetTool: string; skillName: string } | null>(null)
+  const [confirmRedeploy, setConfirmRedeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
+  const [redeployRisk, setRedeployRisk] = useState<ConfirmationRequiredView | null>(null)
 
   const { success, error: toastError } = useToast()
 
@@ -35,10 +37,11 @@ export function ToolsPage({
 
   const handleUndeploy = async () => {
     if (!confirmUndeploy) return
-    const { skillId, targetTool } = confirmUndeploy
+    const { deploymentId, skillId, targetTool } = confirmUndeploy
     setBusyKey({ skillId, targetTool })
     try {
-      await window.api.undeploy(skillId, targetTool)
+      const outcome = await window.api.undeploy(deploymentId)
+      if (outcome.status !== 'completed') throw new Error(outcome.message)
       await onRefresh()
       success(`已从 ${targetTool} 取消部署`)
       setConfirmUndeploy(null)
@@ -69,13 +72,15 @@ export function ToolsPage({
 
   const handleRedeploy = async () => {
     if (!confirmRedeploy) return
-    const { skillId, targetTool } = confirmRedeploy
+    const { deploymentId, skillId, targetTool } = confirmRedeploy
     setBusyKey({ skillId, targetTool })
     try {
-      const tool = tools.find((t) => t.config.key === targetTool)
-      const drift = tool?.drifts.find((d) => d.skillId === skillId)
-      if (!drift?.deployment) throw new Error('没有可重新部署的部署记录')
-      await window.api.redeploy(skillId, targetTool, drift.deployment.mode)
+      const outcome = await window.api.redeploy(deploymentId)
+      if (outcome.status === 'confirmation-required') {
+        setRedeployRisk(outcome)
+        return
+      }
+      if (outcome.status !== 'completed') throw new Error(outcome.message)
       await onRefresh()
       success(`已重新部署`)
       setConfirmRedeploy(null)
@@ -86,6 +91,40 @@ export function ToolsPage({
       setBusyKey(null)
     }
   }
+
+  const handleRedeployRiskConfirm = async () => {
+    if (!redeployRisk) return
+    if (confirmRedeploy) setBusyKey({ skillId: confirmRedeploy.skillId, targetTool: confirmRedeploy.targetTool })
+    try {
+      const outcome = await window.api.deploymentConfirm(redeployRisk.confirmationId)
+      if (outcome.status === 'confirmation-required') {
+        setRedeployRisk(outcome)
+        return
+      }
+      if (outcome.status !== 'completed') throw new Error(outcome.message)
+      setRedeployRisk(null)
+      setConfirmRedeploy(null)
+      await onRefresh()
+      success('已重新部署')
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+      await onRefresh()
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const redeployRiskDescription = redeployRisk == null ? '' : [
+    ...redeployRisk.facts.reasons.map((reason) => ({
+      'external-overwrite': '目标包含外部内容，将覆盖现有内容。',
+      'target-modified': '部署目标已被修改，将用当前来源覆盖。',
+      'mode-degraded': `请求模式 ${redeployRisk.facts.requestedMode} 不可用，实际将使用 ${redeployRisk.facts.actualMode}。`
+    })[reason]),
+    `目标：${redeployRisk.facts.targetPath}`,
+    redeployRisk.facts.backup.required
+      ? `覆盖前会备份到：${redeployRisk.facts.backup.directory ?? '应用备份目录'}`
+      : '本次不会创建外部内容备份。'
+  ].join('\n')
 
   if (loading) {
     return (
@@ -122,8 +161,8 @@ export function ToolsPage({
               expanded={expanded.has(tool.config.key)}
               onToggleExpand={() => toggleExpand(tool.config.key)}
               busyKey={busyKey}
-              onUndeploy={(skillId, targetTool, skillName) => setConfirmUndeploy({ skillId, targetTool, skillName })}
-              onRedeploy={(skillId, targetTool, skillName) => setConfirmRedeploy({ skillId, targetTool, skillName })}
+              onUndeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmUndeploy({ deploymentId, skillId, targetTool, skillName })}
+              onRedeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmRedeploy({ deploymentId, skillId, targetTool, skillName })}
               onRemoveFromManifest={(skillId, targetTool, skillName) => setConfirmRemoveManifest({ skillId, targetTool, skillName })}
             />
           ))}
@@ -160,6 +199,18 @@ export function ToolsPage({
         onConfirm={handleRedeploy}
         busy={driftKeyEquals(busyKey, confirmRedeploy)}
       />
+
+      <Dialog
+        open={redeployRisk !== null}
+        onClose={() => setRedeployRisk(null)}
+        title={`确认重新部署风险「${confirmRedeploy?.skillName ?? ''}」?`}
+        description={redeployRiskDescription}
+        variant="danger"
+        confirmLabel="确认并重新部署"
+        onConfirm={handleRedeployRiskConfirm}
+        busy={driftKeyEquals(busyKey, confirmRedeploy)}
+        closeOnOverlay={false}
+      />
     </div>
   )
 }
@@ -177,8 +228,8 @@ function ToolCard({
   expanded: boolean
   onToggleExpand: () => void
   busyKey: DriftKey | null
-  onUndeploy: (skillId: number, targetTool: string, skillName: string) => void
-  onRedeploy: (skillId: number, targetTool: string, skillName: string) => void
+  onUndeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
+  onRedeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
   onRemoveFromManifest: (skillId: number, targetTool: string, skillName: string) => void
 }) {
   const { config, drifts } = tool
@@ -243,11 +294,11 @@ function ToolCard({
                 <ul className="space-y-1.5 mb-3">
                   {managed.map((d) => (
                     <DriftItem
-                      key={`${d.skillId}:${d.skillName}`}
+                      key={`managed:${d.deployment?.id ?? `${d.skillId}:${d.skillName}`}`}
                       drift={d}
                       busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
-                      onUndeploy={() => onUndeploy(d.skillId, d.targetTool, d.skillName)}
-                      onRedeploy={() => onRedeploy(d.skillId, d.targetTool, d.skillName)}
+                      onUndeploy={() => d.deployment && onUndeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
+                      onRedeploy={() => d.deployment && onRedeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                       onRemoveFromManifest={() => onRemoveFromManifest(d.skillId, d.targetTool, d.skillName)}
                     />
                   ))}

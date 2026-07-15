@@ -660,7 +660,7 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
 })
 
 describe('removeFromRegistry', () => {
-  test('removes central-repo entity + all deployments + registry records, with backup', () => {
+  test('removes central-repo entity + all deployments + registry records, with backup', async () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const target1 = createTempDir('ss-target1-')
@@ -705,7 +705,7 @@ describe('removeFromRegistry', () => {
 
     const beforeBackups = listBackups(backups.dir).length
 
-    const result = removeFromRegistry(db, skillId, {
+    const result = await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
       backupsDir: backups.dir
     })
@@ -740,7 +740,7 @@ describe('removeFromRegistry', () => {
     cleanupDb()
   })
 
-  test('indexed-only skill (no central entity) skips backup but still removes deployments + records', () => {
+  test('indexed-only skill (no central entity) skips backup but still removes deployments + records', async () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const source = createTempDir('ss-source-')
@@ -773,7 +773,7 @@ describe('removeFromRegistry', () => {
 
     const beforeBackups = listBackups(backups.dir).length
 
-    const result = removeFromRegistry(db, skillId, {
+    const result = await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
       backupsDir: backups.dir
     })
@@ -797,7 +797,7 @@ describe('removeFromRegistry', () => {
     cleanupDb()
   })
 
-  test('tool config unavailable still cleans the exact target_path stored in manifest', () => {
+  test('tool config unavailable still cleans the exact target_path stored in manifest', async () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const target = createTempDir('ss-target-')
@@ -828,7 +828,7 @@ describe('removeFromRegistry', () => {
     expect(existsSync(targetDir)).toBe(true)
 
     // 当前工具配置不可用,仍应使用 manifest.target_path
-    const result = removeFromRegistry(db, skillId, {
+    const result = await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
       backupsDir: backups.dir
     })
@@ -846,24 +846,24 @@ describe('removeFromRegistry', () => {
     cleanupDb()
   })
 
-  test('skill not found → throws', () => {
+  test('skill not found → throws', async () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const { db, cleanup: cleanupDb } = createTempDb()
 
-    expect(() =>
+    await expect(
       removeFromRegistry(db, 99999, {
         centralSkillsDir: central.dir,
         backupsDir: backups.dir
       })
-    ).toThrow(/skill not found/)
+    ).rejects.toThrow(/skill not found/)
 
     central.cleanup()
     backups.cleanup()
     cleanupDb()
   })
 
-  test('idempotent: calling again after removal throws (skill already deleted)', () => {
+  test('idempotent: calling again after removal throws (skill already deleted)', async () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const { db, cleanup: cleanupDb } = createTempDb()
@@ -883,9 +883,9 @@ describe('removeFromRegistry', () => {
     }
 
     // 第一次调用成功
-    removeFromRegistry(db, skillId, opts)
+    await removeFromRegistry(db, skillId, opts)
     // 第二次调用抛错(skill 已删)
-    expect(() => removeFromRegistry(db, skillId, opts)).toThrow(/skill not found/)
+    await expect(removeFromRegistry(db, skillId, opts)).rejects.toThrow(/skill not found/)
 
     central.cleanup()
     backups.cleanup()

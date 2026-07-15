@@ -248,6 +248,7 @@ export type DriftKind =
   | 'unresolved'
   | 'drift'
   | 'external'
+  | 'recovery-required'
 
 /** 单个部署点的漂移检测结果 */
 export interface DriftStatus {
@@ -264,6 +265,8 @@ export interface DriftStatus {
   /** Current copy target hash; null for links, missing targets, and external entries. */
   currentTargetHash: string | null
   kind: DriftKind
+  /** Present only when a previous mutation left diagnostic artifacts. */
+  recovery?: RecoveryEvidence
 }
 
 // ===== Install(切片 #7)=====

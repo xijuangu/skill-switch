@@ -34,7 +34,7 @@ import {
 } from '../services/tools-config'
 import { scanAllTools } from '../services/scan-all'
 import { reconcileDeploymentIdentities } from '../services/deployment-identities'
-import { createDeploymentFacade } from '../services/deployment-facade'
+import { createDeploymentFacade, type DeploymentFacade } from '../services/deployment-facade'
 import { getAllSkills, getSkillById } from '../db/dao/skills'
 import {
   assertRegisteredSkillSource,
@@ -49,8 +49,6 @@ import {
   detectDrift,
   detectDriftsForTool,
   inspectDeployTarget,
-  redeploySkill,
-  undeploySkill
 } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
 import {
@@ -145,7 +143,8 @@ export function readDeployTargetOptions(
  */
 export function readSkillsView(
   db: DB,
-  toolConfigs: ToolConfig[]
+  toolConfigs: ToolConfig[],
+  inspectDeployment?: DeploymentFacade['inspect']
 ): SkillWithConflict[] {
   const skills = getAllSkills(db)
   const out: SkillWithConflict[] = []
@@ -158,13 +157,9 @@ export function readSkillsView(
       conflict: computeConflict(visibleSources, s.id),
       deployments: getDeploymentsBySkillId(db, s.id).map((d) => ({
         ...d,
-        status: detectDrift(
-          db,
-          s.id,
-          s.name,
-          d.target_tool,
-          d.target_path ?? ''
-        ).kind
+        status: (inspectDeployment?.(d.id) ?? detectDrift(
+          db, s.id, s.name, d.target_tool, d.target_path ?? ''
+        )).kind
       }))
     })
   }
@@ -179,7 +174,8 @@ export function readSkillsView(
  */
 export function readToolsView(
   db: DB,
-  toolConfigs: ToolConfig[]
+  toolConfigs: ToolConfig[],
+  inspectDeployment?: DeploymentFacade['inspect']
 ): ToolWithDriftsView[] {
   return toolConfigs
     .filter((config) => config.enabled)
@@ -187,7 +183,7 @@ export function readToolsView(
       config,
       drifts:
         config.enabled && config.exists
-          ? detectDriftsForTool(db, config.key, config.existingPaths)
+          ? detectDriftsForTool(db, config.key, config.existingPaths, inspectDeployment)
           : []
     }))
 }
@@ -318,7 +314,7 @@ export function registerIpcHandlers(db: DB): void {
     // issue #20: 禁用工具后 source 过滤逻辑在 readSkillsView 内执行。
     const settings = readSettings(SETTINGS_PATH)
     const toolConfigs = resolveToolConfigs(settings, homedir())
-    return readSkillsView(db, toolConfigs)
+    return readSkillsView(db, toolConfigs, deploymentFacade.inspect)
   })
 
   ipcMain.handle('getSettings', async () => {
@@ -532,35 +528,15 @@ export function registerIpcHandlers(db: DB): void {
     })
   })
 
-  ipcMain.handle('undeploy', async (_e, skillId: number, targetTool: string) => {
-    const safeSkillId = assertInteger(skillId, 'skillId')
-    const safeTool = validateToolKey(targetTool)
-    const skill = getSkillById(db, safeSkillId)
-    if (!skill) {
-      throw new Error(`skill not found: ${safeSkillId}`)
-    }
-    undeploySkill(db, safeSkillId, safeTool)
-  })
+  ipcMain.handle('undeploy', async (_e, deploymentId: number) =>
+    deploymentFacade.undeploy(assertInteger(deploymentId, 'deploymentId'))
+  )
 
   // issue #22:漂移"重新部署"——从 deployment 清单读取精确 target_path,
   // 不接收 renderer 提供的任意路径,不依赖当前工具配置重新推导。
-  ipcMain.handle('redeploy', async (_e, skillId: number, targetTool: string, mode: DeployMode) => {
-    const safeSkillId = assertInteger(skillId, 'skillId')
-    const safeTool = validateToolKey(targetTool)
-    const safeMode = assertDeployMode(mode)
-    const skill = getSkillById(db, safeSkillId)
-    if (!skill) {
-      throw new Error(`skill not found: ${safeSkillId}`)
-    }
-    const settings = readSettings(SETTINGS_PATH)
-    return redeploySkill(db, safeSkillId, safeTool, {
-      skillName: skill.name,
-      mode: safeMode,
-      backupsDir: BACKUPS_DIR,
-      canSymlink: settings.platform.canSymlink,
-      canJunction: settings.platform.canJunction
-    })
-  })
+  ipcMain.handle('redeploy', async (_e, deploymentId: number) =>
+    deploymentFacade.redeploy(assertInteger(deploymentId, 'deploymentId'))
+  )
 
   // ===== Drift actions(切片 #8)=====
 
@@ -618,7 +594,8 @@ export function registerIpcHandlers(db: DB): void {
   ipcMain.handle('removeFromRegistry', async (_e, skillId: number) => {
     return removeFromRegistry(db, assertInteger(skillId, 'skillId'), {
       centralSkillsDir: SKILLS_DIR,
-      backupsDir: BACKUPS_DIR
+      backupsDir: BACKUPS_DIR,
+      undeployDeployment: (deploymentId) => deploymentFacade.undeploy(deploymentId)
     })
   })
 
@@ -626,7 +603,7 @@ export function registerIpcHandlers(db: DB): void {
     // issue #21: 读逻辑抽到 readToolsView,与测试共用同一函数。
     const settings = readSettings(SETTINGS_PATH)
     const toolConfigs = resolveToolConfigs(settings, homedir())
-    return readToolsView(db, toolConfigs)
+    return readToolsView(db, toolConfigs, deploymentFacade.inspect)
   })
 
   // ===== Install(切片 #7)=====

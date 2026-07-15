@@ -200,6 +200,11 @@ export function reconcileIndexedSources(
 export interface RemoveFromRegistryOptions {
   centralSkillsDir: string
   backupsDir: string
+  /** Production callers route every deployment mutation through the Facade. */
+  undeployDeployment?: (deploymentId: number) => Promise<{
+    status: 'completed' | 'rejected' | 'recovery-required'
+    message?: string
+  }>
 }
 
 /** removeFromRegistry 返回结果 */
@@ -216,21 +221,21 @@ export interface RemoveFromRegistryResult {
  *
  * 顺序(保证 DB 与磁盘一致性):
  * 1. (事务外)若中央实体存在 → createBackup(拷贝),backedUp=true
- * 2. (事务内)逐个按 deployment.target_path 卸载;旧记录 target_path 为 null 时只删清单。
+ * 2. 逐个把 Deployment ID 交给 Facade 卸载(生产路径共享目标锁与补偿)。
  * 3. (事务内)deleteSourcesBySkillId
  * 4. (事务内)deleteSkill(ON DELETE CASCADE 兜底,但此处已显式清理)
  * 5. (事务外)rmSync 中央实体目录(备份已先拷贝,删除不影响备份)
  *
- * 若事务失败,磁盘上的中央实体保持不变(备份步骤已先执行,但备份是额外的拷贝,
- * 不影响原目录;rmSync 在事务提交后执行,所以事务回滚不会误删中央实体)。
+ * 若某个 Facade mutation 返回 busy / recovery-required，停止级联并保留注册表；
+ * 已完成的取消部署代表真实状态，下次调用会继续处理剩余记录。
  *
  * @throws skill 不存在时抛错(skillId 无效)
  */
-export function removeFromRegistry(
+export async function removeFromRegistry(
   db: DB,
   skillId: number,
   opts: RemoveFromRegistryOptions
-): RemoveFromRegistryResult {
+): Promise<RemoveFromRegistryResult> {
   // Step 1: 查 skill,不存在则抛错
   const skill = getSkillById(db, skillId)
   if (!skill) {
@@ -261,20 +266,30 @@ export function removeFromRegistry(
     backedUp = true
   }
 
-  // Step 3-5 (事务内):卸载部署 + 删 sources + 删 skill
+  // Step 3: each filesystem mutation completes through the Deployment Facade
+  // before registry metadata is removed. Do not hold a SQLite transaction
+  // across awaited target locks.
   const undeployedTools: string[] = []
-  runInTransaction(db, () => {
-    const deployments = getDeploymentsBySkillId(db, skillId)
-    for (const dep of deployments) {
+  const deployments = getDeploymentsBySkillId(db, skillId)
+  for (const dep of deployments) {
+    if (opts.undeployDeployment) {
+      const outcome = await opts.undeployDeployment(dep.id)
+      if (outcome.status !== 'completed') {
+        throw new Error(outcome.message ?? `unable to undeploy deployment ${dep.id}`)
+      }
+    } else {
+      // Expand-phase compatibility for non-IPC callers; #78 removes this path.
       if (dep.target_path == null) {
-        // Legacy record: remove metadata without guessing a destructive path.
         deleteDeployment(db, skillId, dep.target_tool)
       } else {
         undeploySkill(db, skillId, dep.target_tool)
       }
-      undeployedTools.push(dep.target_tool)
     }
+    undeployedTools.push(dep.target_tool)
+  }
 
+  // Step 4-5: metadata deletion remains atomic after all target mutations.
+  runInTransaction(db, () => {
     // Step 4: 删 skill_sources 记录
     deleteSourcesBySkillId(db, skillId)
 

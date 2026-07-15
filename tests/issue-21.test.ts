@@ -175,7 +175,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     cleanup()
   })
 
-  test('removeFromRegistry → getSkills 不含该 skill + getTools 无该 skill', () => {
+  test('removeFromRegistry → getSkills 不含该 skill + getTools 无该 skill', async () => {
     const central = createTempDir('iss21-central-')
     const target = createTempDir('iss21-tgt-')
     const backups = createTempDir('iss21-bak-')
@@ -203,7 +203,7 @@ describe('issue #21: mutation 后读操作返回一致的权威状态', () => {
     })
 
     // removeFromRegistry
-    removeFromRegistry(db, skillId, {
+    await removeFromRegistry(db, skillId, {
       centralSkillsDir: central.dir,
       backupsDir: backups.dir
     })

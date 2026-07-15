@@ -65,7 +65,7 @@ export function SkillsPage({
   const [visibleMenuSkill, setVisibleMenuSkill] = useState<SkillView | null>(null)
   const [viewMdTarget, setViewMdTarget] = useState<{ content: string; path: string; skillName: string } | null>(null)
   const [viewMdSourcePicker, setViewMdSourcePicker] = useState<SkillView | null>(null)
-  const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { target_tool: string; mode: string }[] } | null>(null)
+  const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
@@ -265,11 +265,14 @@ export function SkillsPage({
     }
   }
 
-  const handleUndeployFromTool = async (targetTool: string) => {
+  const handleUndeployFromTool = async (deploymentId: number) => {
     if (!undeployFromTarget) return
     setActionBusy(true)
     try {
-      await window.api.undeploy(undeployFromTarget.skill.id, targetTool)
+      const deployment = undeployFromTarget.deployments.find((candidate) => candidate.id === deploymentId)
+      if (!deployment) throw new Error('部署记录不存在，请刷新后重试')
+      const outcome = await window.api.undeploy(deploymentId)
+      if (outcome.status !== 'completed') throw new Error(outcome.message)
       const remaining = await window.api.getDeploymentsForSkill(undeployFromTarget.skill.id)
       if (remaining.length === 0) {
         setUndeployFromTarget(null)
@@ -277,7 +280,7 @@ export function SkillsPage({
         setUndeployFromTarget({ ...undeployFromTarget, deployments: remaining })
       }
       await onRefresh()
-      success(`已从 ${targetTool} 取消部署`)
+      success(`已从 ${deployment.target_tool} 取消部署`)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
       await onRefresh()
