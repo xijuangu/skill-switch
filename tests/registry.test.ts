@@ -470,10 +470,13 @@ function writeSkillDir(parent: string, name: string, content: string): string {
 
 /** 测试用:构造 ToolConfig(默认 enabled + exists=true) */
 function mkTool(partial: Partial<ToolConfig> & Pick<ToolConfig, 'key' | 'paths'>): ToolConfig {
+  const targets = partial.targets ?? partial.paths.map((path, index) => ({ id: `${partial.key}-${index}`, path }))
   return {
     displayName: partial.key ?? 'Tool',
     enabled: true,
     existingPaths: partial.paths,
+    targets,
+    existingTargets: partial.existingTargets ?? targets,
     isCustom: false,
     exists: true,
     ...partial

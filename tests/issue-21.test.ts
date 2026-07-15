@@ -31,6 +31,8 @@ function mkTool(key: string, paths: string[], enabled = true): ToolConfig {
     enabled,
     paths,
     existingPaths: paths,
+    targets: paths.map((path, index) => ({ id: `${key}-${index}`, path })),
+    existingTargets: paths.map((path, index) => ({ id: `${key}-${index}`, path })),
     isCustom: false,
     exists: true
   }

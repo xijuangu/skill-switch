@@ -43,6 +43,14 @@ export interface Deployment {
   source_path: string
   deployed_at: string
   source_hash_at_deploy: string
+  /** Stable semantic identities; null means a legacy row could not be reconciled exactly. */
+  source_id: number | null
+  target_id: string | null
+}
+
+export interface DiscoveryTarget {
+  id: string
+  path: string
 }
 
 /** Skills 页展示用的聚合视图 */
@@ -94,6 +102,7 @@ export interface ToolPreset {
 export interface PresetConfig {
   enabled: boolean
   paths: string[]
+  targets?: DiscoveryTarget[]
 }
 
 /** 用户自定义工具 */
@@ -101,6 +110,7 @@ export interface CustomTool {
   key: string
   displayName: string
   paths: string[]
+  targets?: DiscoveryTarget[]
 }
 
 /** 平台能力检测结果 */
@@ -130,6 +140,8 @@ export interface ToolConfig {
   enabled: boolean
   paths: string[]
   existingPaths: string[]
+  targets: DiscoveryTarget[]
+  existingTargets: DiscoveryTarget[]
   isCustom: boolean
   exists: boolean
 }

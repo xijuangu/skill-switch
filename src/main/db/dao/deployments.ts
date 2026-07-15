@@ -50,17 +50,47 @@ export function upsertDeployment(
   targetPath: string,
   mode: DeployMode,
   sourcePath: string,
-  sourceHashAtDeploy: string
+  sourceHashAtDeploy: string,
+  identity?: { sourceId: number; targetId: string }
 ): void {
+  if (identity) {
+    db.prepare(
+      `INSERT INTO deployments
+        (skill_id, target_tool, target_path, mode, source_path, deployed_at,
+         source_hash_at_deploy, source_id, target_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(skill_id, target_id) WHERE target_id IS NOT NULL DO UPDATE SET
+         target_tool = excluded.target_tool,
+         target_path = excluded.target_path,
+         mode = excluded.mode,
+         source_path = excluded.source_path,
+         deployed_at = excluded.deployed_at,
+         source_hash_at_deploy = excluded.source_hash_at_deploy,
+         source_id = excluded.source_id`
+    ).run(
+      skillId,
+      targetTool,
+      targetPath,
+      mode,
+      sourcePath,
+      new Date().toISOString(),
+      sourceHashAtDeploy,
+      identity.sourceId,
+      identity.targetId
+    )
+    return
+  }
+  const existing = getDeploymentBySkillAndTool(db, skillId, targetTool)
+  if (existing) {
+    db.prepare(
+      `UPDATE deployments SET target_path = ?, mode = ?, source_path = ?, deployed_at = ?,
+       source_hash_at_deploy = ? WHERE id = ?`
+    ).run(targetPath, mode, sourcePath, new Date().toISOString(), sourceHashAtDeploy, existing.id)
+    return
+  }
   db.prepare(
     `INSERT INTO deployments (skill_id, target_tool, target_path, mode, source_path, deployed_at, source_hash_at_deploy)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(skill_id, target_tool) DO UPDATE SET
-       target_path = excluded.target_path,
-       mode = excluded.mode,
-       source_path = excluded.source_path,
-       deployed_at = excluded.deployed_at,
-       source_hash_at_deploy = excluded.source_hash_at_deploy`
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(
     skillId,
     targetTool,

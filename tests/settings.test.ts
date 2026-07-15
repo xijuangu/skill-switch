@@ -45,7 +45,9 @@ describe('settings service', () => {
     expect(existsSync(path)).toBe(true)
 
     const read = readSettings(path)
-    expect(read).toEqual(settings)
+    expect(read).toMatchObject(settings)
+    expect(read.tools.presets.codex.targets).toHaveLength(1)
+    expect(read.tools.custom[0].targets).toHaveLength(1)
     cleanup()
   })
 

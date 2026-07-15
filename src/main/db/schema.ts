@@ -38,13 +38,17 @@ CREATE TABLE IF NOT EXISTS deployments (
   source_path TEXT NOT NULL,
   deployed_at TEXT NOT NULL,
   source_hash_at_deploy TEXT NOT NULL,
+  source_id INTEGER,
+  target_id TEXT,
   FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
-  UNIQUE (skill_id, target_tool)
+  FOREIGN KEY (source_id) REFERENCES skill_sources(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_skill_sources_skill_id ON skill_sources(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_skill_id ON deployments(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_tool);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_skill_target_id
+  ON deployments(skill_id, target_id) WHERE target_id IS NOT NULL;
 `
 
 /**
@@ -78,5 +82,68 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
   if (!deploymentCols.some((column) => column.name === 'target_path')) {
     // Existing rows remain unresolved instead of guessing from mutable tool settings.
     db.exec('ALTER TABLE deployments ADD COLUMN target_path TEXT')
+  }
+  if (!deploymentCols.some((column) => column.name === 'source_id')) {
+    db.exec('ALTER TABLE deployments ADD COLUMN source_id INTEGER')
+  }
+  if (!deploymentCols.some((column) => column.name === 'target_id')) {
+    db.exec('ALTER TABLE deployments ADD COLUMN target_id TEXT')
+  }
+
+  const deploymentSql = (
+    db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'deployments'").get() as
+      | { sql: string }
+      | undefined
+  )?.sql
+  const completeLegacyColumns = [
+    'skill_id',
+    'target_tool',
+    'target_path',
+    'mode',
+    'source_path',
+    'deployed_at',
+    'source_hash_at_deploy'
+  ].every((name) => deploymentCols.some((column) => column.name === name))
+  if (completeLegacyColumns && /UNIQUE\s*\(\s*skill_id\s*,\s*target_tool\s*\)/i.test(deploymentSql ?? '')) {
+    const foreignKeys = db.pragma('foreign_keys', { simple: true }) as number
+    db.pragma('foreign_keys = OFF')
+    try {
+      db.transaction(() => {
+        db.exec(`
+          ALTER TABLE deployments RENAME TO deployments_legacy_identity;
+          CREATE TABLE deployments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_id INTEGER NOT NULL,
+            target_tool TEXT NOT NULL,
+            target_path TEXT,
+            mode TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            deployed_at TEXT NOT NULL,
+            source_hash_at_deploy TEXT NOT NULL,
+            source_id INTEGER,
+            target_id TEXT,
+            FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+            FOREIGN KEY (source_id) REFERENCES skill_sources(id) ON DELETE SET NULL
+          );
+          INSERT INTO deployments
+            (id, skill_id, target_tool, target_path, mode, source_path, deployed_at,
+             source_hash_at_deploy, source_id, target_id)
+          SELECT id, skill_id, target_tool, target_path, mode, source_path, deployed_at,
+                 source_hash_at_deploy, source_id, target_id
+          FROM deployments_legacy_identity;
+          DROP TABLE deployments_legacy_identity;
+        `)
+      })()
+    } finally {
+      db.pragma(`foreign_keys = ${foreignKeys ? 'ON' : 'OFF'}`)
+    }
+  }
+  if (completeLegacyColumns) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_deployments_skill_id ON deployments(skill_id);
+      CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_tool);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_skill_target_id
+        ON deployments(skill_id, target_id) WHERE target_id IS NOT NULL;
+    `)
   }
 }

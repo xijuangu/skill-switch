@@ -148,6 +148,21 @@ describe('tools-config service', () => {
   })
 
   describe('path modify', () => {
+    test('editing a configured path preserves its target ID', () => {
+      const first = setPresetPaths(defaultSettings(), 'codex', ['/before'])
+      const targetId = first.tools.presets.codex.targets![0].id
+      const edited = setPresetPaths(first, 'codex', ['/after'])
+      expect(edited.tools.presets.codex.targets).toEqual([{ id: targetId, path: '/after' }])
+    })
+
+    test('deleting and later re-adding a path creates a new target ID', () => {
+      const first = setPresetPaths(defaultSettings(), 'trae', ['/one', '/two'])
+      const removedId = first.tools.presets.trae.targets![1].id
+      const removed = setPresetPaths(first, 'trae', ['/one'])
+      const readded = setPresetPaths(removed, 'trae', ['/one', '/two'])
+      expect(readded.tools.presets.trae.targets![1].id).not.toBe(removedId)
+    })
+
     test('setPresetPaths overrides a preset paths and persists in settings', () => {
       const settings = setPresetPaths(defaultSettings(), 'codex', ['/custom/codex/skills'])
       expect(settings.tools.presets['codex']?.paths).toEqual(['/custom/codex/skills'])

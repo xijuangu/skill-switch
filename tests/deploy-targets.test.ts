@@ -13,6 +13,8 @@ function tool(key: string, path: string): ToolConfig {
     enabled: true,
     paths: [path],
     existingPaths: [path],
+    targets: [{ id: `target-${key}`, path }],
+    existingTargets: [{ id: `target-${key}`, path }],
     isCustom: false,
     exists: true
   }

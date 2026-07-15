@@ -66,11 +66,14 @@ export interface ToolConfigView {
   enabled: boolean
   paths: string[]
   existingPaths: string[]
+  targets: Array<{ id: string; path: string }>
+  existingTargets: Array<{ id: string; path: string }>
   isCustom: boolean
   exists: boolean
 }
 
 export interface DeployTargetOptionView {
+  targetId: string
   targetTool: string
   displayName: string
   targetRoot: string
@@ -138,6 +141,8 @@ export interface DeploymentView {
   target_path: string | null
   mode: DeployModeView
   source_path: string
+  source_id: number | null
+  target_id: string | null
   deployed_at: string
   source_hash_at_deploy: string
 }

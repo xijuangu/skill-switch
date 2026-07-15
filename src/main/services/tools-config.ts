@@ -9,6 +9,7 @@ import { existsSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { AppSettings, CustomTool, ToolConfig, ToolPreset } from '../types'
+import { reconcileTargetPaths, targetsForLegacyPaths } from './target-identity'
 
 /** 内置预设 key 列表(顺序稳定) */
 export const PRESET_KEYS = [
@@ -63,15 +64,21 @@ export const BUILTIN_PRESETS: ToolPreset[] = getBuiltinPresets(homedir())
 function resolvePreset(
   preset: ToolPreset,
   settings: AppSettings
-): { enabled: boolean; paths: string[] } {
+): { enabled: boolean; paths: string[]; targets: ToolConfig['targets'] } {
   const override = settings.tools.presets[preset.key]
   if (override) {
     return {
       enabled: override.enabled,
-      paths: override.paths.length > 0 ? override.paths : preset.defaultPaths
+      paths: override.paths.length > 0 ? override.paths : preset.defaultPaths,
+      targets:
+        override.targets ?? targetsForLegacyPaths(`preset:${preset.key}`, override.paths)
     }
   }
-  return { enabled: true, paths: preset.defaultPaths }
+  return {
+    enabled: true,
+    paths: preset.defaultPaths,
+    targets: targetsForLegacyPaths(`preset:${preset.key}`, preset.defaultPaths)
+  }
 }
 
 /** 探测路径列表中实际存在的路径(保留顺序) */
@@ -92,7 +99,7 @@ export function resolveToolConfigs(
   const configs: ToolConfig[] = []
 
   for (const preset of presets) {
-    const { enabled, paths } = resolvePreset(preset, settings)
+    const { enabled, paths, targets } = resolvePreset(preset, settings)
     const existingPaths = probeExisting(paths)
     configs.push({
       key: preset.key,
@@ -100,6 +107,8 @@ export function resolveToolConfigs(
       enabled,
       paths,
       existingPaths,
+      targets,
+      existingTargets: targets.filter((target) => existsSync(target.path)),
       isCustom: false,
       exists: existingPaths.length > 0
     })
@@ -107,12 +116,15 @@ export function resolveToolConfigs(
 
   for (const custom of settings.tools.custom) {
     const existingPaths = probeExisting(custom.paths)
+    const targets = custom.targets ?? targetsForLegacyPaths(`custom:${custom.key}`, custom.paths)
     configs.push({
       key: custom.key,
       displayName: custom.displayName,
       enabled: true,
       paths: custom.paths,
       existingPaths,
+      targets,
+      existingTargets: targets.filter((target) => existsSync(target.path)),
       isCustom: true,
       exists: existingPaths.length > 0
     })
@@ -130,9 +142,11 @@ export function setPresetEnabled(
   const preset = BUILTIN_PRESETS.find((p) => p.key === key)
   const existing = settings.tools.presets[key]
   const paths = existing?.paths ?? (preset?.defaultPaths ?? [])
+  const targets =
+    existing?.targets ?? targetsForLegacyPaths(`preset:${key}`, paths)
   const presets: AppSettings['tools']['presets'] = {
     ...settings.tools.presets,
-    [key]: { enabled, paths }
+    [key]: { enabled, paths, targets }
   }
   return {
     ...settings,
@@ -148,9 +162,13 @@ export function setPresetPaths(
 ): AppSettings {
   const existing = settings.tools.presets[key]
   const enabled = existing?.enabled ?? true
+  const preset = BUILTIN_PRESETS.find((candidate) => candidate.key === key)
+  const previousPaths = existing?.paths ?? preset?.defaultPaths ?? []
+  const previousTargets =
+    existing?.targets ?? targetsForLegacyPaths(`preset:${key}`, previousPaths)
   const presets: AppSettings['tools']['presets'] = {
     ...settings.tools.presets,
-    [key]: { enabled, paths }
+    [key]: { enabled, paths, targets: reconcileTargetPaths(previousTargets, paths) }
   }
   return {
     ...settings,
@@ -164,7 +182,10 @@ export function addCustomTool(
   tool: CustomTool
 ): AppSettings {
   const custom = settings.tools.custom.filter((c) => c.key !== tool.key)
-  custom.push(tool)
+  custom.push({
+    ...tool,
+    targets: tool.targets ?? reconcileTargetPaths([], tool.paths)
+  })
   return {
     ...settings,
     tools: { ...settings.tools, custom }

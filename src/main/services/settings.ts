@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs'
 import { dirname, join } from 'path'
 import type { AppSettings, PlatformInfo } from '../types'
+import { targetsForLegacyPaths } from './target-identity'
 
 const DEFAULT_BACKUP_RETENTION = 20
 
@@ -55,14 +56,30 @@ function mergeWithDefaults(parsed: Record<string, unknown>): AppSettings {
   const base = defaultSettings()
   const tools = (parsed.tools as { presets?: unknown; custom?: unknown } | undefined) ?? {}
   const presets = (tools.presets as Record<string, unknown> | undefined) ?? {}
-  const custom = (tools.custom as AppSettings['tools']['custom'] | undefined) ?? []
+  const custom = ((tools.custom as AppSettings['tools']['custom'] | undefined) ?? []).map(
+    (tool) => ({
+      ...tool,
+      targets: tool.targets ?? targetsForLegacyPaths(`custom:${tool.key}`, tool.paths)
+    })
+  )
   const backupRetention =
     typeof parsed.backupRetention === 'number' ? parsed.backupRetention : base.backupRetention
   const platform =
     (parsed.platform as Partial<PlatformInfo> | undefined) ?? {}
   return {
     tools: {
-      presets: presets as AppSettings['tools']['presets'],
+      presets: Object.fromEntries(
+        Object.entries(presets).map(([key, value]) => {
+          const preset = value as AppSettings['tools']['presets'][string]
+          return [
+            key,
+            {
+              ...preset,
+              targets: preset.targets ?? targetsForLegacyPaths(`preset:${key}`, preset.paths)
+            }
+          ]
+        })
+      ),
       custom
     },
     backupRetention,

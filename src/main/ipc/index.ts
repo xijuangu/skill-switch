@@ -33,6 +33,7 @@ import {
   getActiveScanDirs
 } from '../services/tools-config'
 import { scanAllTools } from '../services/scan-all'
+import { reconcileDeploymentIdentities } from '../services/deployment-identities'
 import { getAllSkills, getSkillById } from '../db/dao/skills'
 import {
   assertRegisteredSkillSource,
@@ -79,6 +80,7 @@ export interface ToolWithDriftsView {
 }
 
 export interface DeployTargetOption {
+  targetId: string
   targetTool: string
   displayName: string
   targetRoot: string
@@ -97,7 +99,7 @@ export function readDeployTargetOptions(
   return toolConfigs
     .filter((tool) => tool.enabled && tool.exists)
     .flatMap((tool) =>
-      tool.existingPaths.map((targetRoot) => {
+      tool.existingTargets.map(({ id: targetId, path: targetRoot }) => {
         const targetPath = resolveWithin(
           targetRoot,
           validateSkillName(skillName)
@@ -108,6 +110,7 @@ export function readDeployTargetOptions(
           existing.target_path !== targetPath
         ) {
           return {
+            targetId,
             targetTool: tool.key,
             displayName: tool.displayName,
             targetRoot,
@@ -122,6 +125,7 @@ export function readDeployTargetOptions(
             (existing.mode === 'symlink' || existing.mode === 'junction')
         })
         return {
+          targetId,
           targetTool: tool.key,
           displayName: tool.displayName,
           targetRoot,
@@ -648,6 +652,7 @@ export function runStartupSequence(db: DB): void {
   const settings = readSettings(SETTINGS_PATH)
   const withPlatform: AppSettings = { ...settings, platform }
   writeSettings(SETTINGS_PATH, withPlatform)
+  reconcileDeploymentIdentities(db, resolveToolConfigs(withPlatform, homedir()))
   const dirs = getActiveScanDirs(withPlatform, homedir())
   scanAllTools(db, dirs)
 }
