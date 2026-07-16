@@ -52,7 +52,38 @@ export interface SkillLibraryReadModelView {
     canonicalSource: SkillLibrarySourceView | null
     candidates: SkillLibrarySourceView[]
   }>
+  consolidationBatches: Array<{
+    id: string
+    status: 'previewed' | 'completed' | 'failed' | 'recovery-required' | 'undone'
+    items: Array<{ skillId: number; skillName: string; canonicalPath: string; archivePath: string }>
+    phase: string | null
+    createdAt: string
+    completedAt: string | null
+    undoneAt: string | null
+    failureMessage: string | null
+  }>
 }
+
+export type ConsolidationPreviewView = {
+  status: 'confirmation-required'
+  confirmationId: string
+  batchId: string
+  skillId: number
+  skillName: string
+  operations: Array<{ kind: 'write-canonical' | 'archive-candidate' | 'remove-observed-entry'; path: string }>
+}
+
+export type ConsolidationFailureView =
+  | { status: 'rejected'; batchId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'restore-path-occupied' | 'batch-not-undoable'; message: string }
+  | { status: 'recovery-required'; batchId: string; message: string }
+
+export type ConsolidationConfirmationOutcomeView =
+  | { status: 'completed'; batchId: string; skillId: number; canonicalPath: string }
+  | ConsolidationFailureView
+
+export type ConsolidationUndoOutcomeView =
+  | { status: 'undone'; batchId: string }
+  | ConsolidationFailureView
 
 /** issue #23:Skills 页展开视图用,DeploymentView + 当前状态描述 */
 export interface SkillDeploymentView extends DeploymentView {
@@ -301,6 +332,9 @@ declare global {
       scan: () => Promise<MultiScanResultView>
       getSkills: () => Promise<SkillWithConflictView[]>
       getSkillLibrary: () => Promise<SkillLibraryReadModelView>
+      previewConsolidation: (request: { candidateSourceId: number; canonicalRelativeParent: string }) => Promise<ConsolidationPreviewView>
+      confirmConsolidation: (confirmationId: string) => Promise<ConsolidationConfirmationOutcomeView>
+      undoConsolidation: (batchId: string) => Promise<ConsolidationUndoOutcomeView>
       getSettings: () => Promise<SettingsView>
       getSourceRoots: () => Promise<SourceRootView[]>
       registerSourceRoot: (path: string) => Promise<SourceRootScanResultView>

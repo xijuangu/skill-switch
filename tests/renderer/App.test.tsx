@@ -15,8 +15,12 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     getSkills: vi.fn().mockResolvedValue([]),
     getSkillLibrary: vi.fn().mockResolvedValue({
       canonicalRepository: { path: '/canonical' },
-      skills: []
+      skills: [],
+      consolidationBatches: []
     }),
+    previewConsolidation: vi.fn(),
+    confirmConsolidation: vi.fn(),
+    undoConsolidation: vi.fn(),
     getSettings: vi.fn().mockResolvedValue({
       tools: [],
       backupRetention: 5,
@@ -548,5 +552,134 @@ describe('SkillsPage source grouping (#62)', () => {
     )
     // 单版本不显示分组标题
     expect(screen.queryByText('版本 A')).not.toBeInTheDocument()
+  })
+})
+
+describe('SkillsPage consolidation (#84)', () => {
+  function renderSkillsPage(skills: SkillWithConflictView[], onRefresh = vi.fn().mockResolvedValue(undefined)) {
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={skills}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={onRefresh}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+    return onRefresh
+  }
+
+  it('offers consolidation only for a conflict-free Candidate Source and confirms the previewed plan', async () => {
+    const skill = buildFakeSkills(1)[0]
+    const preview = {
+      status: 'confirmation-required' as const,
+      confirmationId: 'confirm-84',
+      batchId: 'batch-84',
+      skillId: skill.id,
+      skillName: skill.name,
+      operations: [
+        { kind: 'write-canonical' as const, path: '/canonical/team/skill-0001' },
+        { kind: 'archive-candidate' as const, path: '/archive/batch-84/skill-0001' },
+        { kind: 'remove-observed-entry' as const, path: '/agents/skill-0001' }
+      ]
+    }
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' },
+        skills: [],
+        consolidationBatches: []
+      }),
+      previewConsolidation: vi.fn().mockResolvedValue(preview),
+      confirmConsolidation: vi.fn().mockResolvedValue({
+        status: 'completed', batchId: 'batch-84', skillId: skill.id,
+        canonicalPath: '/canonical/team/skill-0001'
+      })
+    })
+    const onRefresh = renderSkillsPage([skill])
+
+    await userEvent.click(await screen.findByRole('button', { name: '整理' }))
+    const input = screen.getByLabelText('权威库内父目录')
+    await userEvent.type(input, 'team')
+    await userEvent.click(screen.getByRole('button', { name: '预览整理' }))
+
+    expect(api.previewConsolidation).toHaveBeenCalledWith({
+      candidateSourceId: skill.sources[0].id,
+      canonicalRelativeParent: 'team'
+    })
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('写入权威源码库')
+    expect(dialog).toHaveTextContent('永久归档候选来源')
+    expect(dialog).toHaveTextContent('移除外部订阅入口')
+    expect(dialog).toHaveTextContent('归档会永久保留')
+    expect(dialog).toHaveTextContent('不会自动部署')
+
+    await userEvent.click(screen.getByRole('button', { name: '确认整理' }))
+    await waitFor(() => expect(api.confirmConsolidation).toHaveBeenCalledWith('confirm-84'))
+    await waitFor(() => expect(onRefresh).toHaveBeenCalled())
+    expect(await screen.findByRole('alert')).toHaveTextContent('整理完成')
+  })
+
+  it('does not offer consolidation for conflicts, duplicate Candidates, or a Canonical Source', async () => {
+    const conflict = buildConflictSkill()
+    const canonical = buildFakeSkills(1)[0]
+    canonical.id = 2
+    canonical.name = 'canonical-skill'
+    canonical.sources[0] = { ...canonical.sources[0], id: 20, skill_id: 2, source_role: 'canonical' }
+    const duplicate = buildFakeSkills(1)[0]
+    duplicate.id = 3
+    duplicate.name = 'duplicate-candidates'
+    duplicate.sources = [
+      { ...duplicate.sources[0], id: 30, skill_id: 3 },
+      { ...duplicate.sources[0], id: 31, skill_id: 3, path: '/same-version/duplicate' }
+    ]
+    mockWindowApi()
+    renderSkillsPage([conflict, canonical, duplicate])
+
+    expect(screen.queryByRole('button', { name: '整理' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByText('canonical-skill'))
+    expect(screen.queryByRole('button', { name: '整理' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByText('duplicate-candidates'))
+    expect(screen.queryByRole('button', { name: '整理' })).not.toBeInTheDocument()
+  })
+
+  it('offers undo on the canonical source from the latest completed batch and shows rejection messages', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0] = { ...skill.sources[0], source_role: 'canonical' }
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' },
+        skills: [],
+        consolidationBatches: [
+          {
+            id: 'batch-old', status: 'completed', phase: null,
+            items: [{ skillId: skill.id, skillName: skill.name, canonicalPath: '/canonical/skill-0001', archivePath: '/archive/old' }],
+            createdAt: '2026-07-15T00:00:00.000Z', completedAt: '2026-07-15T00:01:00.000Z',
+            undoneAt: null, failureMessage: null
+          },
+          {
+            id: 'batch-latest', status: 'completed', phase: null,
+            items: [{ skillId: skill.id, skillName: skill.name, canonicalPath: '/canonical/skill-0001', archivePath: '/archive/latest' }],
+            createdAt: '2026-07-16T00:00:00.000Z', completedAt: '2026-07-16T00:01:00.000Z',
+            undoneAt: null, failureMessage: null
+          }
+        ]
+      }),
+      undoConsolidation: vi.fn().mockResolvedValue({
+        status: 'rejected', batchId: 'batch-latest', reason: 'restore-path-occupied',
+        message: '原候选位置已被占用，无法撤销。'
+      })
+    })
+    renderSkillsPage([skill])
+
+    await userEvent.click(await screen.findByRole('button', { name: '撤销整理' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认撤销' }))
+    await waitFor(() => expect(api.undoConsolidation).toHaveBeenCalledWith('batch-latest'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('原候选位置已被占用，无法撤销。')
   })
 })

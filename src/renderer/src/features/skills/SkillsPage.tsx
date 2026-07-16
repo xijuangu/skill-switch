@@ -5,7 +5,7 @@ import {
   ChevronRight, ChevronDown, Hash, Calendar, GitBranch, AlertCircle
 } from 'lucide-react'
 import {
-  Button, Input, StatusDot, EmptyState, Tabs, Skeleton, Menu, getDriftStatus
+  Button, Input, StatusDot, EmptyState, Tabs, Skeleton, Menu, Dialog, getDriftStatus
 } from '../../shared'
 import { useToast } from '../../app/Toast'
 import {
@@ -30,6 +30,9 @@ type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 
 type DeployFilter = 'all' | 'deployed' | 'undeployed'
 type DeployTarget = { skill: SkillView; sourceId: number }
+type ConsolidationPreview = Awaited<ReturnType<typeof window.api.previewConsolidation>>
+type ConsolidationBatch = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationBatches'][number]
+type UndoBatch = { batch: ConsolidationBatch; item: ConsolidationBatch['items'][number] }
 
 function managedDeploymentCount(skill: SkillView): number {
   return skill.deployments.filter((deployment) => deployment.management === 'managed').length
@@ -72,11 +75,27 @@ export function SkillsPage({
   const [viewMdSourcePicker, setViewMdSourcePicker] = useState<SkillView | null>(null)
   const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string; management: 'managed' | 'observed' }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
+  const [consolidationTarget, setConsolidationTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
+  const [canonicalRelativeParent, setCanonicalRelativeParent] = useState('')
+  const [consolidationPreview, setConsolidationPreview] = useState<ConsolidationPreview | null>(null)
+  const [consolidationBatches, setConsolidationBatches] = useState<ConsolidationBatch[]>([])
+  const [undoBatch, setUndoBatch] = useState<UndoBatch | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
   const pendingAdjacentSelectRef = useRef<number | null>(null)
 
   const { success, error: toastError, info } = useToast()
+
+  const refreshConsolidationBatches = async () => {
+    const library = await window.api.getSkillLibrary()
+    setConsolidationBatches(library.consolidationBatches ?? [])
+  }
+
+  useEffect(() => {
+    refreshConsolidationBatches().catch((e) => {
+      toastError(e instanceof Error ? e.message : String(e))
+    })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()
@@ -308,6 +327,69 @@ export function SkillsPage({
     setInstallOpen(false)
   }
 
+  const closeConsolidation = () => {
+    if (actionBusy) return
+    setConsolidationTarget(null)
+    setCanonicalRelativeParent('')
+    setConsolidationPreview(null)
+  }
+
+  const handlePreviewConsolidation = async () => {
+    if (!consolidationTarget) return
+    setActionBusy(true)
+    try {
+      const preview = await window.api.previewConsolidation({
+        candidateSourceId: consolidationTarget.source.id,
+        canonicalRelativeParent: canonicalRelativeParent.trim()
+      })
+      setConsolidationPreview(preview)
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleConfirmConsolidation = async () => {
+    if (!consolidationPreview) return
+    setActionBusy(true)
+    try {
+      const outcome = await window.api.confirmConsolidation(consolidationPreview.confirmationId)
+      if (outcome.status !== 'completed') {
+        toastError('message' in outcome ? outcome.message : '整理未完成，请刷新后重试。')
+        return
+      }
+      success(`「${consolidationPreview.skillName}」整理完成；请按需手动部署`)
+      setConsolidationTarget(null)
+      setCanonicalRelativeParent('')
+      setConsolidationPreview(null)
+      await Promise.all([onRefresh(), refreshConsolidationBatches()])
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleUndoConsolidation = async () => {
+    if (!undoBatch) return
+    setActionBusy(true)
+    try {
+      const outcome = await window.api.undoConsolidation(undoBatch.batch.id)
+      if (outcome.status !== 'undone') {
+        toastError('message' in outcome ? outcome.message : '撤销未完成，请刷新后重试。')
+        return
+      }
+      success(`已撤销「${undoBatch.item.skillName}」的整理`)
+      setUndoBatch(null)
+      await Promise.all([onRefresh(), refreshConsolidationBatches()])
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const getMenuActions = (skill: SkillView) => [
     { key: 'undeploy', label: '从…取消部署', onClick: () => handleUndeployFromInit(skill), disabled: actionBusy },
     { key: 'view-md', label: '查看 SKILL.md', onClick: () => handleViewMd(skill), disabled: actionBusy },
@@ -463,9 +545,16 @@ export function SkillsPage({
         {selected ? (
           <SkillDetail
             skill={selected}
+            consolidationBatches={consolidationBatches}
             tab={detailTab}
             onTabChange={setDetailTab}
             onDeploy={() => handleDeployClick(selected)}
+            onConsolidate={(source) => {
+              setConsolidationTarget({ skill: selected, source })
+              setCanonicalRelativeParent('')
+              setConsolidationPreview(null)
+            }}
+            onUndoConsolidation={setUndoBatch}
             onMoreClick={(el) => {
               setVisibleMenuAnchor(el)
               setVisibleMenuSkill(selected)
@@ -554,6 +643,77 @@ export function SkillsPage({
           onCancel={() => setRemoveRegistryTarget(null)}
         />
       )}
+
+      {consolidationTarget && (
+        <Dialog
+          open
+          onClose={closeConsolidation}
+          title={consolidationPreview ? `确认整理「${consolidationTarget.skill.name}」` : `整理「${consolidationTarget.skill.name}」`}
+          busy={actionBusy}
+          confirmLabel={consolidationPreview ? '确认整理' : '预览整理'}
+          onConfirm={consolidationPreview ? handleConfirmConsolidation : handlePreviewConsolidation}
+          closeOnOverlay={false}
+        >
+          {consolidationPreview ? (
+            <ConsolidationOperations operations={consolidationPreview.operations} />
+          ) : (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label htmlFor="canonical-relative-parent" className="block text-xs font-medium text-foreground-secondary">
+                  权威库内父目录
+                </label>
+                <Input
+                  id="canonical-relative-parent"
+                  aria-label="权威库内父目录"
+                  value={canonicalRelativeParent}
+                  onChange={(event) => setCanonicalRelativeParent(event.target.value)}
+                  placeholder="留空表示权威库根目录"
+                  mono
+                  className="w-full"
+                />
+              </div>
+              <p className="text-2xs text-foreground-muted">
+                这里只填写权威库内的相对父目录；Skill 名称会自动保留。
+              </p>
+            </div>
+          )}
+        </Dialog>
+      )}
+
+      {undoBatch && (
+        <Dialog
+          open
+          onClose={() => { if (!actionBusy) setUndoBatch(null) }}
+          title={`撤销整理「${undoBatch.item.skillName}」`}
+          description="将尝试恢复原候选来源并移除本次写入的权威来源；若恢复位置已被占用，操作会被拒绝。"
+          busy={actionBusy}
+          confirmLabel="确认撤销"
+          onConfirm={handleUndoConsolidation}
+          closeOnOverlay={false}
+        />
+      )}
+    </div>
+  )
+}
+
+function ConsolidationOperations({ operations }: { operations: ConsolidationPreview['operations'] }) {
+  const labels: Record<ConsolidationPreview['operations'][number]['kind'], string> = {
+    'write-canonical': '写入权威源码库',
+    'archive-candidate': '永久归档候选来源',
+    'remove-observed-entry': '移除外部订阅入口'
+  }
+  return (
+    <div className="space-y-3">
+      <div className="space-y-2">
+        {operations.map((operation, index) => (
+          <div key={`${operation.kind}:${operation.path}:${index}`} className="rounded border border-border p-2">
+            <p className="text-xs font-medium text-foreground-secondary">{labels[operation.kind]}</p>
+            <code className="block mt-1 text-2xs text-foreground-muted break-all">{operation.path}</code>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-warning">归档会永久保留，直到你手动清理归档批次。</p>
+      <p className="text-xs text-foreground-secondary">整理只建立权威来源，不会自动部署到任何工具。</p>
     </div>
   )
 }
@@ -623,15 +783,21 @@ function SkillMasterItem({
 
 function SkillDetail({
   skill,
+  consolidationBatches,
   tab,
   onTabChange,
   onDeploy,
+  onConsolidate,
+  onUndoConsolidation,
   onMoreClick
 }: {
   skill: SkillView
+  consolidationBatches: ConsolidationBatch[]
   tab: string
   onTabChange: (tab: string) => void
   onDeploy: () => void
+  onConsolidate: (source: SkillSourceView) => void
+  onUndoConsolidation: (batch: UndoBatch) => void
   onMoreClick: (el: HTMLElement) => void
 }) {
   const conflict = skill.conflict.hasConflict
@@ -670,28 +836,61 @@ function SkillDetail({
       />
 
       <div className="flex-1 overflow-auto p-4">
-        {tab === 'sources' && <SourcePanel skill={skill} />}
+        {tab === 'sources' && (
+          <SourcePanel
+            skill={skill}
+            consolidationBatches={consolidationBatches}
+            onConsolidate={onConsolidate}
+            onUndoConsolidation={onUndoConsolidation}
+          />
+        )}
         {tab === 'deployments' && <DeploymentPanel skill={skill} />}
       </div>
     </div>
   )
 }
 
-function SourcePanel({ skill }: { skill: SkillView }) {
+function SourcePanel({
+  skill,
+  consolidationBatches,
+  onConsolidate,
+  onUndoConsolidation
+}: {
+  skill: SkillView
+  consolidationBatches: ConsolidationBatch[]
+  onConsolidate: (source: SkillSourceView) => void
+  onUndoConsolidation: (batch: UndoBatch) => void
+}) {
   if (skill.sources.length === 0) {
     return <p className="text-xs text-foreground-muted">未登记任何来源。</p>
   }
 
   const hashGroups = groupByHash(skill.sources)
   const distinctVersions = hashGroups.size
+  const latestCompletedBatch = consolidationBatches
+    .flatMap((batch) => batch.items
+      .filter((item) => item.skillId === skill.id)
+      .map((item) => ({ batch, item })))
+    .filter(({ batch }) => batch.status === 'completed')
+    .sort((a, b) => Date.parse(b.batch.completedAt ?? b.batch.createdAt) - Date.parse(a.batch.completedAt ?? a.batch.createdAt))[0] ?? null
+  const hasExactlyOneCandidate = skill.sources.filter((source) => source.source_role === 'candidate').length === 1
+  const hasCanonical = skill.sources.some((source) => source.source_role === 'canonical')
+  const renderSource = (source: SkillSourceView) => (
+    <SourceItem
+      key={source.id}
+      source={source}
+      canConsolidate={source.source_role === 'candidate' && hasExactlyOneCandidate && !hasCanonical && !skill.conflict.hasConflict}
+      undoBatch={source.source_role === 'canonical' ? latestCompletedBatch : null}
+      onConsolidate={() => onConsolidate(source)}
+      onUndoConsolidation={onUndoConsolidation}
+    />
+  )
 
   // 单版本:保持平铺,不显示分组结构
   if (distinctVersions <= 1) {
     return (
       <div className="space-y-2">
-        {skill.sources.map((src) => (
-          <SourceItem key={src.id} source={src} />
-        ))}
+        {skill.sources.map(renderSource)}
       </div>
     )
   }
@@ -722,9 +921,7 @@ function SourcePanel({ skill }: { skill: SkillView }) {
               </code>
             </div>
             <div className="p-2 space-y-2 bg-surface">
-              {sources.map((src) => (
-                <SourceItem key={src.id} source={src} />
-              ))}
+              {sources.map(renderSource)}
             </div>
           </div>
         )
@@ -733,15 +930,28 @@ function SourcePanel({ skill }: { skill: SkillView }) {
   )
 }
 
-function SourceItem({ source }: { source: SkillSourceView }) {
+function SourceItem({
+  source,
+  canConsolidate,
+  undoBatch,
+  onConsolidate,
+  onUndoConsolidation
+}: {
+  source: SkillSourceView
+  canConsolidate: boolean
+  undoBatch: UndoBatch | null
+  onConsolidate: () => void
+  onUndoConsolidation: (batch: UndoBatch) => void
+}) {
   const [expanded, setExpanded] = useState(false)
 
   return (
     <div className="border border-border rounded-md">
-      <button
-        className="w-full flex items-center justify-between p-2.5 text-left hover:bg-surface-hover transition-colors duration-fast"
-        onClick={() => setExpanded(!expanded)}
-      >
+      <div className="flex items-center hover:bg-surface-hover transition-colors duration-fast">
+        <button
+          className="flex-1 flex items-center justify-between p-2.5 text-left min-w-0"
+          onClick={() => setExpanded(!expanded)}
+        >
         <div className="flex items-center gap-2 min-w-0">
           <span className={`text-2xs px-1.5 py-0.5 rounded-full border ${
             source.source_role === 'canonical'
@@ -755,8 +965,15 @@ function SourceItem({ source }: { source: SkillSourceView }) {
           </span>
           <code className="text-xs font-mono text-foreground truncate">{source.path}</code>
         </div>
-        {expanded ? <ChevronDown className="h-3.5 w-3.5 text-foreground-muted shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-foreground-muted shrink-0" />}
-      </button>
+          {expanded ? <ChevronDown className="h-3.5 w-3.5 text-foreground-muted shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-foreground-muted shrink-0" />}
+        </button>
+        {canConsolidate && (
+          <Button variant="secondary" size="sm" className="mr-2" onClick={onConsolidate}>整理</Button>
+        )}
+        {undoBatch && (
+          <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoConsolidation(undoBatch)}>撤销整理</Button>
+        )}
+      </div>
       {expanded && (
         <div className="border-t border-border p-2.5 space-y-1">
           <MetaRow icon={Hash} label="hash" value={source.hash} />

@@ -58,9 +58,34 @@ CREATE TABLE IF NOT EXISTS deployments (
   FOREIGN KEY (source_id) REFERENCES skill_sources(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS consolidation_batches (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('previewed', 'completed', 'failed', 'recovery-required', 'undone')),
+  phase TEXT,
+  evidence_json TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  undone_at TEXT,
+  failure_message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS consolidation_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id TEXT NOT NULL,
+  skill_id INTEGER NOT NULL,
+  skill_name TEXT NOT NULL,
+  candidate_source_snapshot TEXT NOT NULL,
+  observed_deployments_snapshot TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
+  archive_path TEXT NOT NULL,
+  canonical_hash TEXT,
+  FOREIGN KEY (batch_id) REFERENCES consolidation_batches(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_skill_sources_skill_id ON skill_sources(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_skill_id ON deployments(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_tool);
+CREATE INDEX IF NOT EXISTS idx_consolidation_items_batch_id ON consolidation_items(batch_id);
 `
 
 /**
@@ -282,4 +307,33 @@ export function runMigrations(
       END;
     `)
   }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS consolidation_batches (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('previewed', 'completed', 'failed', 'recovery-required', 'undone')),
+      phase TEXT,
+      evidence_json TEXT,
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      undone_at TEXT,
+      failure_message TEXT
+    );
+    CREATE TABLE IF NOT EXISTS consolidation_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id TEXT NOT NULL,
+      skill_id INTEGER NOT NULL,
+      skill_name TEXT NOT NULL,
+      candidate_source_snapshot TEXT NOT NULL,
+      observed_deployments_snapshot TEXT NOT NULL,
+      canonical_path TEXT NOT NULL,
+      archive_path TEXT NOT NULL,
+      canonical_hash TEXT,
+      FOREIGN KEY (batch_id) REFERENCES consolidation_batches(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_consolidation_items_batch_id
+      ON consolidation_items(batch_id);
+  `)
+  const consolidationColumns = new Set((db.prepare('PRAGMA table_info(consolidation_batches)').all() as { name: string }[]).map((column) => column.name))
+  if (!consolidationColumns.has('phase')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN phase TEXT')
+  if (!consolidationColumns.has('evidence_json')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN evidence_json TEXT')
 }

@@ -20,7 +20,7 @@ import type {
   SkillWithConflict,
   ToolConfig
 } from '../types'
-import { SETTINGS_PATH, BACKUPS_DIR, SKILLS_DIR } from '../paths'
+import { SETTINGS_PATH, BACKUPS_DIR, SKILLS_DIR, SOURCE_ARCHIVE_DIR } from '../paths'
 import { readSettings, writeSettings } from '../services/settings'
 import { detectPlatform } from '../services/platform'
 import {
@@ -220,6 +220,11 @@ function assertNonEmptyString(value: unknown, label: string): string {
   return value.trim()
 }
 
+function assertString(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`${label} must be a string`)
+  return value
+}
+
 function assertAbsolutePaths(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`${label} must contain at least one path`)
@@ -239,7 +244,9 @@ function assertDeployMode(value: unknown): DeployMode {
 export function registerIpcHandlers(db: DB): void {
   const skillLibraryFacade = createSkillLibraryFacade({
     db,
-    canonicalRepositoryPath: SKILLS_DIR
+    canonicalRepositoryPath: SKILLS_DIR,
+    sourceArchivePath: SOURCE_ARCHIVE_DIR,
+    backupsDir: BACKUPS_DIR
   })
   const deploymentFacade = createDeploymentFacade({
     db,
@@ -269,6 +276,21 @@ export function registerIpcHandlers(db: DB): void {
   })
 
   ipcMain.handle('getSkillLibrary', async () => skillLibraryFacade.read())
+
+  ipcMain.handle('skillLibrary:previewConsolidation', async (_e, request: unknown) => {
+    if (typeof request !== 'object' || request === null) throw new Error('consolidation request must be an object')
+    const dto = request as Record<string, unknown>
+    return skillLibraryFacade.previewConsolidation({
+      candidateSourceId: assertInteger(dto.candidateSourceId, 'candidateSourceId'),
+      canonicalRelativeParent: assertString(dto.canonicalRelativeParent, 'canonicalRelativeParent')
+    })
+  })
+  ipcMain.handle('skillLibrary:confirmConsolidation', async (_e, confirmationId: unknown) =>
+    skillLibraryFacade.confirmConsolidation(assertNonEmptyString(confirmationId, 'confirmationId'))
+  )
+  ipcMain.handle('skillLibrary:undoConsolidation', async (_e, batchId: unknown) =>
+    skillLibraryFacade.undoConsolidation(assertNonEmptyString(batchId, 'batchId'))
+  )
 
   ipcMain.handle('getSettings', async () => {
     const settings = readSettings(SETTINGS_PATH)

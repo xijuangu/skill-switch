@@ -5,6 +5,12 @@ const api = {
   scan: () => ipcRenderer.invoke('scan'),
   getSkills: () => ipcRenderer.invoke('getSkills'),
   getSkillLibrary: () => ipcRenderer.invoke('getSkillLibrary'),
+  previewConsolidation: (request: { candidateSourceId: number; canonicalRelativeParent: string }) =>
+    ipcRenderer.invoke('skillLibrary:previewConsolidation', request),
+  confirmConsolidation: (confirmationId: string) =>
+    ipcRenderer.invoke('skillLibrary:confirmConsolidation', confirmationId),
+  undoConsolidation: (batchId: string) =>
+    ipcRenderer.invoke('skillLibrary:undoConsolidation', batchId),
   getSettings: () => ipcRenderer.invoke('getSettings'),
   getSourceRoots: () => ipcRenderer.invoke('getSourceRoots'),
   registerSourceRoot: (path: string) => ipcRenderer.invoke('registerSourceRoot', path),

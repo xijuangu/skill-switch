@@ -7,6 +7,44 @@ import { runMigrations } from '../src/main/db/schema'
 import { createDatabase } from '../src/main/db/database'
 
 describe('database migrations', () => {
+  test('adds persistent Consolidation Batch and item snapshots to an existing database', () => {
+    const db = new Database(':memory:')
+    db.exec("CREATE TABLE skill_sources (id INTEGER PRIMARY KEY, source_type TEXT NOT NULL DEFAULT 'indexed'); CREATE TABLE deployments (id INTEGER PRIMARY KEY);")
+
+    runMigrations(db)
+
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'consolidation_%' ORDER BY name").all()).toEqual([
+      { name: 'consolidation_batches' },
+      { name: 'consolidation_items' }
+    ])
+    expect((db.prepare('PRAGMA table_info(consolidation_items)').all() as Array<{ name: string }>).map((column) => column.name)).toEqual(expect.arrayContaining([
+      'candidate_source_snapshot', 'observed_deployments_snapshot', 'canonical_path', 'archive_path'
+    ]))
+    db.close()
+  })
+
+  test('adds durable execution evidence columns to an existing Consolidation table', () => {
+    const db = new Database(':memory:')
+    db.exec(`
+      CREATE TABLE skill_sources (id INTEGER PRIMARY KEY, source_type TEXT NOT NULL DEFAULT 'indexed');
+      CREATE TABLE deployments (id INTEGER PRIMARY KEY);
+      CREATE TABLE consolidation_batches (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('previewed', 'completed', 'failed', 'recovery-required', 'undone')),
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        undone_at TEXT,
+        failure_message TEXT
+      );
+    `)
+
+    runMigrations(db)
+
+    const columns = (db.prepare('PRAGMA table_info(consolidation_batches)').all() as Array<{ name: string }>).map((column) => column.name)
+    expect(columns).toEqual(expect.arrayContaining(['phase', 'evidence_json']))
+    db.close()
+  })
+
   test('classifies legacy Source rows by the fixed Canonical Repository without changing IDs', () => {
     const dir = mkdtempSync(join(tmpdir(), 'skill-switch-source-role-'))
     const canonicalRepository = join(dir, 'canonical')
