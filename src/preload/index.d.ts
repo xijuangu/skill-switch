@@ -70,9 +70,17 @@ export interface SkillLibraryReadModelView {
       archivePath: string
       originalPath: string
       originalHash: string
+      originalPaths: string[]
+      originalHashes: string[]
       archivedToolPaths: string[]
     }>
-    archive: { sizeBytes: number; recoverable: boolean; purgeable: boolean; purgedAt: string | null }
+    archive: {
+      sizeBytes: number
+      recoverable: boolean
+      purgeable: boolean
+      purgedAt: string | null
+      recoveryBlockedReason: string | null
+    }
     phase: string | null
     createdAt: string
     completedAt: string | null

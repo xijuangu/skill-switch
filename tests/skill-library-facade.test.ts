@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
@@ -837,6 +837,139 @@ describe('SkillLibraryFacade', () => {
     })
     expect(reopened.read().consolidationBatches[0]).toMatchObject({
       status: 'recovery-required', recoveryDirection: 'inspect'
+    })
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('finishes a confirmed purge on restart when payload deletion completed before the terminal database commit', () => {
+    const fixture = consolidationFixture('skill-library-purge-durable-restart-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+    const purge = fixture.facade.previewSourceArchivePurge(preview.batchId)
+    if (purge.status !== 'confirmation-required') throw new Error(purge.message)
+    const archivePath = join(fixture.sourceArchive, preview.batchId)
+    const stagePath = join(fixture.sourceArchive, `.purge-${preview.batchId}-${purge.confirmationId}`)
+    rmSync(archivePath, { recursive: true })
+    fixture.db.prepare('INSERT INTO consolidation_operation_locks (resource, batch_id) VALUES (?, ?)')
+      .run(`path:${archivePath}`, preview.batchId)
+    fixture.db.prepare('UPDATE consolidation_batches SET phase = ?, evidence_json = ? WHERE id = ?').run(
+      'archive-purge-prepared',
+      JSON.stringify({
+        action: 'archive-purge-prepared', confirmationId: purge.confirmationId,
+        archivePath, stagePath, archiveHash: 'already-validated', sizeBytes: purge.sizeBytes,
+        originalStatus: 'completed'
+      }),
+      preview.batchId
+    )
+
+    const reopened = createSkillLibraryFacade({
+      db: fixture.db, canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive, backupsDir: join(fixture.root.dir, 'backups')
+    })
+    expect(reopened.read().consolidationBatches[0]).toMatchObject({
+      status: 'completed', phase: null, archive: { recoverable: false, purgeable: false }
+    })
+    expect(reopened.read().consolidationBatches[0].archive.purgedAt).not.toBeNull()
+    expect(fixture.db.prepare('SELECT * FROM consolidation_operation_locks WHERE batch_id = ?').all(preview.batchId)).toEqual([])
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('finishes a confirmed purge on restart from its durable staged payload', () => {
+    const fixture = consolidationFixture('skill-library-purge-staged-restart-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+    const purge = fixture.facade.previewSourceArchivePurge(preview.batchId)
+    if (purge.status !== 'confirmation-required') throw new Error(purge.message)
+    const archivePath = join(fixture.sourceArchive, preview.batchId)
+    const stagePath = join(fixture.sourceArchive, `.purge-${preview.batchId}-${purge.confirmationId}`)
+    const archiveHash = hashDir(archivePath)
+    renameSync(archivePath, stagePath)
+    fixture.db.prepare('UPDATE consolidation_batches SET phase = ?, evidence_json = ? WHERE id = ?').run(
+      'archive-purge-prepared',
+      JSON.stringify({
+        action: 'archive-purge-prepared', confirmationId: purge.confirmationId,
+        archivePath, stagePath, archiveHash, sizeBytes: purge.sizeBytes, originalStatus: 'completed'
+      }),
+      preview.batchId
+    )
+    const reopened = createSkillLibraryFacade({
+      db: fixture.db, canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive, backupsDir: join(fixture.root.dir, 'backups')
+    })
+    expect(existsSync(stagePath)).toBe(false)
+    expect(reopened.read().consolidationBatches[0]).toMatchObject({ status: 'completed', phase: null })
+    expect(reopened.read().consolidationBatches[0].archive.purgedAt).not.toBeNull()
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('archive purge respects Source Relocation locks and leaves them untouched', () => {
+    const fixture = consolidationFixture('skill-library-purge-relocation-lock-')
+    const consolidation = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(consolidation.confirmationId)
+    const purge = fixture.facade.previewSourceArchivePurge(consolidation.batchId)
+    if (purge.status !== 'confirmation-required') throw new Error(purge.message)
+    const canonical = getSourceByPath(fixture.db, join(fixture.canonicalRepository, 'demo'))!
+    const relocation = fixture.facade.previewSourceRelocation({ sourceId: canonical.id, canonicalRelativeParent: 'team' })
+    fixture.db.prepare('INSERT INTO source_relocation_locks (resource, relocation_id) VALUES (?, ?)')
+      .run('skill:demo', relocation.relocationId)
+
+    expect(fixture.facade.confirmSourceArchivePurge(purge.confirmationId)).toMatchObject({
+      status: 'rejected', reason: 'batch-busy'
+    })
+    expect(fixture.db.prepare('SELECT resource FROM source_relocation_locks WHERE relocation_id = ?').all(relocation.relocationId))
+      .toEqual([{ resource: 'skill:demo' }])
+    expect(existsSync(join(fixture.sourceArchive, consolidation.batchId))).toBe(true)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('read uses the complete restore preflight and explains an occupied original path without mutating the batch', () => {
+    const fixture = consolidationFixture('skill-library-archive-preflight-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+    mkdirSync(fixture.candidatePath, { recursive: true })
+    const batch = fixture.facade.read().consolidationBatches[0]
+    expect(batch).toMatchObject({ status: 'completed', phase: null })
+    expect(batch.archive).toMatchObject({
+      recoverable: false, recoveryBlockedReason: '原候选来源或旧工具入口位置已被占用。'
+    })
+    expect(fixture.db.prepare('SELECT * FROM consolidation_operation_locks WHERE batch_id = ?').all(preview.batchId)).toEqual([])
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('read and restore share the same canonical-integrity preflight result', () => {
+    const fixture = consolidationFixture('skill-library-archive-canonical-preflight-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+    writeFileSync(join(fixture.canonicalRepository, 'demo', 'SKILL.md'), '# changed canonical')
+    const reason = fixture.facade.read().consolidationBatches[0].archive.recoveryBlockedReason
+    expect(reason).toBe('权威 Source 已变化或不可用。')
+    expect(fixture.facade.restoreConsolidation(preview.batchId)).toMatchObject({
+      status: 'rejected', reason: 'plan-stale', message: reason
+    })
+    expect(fixture.db.prepare('SELECT * FROM consolidation_operation_locks WHERE batch_id = ?').all(preview.batchId)).toEqual([])
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('read accepts multi-source Candidate snapshots and exposes every original path', () => {
+    const fixture = consolidationFixture('skill-library-archive-multi-snapshot-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+    const second = { ...fixture.source, id: fixture.source.id + 100, path: join(fixture.root.dir, 'candidates', 'demo-copy') }
+    fixture.db.prepare('UPDATE consolidation_items SET candidate_source_snapshot = ? WHERE batch_id = ?').run(
+      JSON.stringify({ sources: [fixture.source, second] }), preview.batchId
+    )
+
+    expect(fixture.facade.read().consolidationBatches[0].items[0]).toMatchObject({
+      originalPaths: [fixture.source.path, second.path],
+      originalHashes: [fixture.source.hash, second.hash]
     })
 
     fixture.db.close()

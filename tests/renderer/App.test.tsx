@@ -106,9 +106,10 @@ describe('App (integration)', () => {
       items: [{
         skillId: 1, skillName: 'demo', canonicalPath: '/canonical/demo',
         archivePath: '/archive/batch-88/source/demo', originalPath: '/imports/demo',
-        originalHash: 'abc123', archivedToolPaths: ['/tools/codex/demo']
+        originalPaths: ['/imports/demo', '/imports/demo-copy'], originalHash: 'abc123',
+        originalHashes: ['abc123', 'abc123'], archivedToolPaths: ['/tools/codex/demo']
       }],
-      archive: { sizeBytes: 2048, recoverable: true, purgeable: true, purgedAt: null },
+      archive: { sizeBytes: 2048, recoverable: true, purgeable: true, purgedAt: null, recoveryBlockedReason: null },
       createdAt: '2026-07-16T00:00:00.000Z', completedAt: '2026-07-16T00:01:00.000Z',
       undoneAt: null, failureMessage: null, recoveryDirection: null,
       evidenceSummary: { itemCount: 1, phases: [] }
@@ -130,6 +131,7 @@ describe('App (integration)', () => {
 
     expect(await screen.findByText('demo')).toBeInTheDocument()
     expect(screen.getByText('/imports/demo')).toBeInTheDocument()
+    expect(screen.getByText('/imports/demo-copy')).toBeInTheDocument()
     expect(screen.getByText('/tools/codex/demo')).toBeInTheDocument()
     expect(screen.getByText('归档占用：2 KB')).toBeInTheDocument()
     expect(screen.getByText('可恢复')).toBeInTheDocument()

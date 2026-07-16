@@ -108,6 +108,9 @@ export function SourceArchivePage() {
                   </div>
                   <p className="mt-1 text-2xs text-foreground-muted">归档占用：{formatBytes(batch.archive.sizeBytes)}</p>
                   <p className="mt-1 text-2xs text-foreground-muted">整理时间：{new Date(batch.createdAt).toLocaleString('zh-CN')}</p>
+                  {!batch.archive.recoverable && batch.archive.recoveryBlockedReason && (
+                    <p className="mt-1 text-2xs text-warning">不可恢复：{batch.archive.recoveryBlockedReason}</p>
+                  )}
                 </div>
                 <div className="flex gap-2">
                   <Button size="sm" variant="secondary" disabled={!batch.archive.recoverable} onClick={() => setRestoreTarget(batch)}>
@@ -122,10 +125,14 @@ export function SourceArchivePage() {
                 {batch.items.map((item) => (
                   <div key={`${batch.id}:${item.skillId}`} className="rounded bg-surface-secondary p-3">
                     <p className="text-xs font-medium">{item.skillName}</p>
-                    <p className="mt-1 text-2xs text-foreground-muted">原始路径</p>
-                    <code className="block text-2xs break-all">{item.originalPath}</code>
-                    <p className="mt-1 text-2xs text-foreground-muted">原始内容哈希</p>
-                    <code className="block text-2xs break-all">{item.originalHash}</code>
+                    {item.originalPaths.map((path, index) => (
+                      <div key={path} className="mt-1">
+                        <p className="text-2xs text-foreground-muted">原始路径</p>
+                        <code className="block text-2xs break-all">{path}</code>
+                        <p className="text-2xs text-foreground-muted">原始内容哈希</p>
+                        <code className="block text-2xs break-all">{item.originalHashes[index] ?? ''}</code>
+                      </div>
+                    ))}
                     <p className="mt-1 text-2xs text-foreground-muted">权威路径</p>
                     <code className="block text-2xs break-all">{item.canonicalPath}</code>
                     {item.archivedToolPaths.map((path) => (

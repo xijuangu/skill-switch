@@ -46,9 +46,17 @@ export interface ConsolidationBatchSummary {
     archivePath: string
     originalPath: string
     originalHash: string
+    originalPaths: string[]
+    originalHashes: string[]
     archivedToolPaths: string[]
   }>
-  archive: { sizeBytes: number; recoverable: boolean; purgeable: boolean; purgedAt: string | null }
+  archive: {
+    sizeBytes: number
+    recoverable: boolean
+    purgeable: boolean
+    purgedAt: string | null
+    recoveryBlockedReason: string | null
+  }
   phase: string | null
   createdAt: string
   completedAt: string | null
@@ -186,6 +194,16 @@ interface ItemRow {
   evidence_json: string | null
 }
 
+interface ArchivePurgeEvidence {
+  action: 'archive-purge-prepared'
+  confirmationId: string
+  archivePath: string
+  stagePath: string
+  archiveHash: string
+  sizeBytes: number
+  originalStatus: 'completed' | 'undone'
+}
+
 interface ObservedEntrySnapshot {
   deployment: Deployment
   /** Preserve the exact link payload so undo restores relative links as relative links. */
@@ -294,6 +312,42 @@ export function createSkillLibraryFacade(options: {
   ))
   setCanonicalRepositoryPath(options.db, canonicalRepositoryPath)
   mkdirSync(canonicalRepositoryPath, { recursive: true })
+  for (const batch of options.db.prepare("SELECT * FROM consolidation_batches WHERE phase = 'archive-purge-prepared' AND status IN ('completed', 'undone', 'recovery-required')").all() as BatchRow[]) {
+    try {
+      const evidence = JSON.parse(batch.evidence_json ?? '') as ArchivePurgeEvidence
+      if (evidence.action !== 'archive-purge-prepared' ||
+        batch.purge_confirmation_id !== evidence.confirmationId ||
+        (batch.status !== 'recovery-required' && evidence.originalStatus !== batch.status)) {
+        throw new Error('Source Archive purge evidence is invalid.')
+      }
+      const expectedArchive = resolveWithin(sourceArchivePath, batch.id)
+      const expectedStage = resolveWithin(sourceArchivePath, `.purge-${batch.id}-${evidence.confirmationId}`)
+      if (resolve(evidence.archivePath) !== expectedArchive || resolve(evidence.stagePath) !== expectedStage) {
+        throw new Error('Source Archive purge evidence escaped its managed boundary.')
+      }
+      const archiveExists = pathEntryExists(expectedArchive)
+      const stageExists = pathEntryExists(expectedStage)
+      if (archiveExists && stageExists) throw new Error('Source Archive purge has two payload copies.')
+      if (archiveExists) {
+        if (hashDir(expectedArchive) !== evidence.archiveHash) throw new Error('Source Archive changed during purge recovery.')
+        renameSync(expectedArchive, expectedStage)
+      }
+      if (pathEntryExists(expectedStage)) rmSync(expectedStage, { recursive: true, force: false })
+      const purgedAt = new Date().toISOString()
+      runInTransaction(options.db, () => {
+        options.db.prepare(`UPDATE consolidation_batches
+          SET status = ?, archive_size_bytes = ?, archive_purged_at = ?,
+              purge_confirmation_id = NULL, purge_previewed_at = NULL, purge_archive_hash = NULL,
+              phase = NULL, evidence_json = ?, failure_message = NULL WHERE id = ?`
+        ).run(evidence.originalStatus, evidence.sizeBytes, purgedAt,
+          JSON.stringify({ action: 'archive-purged', purgedAt, sizeBytes: evidence.sizeBytes, recoveredAfterRestart: true }), batch.id)
+        options.db.prepare('DELETE FROM consolidation_operation_locks WHERE batch_id = ?').run(batch.id)
+      })
+    } catch (error) {
+      options.db.prepare("UPDATE consolidation_batches SET status = 'recovery-required', failure_message = ? WHERE id = ?")
+        .run(`Source Archive purge requires recovery: ${errorMessage(error)}`, batch.id)
+    }
+  }
   // A non-terminal persisted phase at process startup is interrupted work, not a normal preview.
   options.db.prepare(`UPDATE consolidation_batches
     SET status = 'recovery-required',
@@ -598,7 +652,8 @@ export function createSkillLibraryFacade(options: {
   function acquireDurableLocks(
     batchId: string,
     resources: string[],
-    phase: 'consolidation-lock-acquired' | 'undo-lock-acquired' | 'archive-purge'
+    phase: 'consolidation-lock-acquired' | 'undo-lock-acquired' | 'archive-purge-prepared',
+    evidence?: unknown
   ): boolean {
     const ordered = [...new Set(resources)].sort()
     return runInTransaction(options.db, () => {
@@ -608,7 +663,7 @@ export function createSkillLibraryFacade(options: {
       const insert = options.db.prepare('INSERT INTO consolidation_operation_locks (resource, batch_id) VALUES (?, ?)')
       for (const resource of ordered) insert.run(resource, batchId)
       options.db.prepare('UPDATE consolidation_batches SET phase = ?, evidence_json = ? WHERE id = ?')
-        .run(phase, JSON.stringify({ resources: ordered }), batchId)
+        .run(phase, JSON.stringify(evidence ?? { resources: ordered }), batchId)
       return true
     })
   }
@@ -835,6 +890,55 @@ export function createSkillLibraryFacade(options: {
     } finally { /* durable locks are released only by terminal success or compensated failure */ }
   }
 
+  type RestorePlan = {
+    item: ItemRow
+    source: SkillSource
+    sources: SkillSource[]
+    observed: ObservedEntrySnapshot[]
+    canonical: SkillSource
+    rollback: string
+  }
+
+  function buildRestorePlans(persisted: { batch: BatchRow; items: ItemRow[] }): RestorePlan[] {
+    return persisted.items.map((item, index) => {
+      const sources = snapshotSources(item.candidate_source_snapshot)
+      if (sources.length === 0) throw new Error('归档批次没有可恢复的原候选来源。')
+      const source = sources[0]
+      const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
+      if (sources.some((candidate) => pathEntryExists(candidate.path)) || observed.some((entry) => pathEntryExists(entry.deployment.target_path!))) {
+        throw new Error('原候选来源或旧工具入口位置已被占用。')
+      }
+      const canonical = getSourceByPath(options.db, item.canonical_path)
+      if (!canonical || canonical.source_role !== 'canonical' || !existsSync(canonical.path) || hashDir(canonical.path) !== item.canonical_hash) {
+        throw new Error('权威 Source 已变化或不可用。')
+      }
+      if (getDeploymentsBySkillId(options.db, canonical.skill_id).some((deployment) => deployment.source_id === canonical.id)) {
+        throw new Error('权威 Source 已存在后续部署。')
+      }
+      for (const candidate of sources) {
+        const archivedSource = archivePathForSource(item.archive_path, candidate, sources)
+        if (!existsSync(archivedSource) || hashDir(archivedSource) !== candidate.hash) throw new Error('来源归档载荷已变化或不可用。')
+      }
+      for (const snapshot of observed) {
+        const archivedLink = resolveWithin(sourceArchivePath, persisted.batch.id, 'links', String(snapshot.deployment.id))
+        if (!pathEntryExists(archivedLink) || !lstatSync(archivedLink).isSymbolicLink() || readlinkSync(archivedLink) !== snapshot.linkTarget) {
+          throw new Error('归档的旧工具入口已变化或不可用。')
+        }
+      }
+      const rollback = resolveWithin(canonicalRepositoryPath, `.consolidation-undo-${persisted.batch.id}-${index}`)
+      if (pathEntryExists(rollback)) throw new Error('恢复回滚位置已被占用。')
+      return { item, source, sources, observed, canonical, rollback }
+    })
+  }
+
+  function restorePreflight(persisted: { batch: BatchRow; items: ItemRow[] }): { plans: RestorePlan[]; blockedReason: null } | { plans: null; blockedReason: string } {
+    try {
+      return { plans: buildRestorePlans(persisted), blockedReason: null }
+    } catch (error) {
+      return { plans: null, blockedReason: errorMessage(error) }
+    }
+  }
+
   function undoConsolidation(batchId: string): ConsolidationOutcome | { status: 'undone'; batchId: string } {
     const persisted = getPersistedBatch(batchId)
     if (persisted?.batch.archive_purged_at) {
@@ -843,42 +947,27 @@ export function createSkillLibraryFacade(options: {
     if (!persisted || persisted.batch.status !== 'completed') {
       return { status: 'rejected', batchId, reason: 'batch-not-undoable', message: 'Consolidation Batch is not completed.' }
     }
+    const initialPreflight = restorePreflight(persisted)
+    if (!initialPreflight.plans) {
+      const reason = initialPreflight.blockedReason.includes('占用') ? 'restore-path-occupied' as const : 'plan-stale' as const
+      return { status: 'rejected', batchId, reason, message: initialPreflight.blockedReason }
+    }
     if (!acquireDurableLocks(batchId, resourcesForItems(persisted.items), 'undo-lock-acquired')) {
       return { status: 'rejected', batchId, reason: 'batch-busy', message: 'Consolidation resources are busy.' }
     }
-    type UndoPlan = { item: ItemRow; source: SkillSource; sources: SkillSource[]; observed: ObservedEntrySnapshot[]; canonical: SkillSource; rollback: string }
-    let plans: UndoPlan[]
+    let plans: RestorePlan[]
     try {
-      plans = persisted.items.map((item, index) => {
-        const sources = snapshotSources(item.candidate_source_snapshot)
-        const source = sources[0]
-        const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
-        if (sources.some((candidate) => pathEntryExists(candidate.path)) || observed.some((entry) => pathEntryExists(entry.deployment.target_path!))) throw new Error('An original Source or tool entry path is occupied.')
-        const canonical = getSourceByPath(options.db, item.canonical_path)
-        if (!canonical || canonical.source_role !== 'canonical' || !existsSync(canonical.path) || hashDir(canonical.path) !== item.canonical_hash) throw new Error('Canonical Source changed after consolidation.')
-        if (getDeploymentsBySkillId(options.db, canonical.skill_id).some((deployment) => deployment.source_id === canonical.id)) throw new Error('Canonical Source has subsequent Deployments.')
-        for (const candidate of sources) {
-          const archivePath = archivePathForSource(item.archive_path, candidate, sources)
-          if (!existsSync(archivePath) || hashDir(archivePath) !== candidate.hash) throw new Error('Source Archive changed after consolidation.')
-        }
-        for (const snapshot of observed) {
-          const archivedLink = resolveWithin(sourceArchivePath, batchId, 'links', String(snapshot.deployment.id))
-          if (!pathEntryExists(archivedLink) || !lstatSync(archivedLink).isSymbolicLink() || readlinkSync(archivedLink) !== snapshot.linkTarget) throw new Error('Archived tool entry changed after consolidation.')
-        }
-        const rollback = resolveWithin(canonicalRepositoryPath, `.consolidation-undo-${batchId}-${index}`)
-        if (pathEntryExists(rollback)) throw new Error('Canonical rollback path is occupied.')
-        return { item, source, sources, observed, canonical, rollback }
-      })
+      plans = buildRestorePlans(persisted)
     } catch (error) {
       runInTransaction(options.db, () => {
         options.db.prepare('UPDATE consolidation_batches SET phase = NULL, evidence_json = ? WHERE id = ?')
           .run(persisted.batch.evidence_json, batchId)
         releaseDurableLocks(batchId)
       })
-      const reason = errorMessage(error).includes('occupied') ? 'restore-path-occupied' as const : 'plan-stale' as const
+      const reason = errorMessage(error).includes('占用') ? 'restore-path-occupied' as const : 'plan-stale' as const
       return { status: 'rejected', batchId, reason, message: errorMessage(error) }
     }
-    const applied: Array<{ plan: UndoPlan; canonicalMoved: boolean; restoredSources: SkillSource[]; restoredTargets: string[]; createdRestoreParents: string[] }> = []
+    const applied: Array<{ plan: RestorePlan; canonicalMoved: boolean; restoredSources: SkillSource[]; restoredTargets: string[]; createdRestoreParents: string[] }> = []
     let registryCommitted = false
     try {
       for (const [index, plan] of plans.entries()) {
@@ -987,13 +1076,20 @@ export function createSkillLibraryFacade(options: {
     return { status: 'confirmation-required' as const, confirmationId, batchId, itemCount: persisted.items.length, sizeBytes }
   }
 
-  function rejectStaleArchivePurge(batch: BatchRow, message: string) {
+  function rejectStaleArchivePurge(batch: BatchRow, message: string, lockAcquired: boolean) {
     runInTransaction(options.db, () => {
-      options.db.prepare(`UPDATE consolidation_batches
-        SET phase = NULL, evidence_json = ?, purge_confirmation_id = NULL,
-            purge_previewed_at = NULL, purge_archive_hash = NULL WHERE id = ?`
-      ).run(batch.evidence_json, batch.id)
-      releaseDurableLocks(batch.id)
+      if (lockAcquired) {
+        options.db.prepare(`UPDATE consolidation_batches
+          SET phase = NULL, evidence_json = ?, purge_confirmation_id = NULL,
+              purge_previewed_at = NULL, purge_archive_hash = NULL WHERE id = ?`
+        ).run(batch.evidence_json, batch.id)
+        releaseDurableLocks(batch.id)
+      } else {
+        options.db.prepare(`UPDATE consolidation_batches
+          SET purge_confirmation_id = NULL, purge_previewed_at = NULL,
+              purge_archive_hash = NULL WHERE id = ?`
+        ).run(batch.id)
+      }
     })
     return { status: 'rejected' as const, batchId: batch.id, reason: 'plan-stale' as const, message }
   }
@@ -1007,19 +1103,33 @@ export function createSkillLibraryFacade(options: {
     if (!persisted || !['completed', 'undone'].includes(batch.status) || batch.archive_purged_at) {
       return { status: 'rejected' as const, batchId: batch.id, reason: batch.archive_purged_at ? 'archive-purged' as const : 'batch-not-purgeable' as const, message: 'Source Archive purge plan is no longer valid.' }
     }
-    if (!acquireDurableLocks(batch.id, resourcesForItems(persisted.items), 'archive-purge')) {
+    if (batch.phase !== null) {
+      return { status: 'rejected' as const, batchId: batch.id, reason: 'batch-busy' as const, message: 'Consolidation resources are busy.' }
+    }
+    const batchArchivePath = resolveWithin(sourceArchivePath, batch.id)
+    if (!pathEntryExists(batchArchivePath)) return rejectStaleArchivePurge(batch, 'Source Archive payload is unavailable.', false)
+    if (!batch.purge_archive_hash || hashDir(batchArchivePath) !== batch.purge_archive_hash) {
+      return rejectStaleArchivePurge(batch, 'Source Archive payload changed after preview.', false)
+    }
+    const sizeBytes = directorySize(batchArchivePath)
+    const purgeStage = resolveWithin(sourceArchivePath, `.purge-${batch.id}-${confirmationId}`)
+    if (pathEntryExists(purgeStage)) return rejectStaleArchivePurge(batch, 'Source Archive purge staging path is occupied.', false)
+    const evidence: ArchivePurgeEvidence = {
+      action: 'archive-purge-prepared', confirmationId,
+      archivePath: batchArchivePath, stagePath: purgeStage,
+      archiveHash: batch.purge_archive_hash, sizeBytes,
+      originalStatus: batch.status as 'completed' | 'undone'
+    }
+    if (!acquireDurableLocks(batch.id, resourcesForItems(persisted.items), 'archive-purge-prepared', evidence)) {
       return { status: 'rejected' as const, batchId: batch.id, reason: 'batch-busy' as const, message: 'Consolidation resources are busy.' }
     }
     try {
-      const batchArchivePath = resolveWithin(sourceArchivePath, batch.id)
       if (!pathEntryExists(batchArchivePath)) {
-        return rejectStaleArchivePurge(batch, 'Source Archive payload is unavailable.')
+        return rejectStaleArchivePurge(batch, 'Source Archive payload is unavailable.', true)
       }
       if (!batch.purge_archive_hash || hashDir(batchArchivePath) !== batch.purge_archive_hash) {
-        return rejectStaleArchivePurge(batch, 'Source Archive payload changed after preview.')
+        return rejectStaleArchivePurge(batch, 'Source Archive payload changed after preview.', true)
       }
-      const sizeBytes = directorySize(batchArchivePath)
-      const purgeStage = resolveWithin(sourceArchivePath, `.purge-${batch.id}-${confirmationId}`)
       if (pathEntryExists(purgeStage)) throw new Error('Source Archive purge staging path is occupied.')
       renameSync(batchArchivePath, purgeStage)
       rmSync(purgeStage, { recursive: true, force: false })
@@ -1035,7 +1145,8 @@ export function createSkillLibraryFacade(options: {
       return { status: 'purged' as const, batchId: batch.id, purgedAt, sizeBytes }
     } catch (error) {
       const message = `Source Archive purge requires recovery: ${errorMessage(error)}`
-      markBatch(batch.id, 'recovery-required', message, 'archive-purge', { confirmationId })
+      options.db.prepare("UPDATE consolidation_batches SET status = 'recovery-required', failure_message = ? WHERE id = ?")
+        .run(message, batch.id)
       return { status: 'recovery-required' as const, batchId: batch.id, message }
     }
   }
@@ -1413,22 +1524,42 @@ export function createSkillLibraryFacade(options: {
                 : phases.some((phase) => phase.includes('archive-purge')) ? 'inspect'
                   : phases.length > 0 ? 'rollback-consolidation' : 'inspect'
           }
+          const archivePayloadExists = batch.archive_purged_at === null && pathEntryExists(resolveWithin(sourceArchivePath, batch.id))
+          let recoverable = false
+          let recoveryBlockedReason: string | null = null
+          if (batch.archive_purged_at) {
+            recoveryBlockedReason = '归档载荷已永久清理。'
+          } else if (batch.status !== 'completed') {
+            recoveryBlockedReason = '只有已完成的整理批次可以恢复。'
+          } else {
+            const persisted = getPersistedBatch(batch.id)
+            if (!persisted) {
+              recoveryBlockedReason = '整理批次缺少恢复快照。'
+            } else {
+              const preflight = restorePreflight(persisted)
+              recoverable = preflight.plans !== null
+              recoveryBlockedReason = preflight.blockedReason
+            }
+          }
           return {
             id: batch.id, status: batch.status,
             items: itemRows.map((item) => {
-              const original = snapshotSources(item.candidate_source_snapshot)[0]
+              const originals = snapshotSources(item.candidate_source_snapshot)
+              const original = originals[0]
               const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
               return {
                 skillId: item.skill_id, skillName: item.skill_name, canonicalPath: item.canonical_path,
-                archivePath: item.archive_path, originalPath: original.path, originalHash: original.hash,
+                archivePath: item.archive_path, originalPath: original?.path ?? '', originalHash: original?.hash ?? '',
+                originalPaths: originals.map((source) => source.path), originalHashes: originals.map((source) => source.hash),
                 archivedToolPaths: observed.map((entry) => entry.deployment.target_path!).filter(Boolean)
               }
             }),
             archive: {
               sizeBytes: batch.archive_size_bytes ?? directorySize(resolveWithin(sourceArchivePath, batch.id)),
-              recoverable: batch.status === 'completed' && batch.archive_purged_at === null && pathEntryExists(resolveWithin(sourceArchivePath, batch.id)),
-              purgeable: ['completed', 'undone'].includes(batch.status) && batch.archive_purged_at === null && pathEntryExists(resolveWithin(sourceArchivePath, batch.id)),
-              purgedAt: batch.archive_purged_at
+              recoverable,
+              purgeable: ['completed', 'undone'].includes(batch.status) && archivePayloadExists,
+              purgedAt: batch.archive_purged_at,
+              recoveryBlockedReason
             },
             phase: batch.phase, createdAt: batch.created_at, completedAt: batch.completed_at,
             undoneAt: batch.undone_at, failureMessage: batch.failure_message,
