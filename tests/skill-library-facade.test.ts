@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'fs'
-import { dirname, join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { getAllDeployments, upsertDeployment } from '../src/main/db/dao/deployments'
@@ -10,6 +10,195 @@ import { hashDir } from '../src/main/services/hash'
 import { createTempDb, createTempDir } from './helpers/temp'
 
 describe('SkillLibraryFacade', () => {
+  function relocationFixture(prefix: string) {
+    const root = createTempDir(prefix)
+    const canonicalRepository = join(root.dir, 'canonical')
+    const oldPath = join(canonicalRepository, 'old', 'demo')
+    const linkedTarget = join(root.dir, 'codex', 'demo')
+    const copiedTarget = join(root.dir, 'agents', 'demo')
+    mkdirSync(oldPath, { recursive: true })
+    mkdirSync(dirname(linkedTarget), { recursive: true })
+    mkdirSync(copiedTarget, { recursive: true })
+    writeFileSync(join(oldPath, 'SKILL.md'), '# canonical demo')
+    writeFileSync(join(copiedTarget, 'SKILL.md'), '# deployed snapshot')
+    symlinkSync(oldPath, linkedTarget, 'dir')
+    const db = createDatabase(join(root.dir, 'registry.db'), canonicalRepository)
+    const skillId = upsertSkill(db, 'demo', oldPath)
+    const sourceHash = hashDir(oldPath)
+    upsertSource(db, skillId, oldPath, sourceHash, 1, 'central-repo', { role: 'canonical', origin: 'local' })
+    const source = getSourceByPath(db, oldPath)!
+    upsertDeployment(db, skillId, 'codex', linkedTarget, 'symlink', oldPath, sourceHash, {
+      sourceId: source.id, targetId: 'codex:demo'
+    })
+    upsertDeployment(db, skillId, 'agents', copiedTarget, 'copy', oldPath, sourceHash, {
+      sourceId: source.id, targetId: 'agents:demo'
+    })
+    const facade = createSkillLibraryFacade({ db, canonicalRepositoryPath: canonicalRepository })
+    return { root, db, facade, source, skillId, sourceHash, canonicalRepository, oldPath, linkedTarget, copiedTarget }
+  }
+
+  test('previews a Source Relocation from only its identity and new relative parent', () => {
+    const fixture = relocationFixture('skill-library-relocation-preview-')
+
+    const preview = fixture.facade.previewSourceRelocation({
+      sourceId: fixture.source.id,
+      canonicalRelativeParent: 'team/backend'
+    })
+
+    expect(preview).toMatchObject({
+      status: 'confirmation-required',
+      skillId: fixture.skillId,
+      skillName: 'demo',
+      oldCanonicalPath: fixture.oldPath,
+      newCanonicalPath: join(fixture.canonicalRepository, 'team', 'backend', 'demo'),
+      deployments: [
+        { targetTool: 'codex', targetPath: fixture.linkedTarget, mode: 'symlink' },
+        { targetTool: 'agents', targetPath: fixture.copiedTarget, mode: 'copy' }
+      ]
+    })
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('blocks Source Relocation while any observed Subscription references the Source', () => {
+    const fixture = relocationFixture('skill-library-relocation-observed-')
+    fixture.db.prepare("UPDATE deployments SET management = 'observed' WHERE target_id = 'codex:demo'").run()
+
+    expect(() => fixture.facade.previewSourceRelocation({
+      sourceId: fixture.source.id,
+      canonicalRelativeParent: 'team'
+    })).toThrow(/Observed Subscription/)
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('atomically relocates the Source and managed links while a copy only updates its identity association', () => {
+    const fixture = relocationFixture('skill-library-relocation-confirm-')
+    const copiedBefore = readFileSync(join(fixture.copiedTarget, 'SKILL.md'), 'utf8')
+    const preview = fixture.facade.previewSourceRelocation({ sourceId: fixture.source.id, canonicalRelativeParent: 'team' })
+    const newPath = join(fixture.canonicalRepository, 'team', 'demo')
+
+    expect(fixture.facade.confirmSourceRelocation(preview.confirmationId)).toEqual({
+      status: 'completed', relocationId: preview.relocationId,
+      sourceId: fixture.source.id, canonicalPath: newPath
+    })
+    expect(existsSync(fixture.oldPath)).toBe(false)
+    expect(readFileSync(join(newPath, 'SKILL.md'), 'utf8')).toBe('# canonical demo')
+    expect(resolve(dirname(fixture.linkedTarget), readlinkSync(fixture.linkedTarget))).toBe(newPath)
+    expect(readFileSync(join(fixture.copiedTarget, 'SKILL.md'), 'utf8')).toBe(copiedBefore)
+    expect(getSourceByPath(fixture.db, newPath)).toMatchObject({ id: fixture.source.id, hash: fixture.sourceHash })
+    expect(getAllDeployments(fixture.db).map((deployment) => deployment.source_path)).toEqual([newPath, newPath])
+    const completedJournal = fixture.db.prepare('SELECT status, phase, journal_json FROM source_relocations WHERE id = ?')
+      .get(preview.relocationId) as { status: string; phase: string | null; journal_json: string }
+    expect(completedJournal).toMatchObject({ status: 'completed', phase: null })
+    expect(JSON.parse(completedJournal.journal_json)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: 'source-moved', intent: 'prepared' }),
+      expect.objectContaining({ phase: 'links-updated', intent: 'applied' })
+    ]))
+    expect(fixture.db.prepare('SELECT resource FROM source_relocation_locks').all()).toEqual([])
+
+    expect(fixture.facade.undoSourceRelocation(preview.relocationId)).toEqual({
+      status: 'undone', relocationId: preview.relocationId,
+      sourceId: fixture.source.id, canonicalPath: fixture.oldPath
+    })
+    expect(existsSync(newPath)).toBe(false)
+    expect(readFileSync(join(fixture.oldPath, 'SKILL.md'), 'utf8')).toBe('# canonical demo')
+    expect(resolve(dirname(fixture.linkedTarget), readlinkSync(fixture.linkedTarget))).toBe(fixture.oldPath)
+    expect(readFileSync(join(fixture.copiedTarget, 'SKILL.md'), 'utf8')).toBe(copiedBefore)
+    expect(getSourceByPath(fixture.db, fixture.oldPath)).toMatchObject({ id: fixture.source.id })
+    expect(fixture.facade.read().sourceRelocations[0]).toMatchObject({
+      id: preview.relocationId, status: 'undone', oldCanonicalPath: fixture.oldPath, newCanonicalPath: newPath
+    })
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('compensates the Source and links when relocation fails before registry commit', () => {
+    const fixture = relocationFixture('skill-library-relocation-compensate-')
+    const facade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      relocationHooks: {
+        onPhase: ({ phase }) => { if (phase === 'links-updated') throw new Error('injected relocation failure') }
+      }
+    })
+    const preview = facade.previewSourceRelocation({ sourceId: fixture.source.id, canonicalRelativeParent: 'team' })
+
+    expect(facade.confirmSourceRelocation(preview.confirmationId)).toMatchObject({ status: 'rejected' })
+    expect(existsSync(fixture.oldPath)).toBe(true)
+    expect(existsSync(join(fixture.canonicalRepository, 'team', 'demo'))).toBe(false)
+    expect(resolve(dirname(fixture.linkedTarget), readlinkSync(fixture.linkedTarget))).toBe(fixture.oldPath)
+    expect(getSourceByPath(fixture.db, fixture.oldPath)).toMatchObject({ id: fixture.source.id })
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('keeps the journal and locks when a displaced link cannot be compensated', () => {
+    const fixture = relocationFixture('skill-library-relocation-link-recovery-')
+    const facade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      relocationHooks: {
+        onPhase: ({ phase }) => {
+          if (phase === 'link-target-displaced') {
+            mkdirSync(fixture.linkedTarget)
+            throw new Error('injected link installation failure')
+          }
+        }
+      }
+    })
+    const preview = facade.previewSourceRelocation({ sourceId: fixture.source.id, canonicalRelativeParent: 'team' })
+
+    expect(facade.confirmSourceRelocation(preview.confirmationId)).toMatchObject({ status: 'recovery-required' })
+    expect(fixture.db.prepare('SELECT status FROM source_relocations WHERE id = ?').get(preview.relocationId))
+      .toEqual({ status: 'recovery-required' })
+    expect(fixture.db.prepare('SELECT resource FROM source_relocation_locks WHERE relocation_id = ?').all(preview.relocationId))
+      .not.toEqual([])
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('freezes interrupted persisted relocation work after restart', () => {
+    const fixture = relocationFixture('skill-library-relocation-restart-')
+    const preview = fixture.facade.previewSourceRelocation({ sourceId: fixture.source.id, canonicalRelativeParent: 'team' })
+    fixture.db.prepare("UPDATE source_relocations SET phase = 'source-moved:prepared' WHERE id = ?").run(preview.relocationId)
+    fixture.db.prepare('INSERT INTO source_relocation_locks (resource, relocation_id) VALUES (?, ?)')
+      .run(`source:${fixture.source.id}`, preview.relocationId)
+
+    const restarted = createSkillLibraryFacade({ db: fixture.db, canonicalRepositoryPath: fixture.canonicalRepository })
+    expect(restarted.confirmSourceRelocation(preview.confirmationId)).toMatchObject({ status: 'recovery-required' })
+    expect(restarted.read().sourceRelocations[0]).toMatchObject({ status: 'recovery-required' })
+    expect(fixture.db.prepare('SELECT resource FROM source_relocation_locks WHERE relocation_id = ?').all(preview.relocationId))
+      .not.toEqual([])
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('undo safely rejects occupied old placement, changed content, and a new observed relation', () => {
+    for (const unsafe of ['occupied', 'content', 'observed'] as const) {
+      const fixture = relocationFixture(`skill-library-relocation-undo-${unsafe}-`)
+      const preview = fixture.facade.previewSourceRelocation({ sourceId: fixture.source.id, canonicalRelativeParent: 'team' })
+      const result = fixture.facade.confirmSourceRelocation(preview.confirmationId)
+      expect(result.status).toBe('completed')
+      const newPath = join(fixture.canonicalRepository, 'team', 'demo')
+      if (unsafe === 'occupied') mkdirSync(fixture.oldPath, { recursive: true })
+      if (unsafe === 'content') writeFileSync(join(newPath, 'SKILL.md'), '# changed')
+      if (unsafe === 'observed') {
+        const target = join(fixture.root.dir, 'new-tool', 'demo')
+        mkdirSync(dirname(target), { recursive: true })
+        symlinkSync(newPath, target, 'dir')
+        upsertDeployment(fixture.db, fixture.skillId, 'new-tool', target, 'symlink', newPath, fixture.sourceHash, {
+          sourceId: fixture.source.id, targetId: 'new-tool:demo'
+        }, 'observed')
+      }
+      expect(fixture.facade.undoSourceRelocation(preview.relocationId)).toMatchObject({
+        status: 'rejected', reason: 'plan-stale'
+      })
+      expect(existsSync(newPath)).toBe(true)
+      fixture.db.close()
+      fixture.root.cleanup()
+    }
+  })
   function consolidationFixture(prefix: string) {
     const root = createTempDir(prefix)
     const canonicalRepository = join(root.dir, 'canonical')

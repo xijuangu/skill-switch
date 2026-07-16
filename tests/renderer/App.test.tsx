@@ -17,7 +17,8 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
       canonicalRepository: { path: '/canonical' },
       skills: [],
       consolidationPlan: [],
-      consolidationBatches: []
+      consolidationBatches: [],
+      sourceRelocations: []
     }),
     previewConsolidation: vi.fn(),
     confirmConsolidation: vi.fn(),
@@ -25,6 +26,9 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     restoreConsolidation: vi.fn(),
     previewSourceArchivePurge: vi.fn(),
     confirmSourceArchivePurge: vi.fn(),
+    previewSourceRelocation: vi.fn(),
+    confirmSourceRelocation: vi.fn(),
+    undoSourceRelocation: vi.fn(),
     getSettings: vi.fn().mockResolvedValue({
       tools: [],
       backupRetention: 5,
@@ -331,7 +335,6 @@ describe('App (integration)', () => {
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
   })
 })
-
 // #56:1000 条假数据搜索/筛选/选择功能与性能冒烟(不断言毫秒阈值,只确认可用)
 function buildFakeSkills(n: number): SkillWithConflictView[] {
   return Array.from({ length: n }, (_, i) => ({
@@ -841,5 +844,93 @@ describe('SkillsPage bulk consolidation planning (#86)', () => {
     await userEvent.click(screen.getByRole('button', { name: '确认批量整理' }))
     await waitFor(() => expect(api.confirmConsolidation).toHaveBeenCalledWith('confirm-86'))
     expect(await screen.findByRole('alert')).toHaveTextContent('已整理 2 个 Skill')
+  })
+})
+
+describe('SkillsPage Source Relocation (#90)', () => {
+  it('previews old/new placements and affected Deployments before confirming a move', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0] = {
+      ...skill.sources[0], source_role: 'canonical', path: '/canonical/old/skill-0001'
+    }
+    const preview = {
+      status: 'confirmation-required' as const,
+      confirmationId: 'relocation-confirm-90',
+      relocationId: 'relocation-90',
+      skillId: skill.id,
+      skillName: skill.name,
+      oldCanonicalPath: '/canonical/old/skill-0001',
+      newCanonicalPath: '/canonical/team/backend/skill-0001',
+      deployments: [
+        { deploymentId: 8, targetTool: 'codex', targetPath: '/tools/codex/skill-0001', mode: 'symlink' as const },
+        { deploymentId: 9, targetTool: 'agents', targetPath: '/tools/agents/skill-0001', mode: 'copy' as const }
+      ]
+    }
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [], consolidationBatches: [], sourceRelocations: []
+      }),
+      previewSourceRelocation: vi.fn().mockResolvedValue(preview),
+      confirmSourceRelocation: vi.fn().mockResolvedValue({
+        status: 'completed', relocationId: 'relocation-90', sourceId: skill.sources[0].id,
+        canonicalPath: preview.newCanonicalPath
+      })
+    })
+    const onRefresh = vi.fn().mockResolvedValue(undefined)
+    render(
+      <ToastProvider>
+        <SkillsPage skills={[skill]} tools={[]} scanning={false} lastScan={null} loading={false}
+          loadError={null} onScan={vi.fn()} onRefresh={onRefresh} onRetry={vi.fn().mockResolvedValue(undefined)} />
+      </ToastProvider>
+    )
+
+    await userEvent.click(await screen.findByRole('button', { name: '移动权威 Source' }))
+    await userEvent.type(screen.getByLabelText('新的权威库内父目录'), 'team/backend')
+    await userEvent.click(screen.getByRole('button', { name: '预览移动' }))
+    expect(api.previewSourceRelocation).toHaveBeenCalledWith({
+      sourceId: skill.sources[0].id, canonicalRelativeParent: 'team/backend'
+    })
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('/canonical/old/skill-0001')
+    expect(dialog).toHaveTextContent('/canonical/team/backend/skill-0001')
+    expect(dialog).toHaveTextContent('受影响部署（2）')
+    expect(dialog).toHaveTextContent('codex · symlink')
+    expect(dialog).toHaveTextContent('agents · copy')
+
+    await userEvent.click(screen.getByRole('button', { name: '确认移动' }))
+    await waitFor(() => expect(api.confirmSourceRelocation).toHaveBeenCalledWith('relocation-confirm-90'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('已移动')
+    expect(onRefresh).toHaveBeenCalled()
+  })
+
+  it('offers undo for the latest completed relocation and surfaces a safety rejection', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0] = { ...skill.sources[0], source_role: 'canonical', path: '/canonical/team/skill-0001' }
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [], consolidationBatches: [],
+        sourceRelocations: [{
+          id: 'relocation-90', status: 'completed', skillId: skill.id, skillName: skill.name,
+          sourceId: skill.sources[0].id, oldCanonicalPath: '/canonical/old/skill-0001',
+          newCanonicalPath: '/canonical/team/skill-0001', createdAt: '2026-07-16T00:00:00.000Z',
+          completedAt: '2026-07-16T00:01:00.000Z', undoneAt: null, failureMessage: null
+        }]
+      }),
+      undoSourceRelocation: vi.fn().mockResolvedValue({
+        status: 'rejected', relocationId: 'relocation-90', reason: 'plan-stale',
+        message: '旧位置已被占用，无法撤销移动。'
+      })
+    })
+    render(
+      <ToastProvider>
+        <SkillsPage skills={[skill]} tools={[]} scanning={false} lastScan={null} loading={false}
+          loadError={null} onScan={vi.fn()} onRefresh={vi.fn().mockResolvedValue(undefined)} onRetry={vi.fn().mockResolvedValue(undefined)} />
+      </ToastProvider>
+    )
+
+    await userEvent.click(await screen.findByRole('button', { name: '撤销移动' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认撤销移动' }))
+    await waitFor(() => expect(api.undoSourceRelocation).toHaveBeenCalledWith('relocation-90'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('旧位置已被占用')
   })
 })

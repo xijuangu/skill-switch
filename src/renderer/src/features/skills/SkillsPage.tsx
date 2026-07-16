@@ -36,6 +36,8 @@ type ConsolidationBatch = Awaited<ReturnType<typeof window.api.getSkillLibrary>>
 type ConsolidationPlanItem = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationPlan'][number]
 type ConsolidationDraft = ConsolidationPlanItem & { selected: boolean; canonicalRelativeParent: string }
 type UndoBatch = { batch: ConsolidationBatch; item: ConsolidationBatch['items'][number] }
+type SourceRelocationPreview = Awaited<ReturnType<typeof window.api.previewSourceRelocation>>
+type SourceRelocation = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['sourceRelocations'][number]
 
 function managedDeploymentCount(skill: SkillView): number {
   return skill.deployments.filter((deployment) => deployment.management === 'managed').length
@@ -87,6 +89,11 @@ export function SkillsPage({
   const [batchRelativeParent, setBatchRelativeParent] = useState('')
   const [batchConsolidationPreview, setBatchConsolidationPreview] = useState<ConsolidationBatchPreview | null>(null)
   const [undoBatch, setUndoBatch] = useState<UndoBatch | null>(null)
+  const [relocationTarget, setRelocationTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
+  const [relocationRelativeParent, setRelocationRelativeParent] = useState('')
+  const [relocationPreview, setRelocationPreview] = useState<SourceRelocationPreview | null>(null)
+  const [sourceRelocations, setSourceRelocations] = useState<SourceRelocation[]>([])
+  const [undoRelocation, setUndoRelocation] = useState<SourceRelocation | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
   const pendingAdjacentSelectRef = useRef<number | null>(null)
@@ -97,6 +104,7 @@ export function SkillsPage({
     const library = await window.api.getSkillLibrary()
     setConsolidationBatches(library.consolidationBatches ?? [])
     setConsolidationPlan(library.consolidationPlan ?? [])
+    setSourceRelocations(library.sourceRelocations ?? [])
   }
 
   useEffect(() => {
@@ -456,6 +464,68 @@ export function SkillsPage({
     }
   }
 
+  const closeRelocation = () => {
+    if (actionBusy) return
+    setRelocationTarget(null)
+    setRelocationRelativeParent('')
+    setRelocationPreview(null)
+  }
+
+  const handlePreviewRelocation = async () => {
+    if (!relocationTarget) return
+    setActionBusy(true)
+    try {
+      setRelocationPreview(await window.api.previewSourceRelocation({
+        sourceId: relocationTarget.source.id,
+        canonicalRelativeParent: relocationRelativeParent.trim()
+      }))
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleConfirmRelocation = async () => {
+    if (!relocationPreview) return
+    setActionBusy(true)
+    try {
+      const outcome = await window.api.confirmSourceRelocation(relocationPreview.confirmationId)
+      if (outcome.status !== 'completed') {
+        toastError('message' in outcome ? outcome.message : '移动未完成，请刷新后重试。')
+        return
+      }
+      success(`已移动「${relocationPreview.skillName}」的权威 Source`)
+      setRelocationTarget(null)
+      setRelocationRelativeParent('')
+      setRelocationPreview(null)
+      await Promise.all([onRefresh(), refreshSkillLibrary()])
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleUndoRelocation = async () => {
+    if (!undoRelocation) return
+    setActionBusy(true)
+    try {
+      const outcome = await window.api.undoSourceRelocation(undoRelocation.id)
+      if (outcome.status !== 'undone') {
+        toastError('message' in outcome ? outcome.message : '撤销移动未完成，请刷新后重试。')
+        return
+      }
+      success(`已撤销「${undoRelocation.skillName}」的 Source 移动`)
+      setUndoRelocation(null)
+      await Promise.all([onRefresh(), refreshSkillLibrary()])
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const getMenuActions = (skill: SkillView) => [
     { key: 'undeploy', label: '从…取消部署', onClick: () => handleUndeployFromInit(skill), disabled: actionBusy },
     { key: 'view-md', label: '查看 SKILL.md', onClick: () => handleViewMd(skill), disabled: actionBusy },
@@ -620,6 +690,7 @@ export function SkillsPage({
           <SkillDetail
             skill={selected}
             consolidationBatches={consolidationBatches}
+            sourceRelocations={sourceRelocations}
             tab={detailTab}
             onTabChange={setDetailTab}
             onDeploy={() => handleDeployClick(selected)}
@@ -629,6 +700,12 @@ export function SkillsPage({
               setConsolidationPreview(null)
             }}
             onUndoConsolidation={setUndoBatch}
+            onRelocate={(source) => {
+              setRelocationTarget({ skill: selected, source })
+              setRelocationRelativeParent('')
+              setRelocationPreview(null)
+            }}
+            onUndoRelocation={setUndoRelocation}
             onMoreClick={(el) => {
               setVisibleMenuAnchor(el)
               setVisibleMenuSkill(selected)
@@ -844,6 +921,48 @@ export function SkillsPage({
           closeOnOverlay={false}
         />
       )}
+
+      {relocationTarget && (
+        <Dialog
+          open
+          onClose={closeRelocation}
+          title={relocationPreview ? `确认移动「${relocationTarget.skill.name}」` : `移动权威 Source「${relocationTarget.skill.name}」`}
+          description="只改变权威库内的位置；Skill 名称和内容保持不变。"
+          busy={actionBusy}
+          confirmLabel={relocationPreview ? '确认移动' : '预览移动'}
+          onConfirm={relocationPreview ? handleConfirmRelocation : handlePreviewRelocation}
+          closeOnOverlay={false}
+        >
+          {relocationPreview ? (
+            <div className="space-y-3 text-xs">
+              <div><p className="text-foreground-muted">旧位置</p><code className="break-all">{relocationPreview.oldCanonicalPath}</code></div>
+              <div><p className="text-foreground-muted">新位置</p><code className="break-all">{relocationPreview.newCanonicalPath}</code></div>
+              <div>
+                <p className="font-medium">受影响部署（{relocationPreview.deployments.length}）</p>
+                {relocationPreview.deployments.map((deployment) => (
+                  <div key={deployment.deploymentId} className="mt-1 rounded border border-border p-2">
+                    <span>{deployment.targetTool} · {deployment.mode}</span>
+                    <code className="block text-2xs break-all text-foreground-muted">{deployment.targetPath}</code>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <label htmlFor="relocation-relative-parent" className="block text-xs font-medium text-foreground-secondary">新的权威库内父目录</label>
+              <Input id="relocation-relative-parent" aria-label="新的权威库内父目录" value={relocationRelativeParent}
+                onChange={(event) => setRelocationRelativeParent(event.target.value)} placeholder="例如 team/backend" mono className="w-full" />
+            </div>
+          )}
+        </Dialog>
+      )}
+
+      {undoRelocation && (
+        <Dialog open onClose={() => { if (!actionBusy) setUndoRelocation(null) }}
+          title={`撤销 Source 移动「${undoRelocation.skillName}」`}
+          description="仅当旧位置空闲、权威内容未变化且没有新增外部订阅时才能撤销。"
+          busy={actionBusy} confirmLabel="确认撤销移动" onConfirm={handleUndoRelocation} closeOnOverlay={false} />
+      )}
     </div>
   )
 }
@@ -936,20 +1055,26 @@ function SkillMasterItem({
 function SkillDetail({
   skill,
   consolidationBatches,
+  sourceRelocations,
   tab,
   onTabChange,
   onDeploy,
   onConsolidate,
   onUndoConsolidation,
+  onRelocate,
+  onUndoRelocation,
   onMoreClick
 }: {
   skill: SkillView
   consolidationBatches: ConsolidationBatch[]
+  sourceRelocations: SourceRelocation[]
   tab: string
   onTabChange: (tab: string) => void
   onDeploy: () => void
   onConsolidate: (source: SkillSourceView) => void
   onUndoConsolidation: (batch: UndoBatch) => void
+  onRelocate: (source: SkillSourceView) => void
+  onUndoRelocation: (relocation: SourceRelocation) => void
   onMoreClick: (el: HTMLElement) => void
 }) {
   const conflict = skill.conflict.hasConflict
@@ -992,8 +1117,11 @@ function SkillDetail({
           <SourcePanel
             skill={skill}
             consolidationBatches={consolidationBatches}
+            sourceRelocations={sourceRelocations}
             onConsolidate={onConsolidate}
             onUndoConsolidation={onUndoConsolidation}
+            onRelocate={onRelocate}
+            onUndoRelocation={onUndoRelocation}
           />
         )}
         {tab === 'deployments' && <DeploymentPanel skill={skill} />}
@@ -1005,13 +1133,19 @@ function SkillDetail({
 function SourcePanel({
   skill,
   consolidationBatches,
+  sourceRelocations,
   onConsolidate,
-  onUndoConsolidation
+  onUndoConsolidation,
+  onRelocate,
+  onUndoRelocation
 }: {
   skill: SkillView
   consolidationBatches: ConsolidationBatch[]
+  sourceRelocations: SourceRelocation[]
   onConsolidate: (source: SkillSourceView) => void
   onUndoConsolidation: (batch: UndoBatch) => void
+  onRelocate: (source: SkillSourceView) => void
+  onUndoRelocation: (relocation: SourceRelocation) => void
 }) {
   if (skill.sources.length === 0) {
     return <p className="text-xs text-foreground-muted">未登记任何来源。</p>
@@ -1025,6 +1159,9 @@ function SourcePanel({
       .map((item) => ({ batch, item })))
     .filter(({ batch }) => batch.status === 'completed')
     .sort((a, b) => Date.parse(b.batch.completedAt ?? b.batch.createdAt) - Date.parse(a.batch.completedAt ?? a.batch.createdAt))[0] ?? null
+  const latestCompletedRelocation = sourceRelocations
+    .filter((relocation) => relocation.skillId === skill.id && relocation.status === 'completed')
+    .sort((a, b) => Date.parse(b.completedAt ?? b.createdAt) - Date.parse(a.completedAt ?? a.createdAt))[0] ?? null
   const hasExactlyOneCandidate = skill.sources.filter((source) => source.source_role === 'candidate').length === 1
   const hasCanonical = skill.sources.some((source) => source.source_role === 'canonical')
   const renderSource = (source: SkillSourceView) => (
@@ -1032,9 +1169,13 @@ function SourcePanel({
       key={source.id}
       source={source}
       canConsolidate={source.source_role === 'candidate' && hasExactlyOneCandidate && !hasCanonical && !skill.conflict.hasConflict}
-      undoBatch={source.source_role === 'canonical' ? latestCompletedBatch : null}
+      undoBatch={source.source_role === 'canonical' && !latestCompletedRelocation ? latestCompletedBatch : null}
+      canRelocate={source.source_role === 'canonical'}
+      undoRelocation={source.source_role === 'canonical' ? latestCompletedRelocation : null}
       onConsolidate={() => onConsolidate(source)}
       onUndoConsolidation={onUndoConsolidation}
+      onRelocate={() => onRelocate(source)}
+      onUndoRelocation={onUndoRelocation}
     />
   )
 
@@ -1086,14 +1227,22 @@ function SourceItem({
   source,
   canConsolidate,
   undoBatch,
+  canRelocate,
+  undoRelocation,
   onConsolidate,
-  onUndoConsolidation
+  onUndoConsolidation,
+  onRelocate,
+  onUndoRelocation
 }: {
   source: SkillSourceView
   canConsolidate: boolean
   undoBatch: UndoBatch | null
+  canRelocate: boolean
+  undoRelocation: SourceRelocation | null
   onConsolidate: () => void
   onUndoConsolidation: (batch: UndoBatch) => void
+  onRelocate: () => void
+  onUndoRelocation: (relocation: SourceRelocation) => void
 }) {
   const [expanded, setExpanded] = useState(false)
 
@@ -1124,6 +1273,12 @@ function SourceItem({
         )}
         {undoBatch && (
           <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoConsolidation(undoBatch)}>撤销整理</Button>
+        )}
+        {canRelocate && (
+          <Button variant="secondary" size="sm" className="mr-2" onClick={onRelocate}>移动权威 Source</Button>
+        )}
+        {undoRelocation && (
+          <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoRelocation(undoRelocation)}>撤销移动</Button>
         )}
       </div>
       {expanded && (

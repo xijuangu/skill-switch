@@ -98,6 +98,30 @@ CREATE TABLE IF NOT EXISTS consolidation_operation_locks (
   batch_id TEXT NOT NULL,
   FOREIGN KEY (batch_id) REFERENCES consolidation_batches(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS source_relocations (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('previewed', 'completed', 'failed', 'recovery-required', 'undone')),
+  skill_id INTEGER NOT NULL,
+  skill_name TEXT NOT NULL,
+  source_id INTEGER NOT NULL,
+  old_path TEXT NOT NULL,
+  new_path TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  deployments_snapshot TEXT NOT NULL,
+  phase TEXT,
+  journal_json TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  undone_at TEXT,
+  failure_message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS source_relocation_locks (
+  resource TEXT PRIMARY KEY,
+  relocation_id TEXT NOT NULL,
+  FOREIGN KEY (relocation_id) REFERENCES source_relocations(id) ON DELETE CASCADE
+);
 `
 
 /**
@@ -363,4 +387,28 @@ export function runMigrations(
   const consolidationItemColumns = new Set((db.prepare('PRAGMA table_info(consolidation_items)').all() as { name: string }[]).map((column) => column.name))
   if (!consolidationItemColumns.has('phase')) db.exec('ALTER TABLE consolidation_items ADD COLUMN phase TEXT')
   if (!consolidationItemColumns.has('evidence_json')) db.exec('ALTER TABLE consolidation_items ADD COLUMN evidence_json TEXT')
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS source_relocations (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('previewed', 'completed', 'failed', 'recovery-required', 'undone')),
+      skill_id INTEGER NOT NULL,
+      skill_name TEXT NOT NULL,
+      source_id INTEGER NOT NULL,
+      old_path TEXT NOT NULL,
+      new_path TEXT NOT NULL,
+      source_hash TEXT NOT NULL,
+      deployments_snapshot TEXT NOT NULL,
+      phase TEXT,
+      journal_json TEXT,
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      undone_at TEXT,
+      failure_message TEXT
+    );
+    CREATE TABLE IF NOT EXISTS source_relocation_locks (
+      resource TEXT PRIMARY KEY,
+      relocation_id TEXT NOT NULL,
+      FOREIGN KEY (relocation_id) REFERENCES source_relocations(id) ON DELETE CASCADE
+    );
+  `)
 }

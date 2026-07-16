@@ -315,6 +315,20 @@ export function registerIpcHandlers(db: DB): void {
   ipcMain.handle('skillLibrary:confirmSourceArchivePurge', async (_e, confirmationId: unknown) =>
     skillLibraryFacade.confirmSourceArchivePurge(assertNonEmptyString(confirmationId, 'confirmationId'))
   )
+  ipcMain.handle('skillLibrary:previewSourceRelocation', async (_e, request: unknown) => {
+    if (typeof request !== 'object' || request === null) throw new Error('Source Relocation request must be an object')
+    const dto = request as Record<string, unknown>
+    return skillLibraryFacade.previewSourceRelocation({
+      sourceId: assertInteger(dto.sourceId, 'sourceId'),
+      canonicalRelativeParent: assertString(dto.canonicalRelativeParent, 'canonicalRelativeParent')
+    })
+  })
+  ipcMain.handle('skillLibrary:confirmSourceRelocation', async (_e, confirmationId: unknown) =>
+    skillLibraryFacade.confirmSourceRelocation(assertNonEmptyString(confirmationId, 'confirmationId'))
+  )
+  ipcMain.handle('skillLibrary:undoSourceRelocation', async (_e, relocationId: unknown) =>
+    skillLibraryFacade.undoSourceRelocation(assertNonEmptyString(relocationId, 'relocationId'))
+  )
 
   ipcMain.handle('getSettings', async () => {
     const settings = readSettings(SETTINGS_PATH)

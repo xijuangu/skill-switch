@@ -12,7 +12,8 @@ import {
   rmdirSync,
   rmSync,
   statSync,
-  symlinkSync
+  symlinkSync,
+  unlinkSync
 } from 'fs'
 import type { DB } from '../db/database'
 import { runInTransaction, setCanonicalRepositoryPath } from '../db/database'
@@ -26,6 +27,7 @@ import { assertAbsolutePath, resolveWithin, validateSkillName } from './path-saf
 
 export type SkillLibrarySource = SkillSource
 export type ConsolidationBatchStatus = 'previewed' | 'completed' | 'failed' | 'recovery-required' | 'undone'
+export type SourceRelocationStatus = ConsolidationBatchStatus
 
 export interface SkillLibrarySkill {
   id: number
@@ -61,6 +63,7 @@ export interface SkillLibraryReadModel {
   skills: SkillLibrarySkill[]
   consolidationPlan: ConsolidationPlanItem[]
   consolidationBatches: ConsolidationBatchSummary[]
+  sourceRelocations: SourceRelocationSummary[]
 }
 
 export interface ConsolidationPlanItem {
@@ -71,6 +74,37 @@ export interface ConsolidationPlanItem {
   canonicalRelativeParent: string
   versions: Array<{ hash: string; candidateSourceIds: number[]; paths: string[] }>
 }
+
+export interface SourceRelocationSummary {
+  id: string
+  status: SourceRelocationStatus
+  skillId: number
+  skillName: string
+  sourceId: number
+  oldCanonicalPath: string
+  newCanonicalPath: string
+  createdAt: string
+  completedAt: string | null
+  undoneAt: string | null
+  failureMessage: string | null
+}
+
+export type SourceRelocationPreview = {
+  status: 'confirmation-required'
+  confirmationId: string
+  relocationId: string
+  skillId: number
+  skillName: string
+  oldCanonicalPath: string
+  newCanonicalPath: string
+  deployments: Array<{ deploymentId: number; targetTool: string; targetPath: string; mode: Deployment['mode'] }>
+}
+
+export type SourceRelocationOutcome =
+  | { status: 'completed'; relocationId: string; sourceId: number; canonicalPath: string }
+  | { status: 'undone'; relocationId: string; sourceId: number; canonicalPath: string }
+  | { status: 'rejected'; relocationId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'relocation-not-undoable' | 'relocation-busy'; message: string }
+  | { status: 'recovery-required'; relocationId: string; message: string }
 
 export type ConsolidationPreview = {
   status: 'confirmation-required'
@@ -110,6 +144,9 @@ export interface SkillLibraryFacade {
   confirmSourceArchivePurge(confirmationId: string):
     | { status: 'purged'; batchId: string; purgedAt: string; sizeBytes: number }
     | Extract<ConsolidationOutcome, { status: 'rejected' | 'recovery-required' }>
+  previewSourceRelocation(request: { sourceId: number; canonicalRelativeParent: string }): SourceRelocationPreview
+  confirmSourceRelocation(confirmationId: string): SourceRelocationOutcome
+  undoSourceRelocation(relocationId: string): SourceRelocationOutcome
   replaceCanonicalSource(request: {
     sourceDirectory: string
     skillName: string
@@ -162,6 +199,29 @@ function snapshotSources(snapshot: string): SkillSource[] {
   return 'sources' in parsed ? parsed.sources : [parsed]
 }
 
+interface RelocationRow {
+  id: string
+  status: SourceRelocationStatus
+  skill_id: number
+  skill_name: string
+  source_id: number
+  old_path: string
+  new_path: string
+  source_hash: string
+  deployments_snapshot: string
+  phase: string | null
+  journal_json: string | null
+  created_at: string
+  completed_at: string | null
+  undone_at: string | null
+  failure_message: string | null
+}
+
+interface RelocationDeploymentSnapshot {
+  deployment: Deployment
+  linkTarget: string | null
+}
+
 function pathEntryExists(path: string): boolean {
   try {
     lstatSync(path)
@@ -169,6 +229,13 @@ function pathEntryExists(path: string): boolean {
   } catch {
     return false
   }
+}
+
+function removePathEntry(path: string): void {
+  if (!pathEntryExists(path)) return
+  const entry = lstatSync(path)
+  if (entry.isDirectory() && !entry.isSymbolicLink()) rmSync(path, { recursive: true, force: true })
+  else unlinkSync(path)
 }
 
 function errorMessage(error: unknown): string {
@@ -212,6 +279,9 @@ export function createSkillLibraryFacade(options: {
     afterRegistryCommit?: (event: { batchId: string }) => void
     onFaultPoint?: (event: { batchId: string; itemIndex: number; point: 'before-registry-commit' | 'before-cleanup' | 'before-compensation' }) => void
   }
+  relocationHooks?: {
+    onPhase?: (event: { relocationId: string; phase: string }) => void
+  }
 }): SkillLibraryFacade {
   const canonicalRepositoryPath = resolve(assertAbsolutePath(options.canonicalRepositoryPath, 'Canonical Repository path'))
   const sourceArchivePath = resolve(assertAbsolutePath(
@@ -234,6 +304,12 @@ export function createSkillLibraryFacade(options: {
     )`).run()
   options.db.prepare(`DELETE FROM consolidation_operation_locks
     WHERE batch_id IN (SELECT id FROM consolidation_batches WHERE phase IS NULL AND status IN ('failed', 'completed', 'undone'))`).run()
+  options.db.prepare(`UPDATE source_relocations
+    SET status = 'recovery-required',
+        failure_message = COALESCE(failure_message, 'Source Relocation was interrupted; inspect the persisted journal.')
+    WHERE status IN ('previewed', 'completed') AND (phase IS NOT NULL OR id IN (SELECT relocation_id FROM source_relocation_locks))`).run()
+  options.db.prepare(`DELETE FROM source_relocation_locks
+    WHERE relocation_id IN (SELECT id FROM source_relocations WHERE phase IS NULL AND status IN ('failed', 'completed', 'undone'))`).run()
 
   function getPersistedBatch(id: string): { batch: BatchRow; items: ItemRow[] } | null {
     const batch = options.db.prepare('SELECT * FROM consolidation_batches WHERE id = ?').get(id) as BatchRow | undefined
@@ -283,6 +359,70 @@ export function createSkillLibraryFacade(options: {
     const placement = resolveWithin(canonicalRepositoryPath, ...segments, skillName)
     assertCanonicalParentConfined(placement)
     return placement
+  }
+
+  function getRelocation(id: string): RelocationRow | null {
+    return (options.db.prepare('SELECT * FROM source_relocations WHERE id = ?').get(id) as RelocationRow | undefined) ?? null
+  }
+
+  function relationsForCanonicalSource(source: SkillSource): Deployment[] {
+    const relations = getDeploymentsBySkillId(options.db, source.skill_id)
+      .filter((deployment) => deployment.source_id === source.id ||
+        (deployment.source_id == null && resolve(deployment.source_path) === resolve(source.path)))
+      .sort((left, right) => left.id - right.id)
+    if (relations.some((deployment) => deployment.source_id == null || deployment.target_id == null || deployment.target_path == null)) {
+      throw new Error('Canonical Source has an unresolved Deployment; reconcile it before relocation')
+    }
+    return relations
+  }
+
+  function previewSourceRelocation(request: { sourceId: number; canonicalRelativeParent: string }): SourceRelocationPreview {
+    if (!Number.isInteger(request.sourceId)) throw new Error('sourceId must be an integer')
+    const source = getSourceById(options.db, request.sourceId)
+    if (!source || source.source_role !== 'canonical') throw new Error('Source Relocation requires a canonical Source ID')
+    const skill = getSkillById(options.db, source.skill_id)
+    if (!skill) throw new Error('Canonical Source Skill does not exist')
+    if (!pathEntryExists(source.path) || !statSync(source.path).isDirectory() || hashDir(source.path) !== source.hash) {
+      throw new Error('Canonical Source content changed or is unavailable')
+    }
+    const newPath = canonicalPlacement(validateSkillName(skill.name), request.canonicalRelativeParent)
+    if (resolve(newPath) === resolve(source.path)) throw new Error('New Canonical Placement must differ from the current placement')
+    const oldToNew = relative(resolve(source.path), resolve(newPath))
+    const newToOld = relative(resolve(newPath), resolve(source.path))
+    if ((oldToNew !== '..' && !oldToNew.startsWith(`..${sep}`) && !isAbsolute(oldToNew)) ||
+      (newToOld !== '..' && !newToOld.startsWith(`..${sep}`) && !isAbsolute(newToOld))) {
+      throw new Error('New Canonical Placement overlaps the current Source')
+    }
+    if (pathEntryExists(newPath)) throw new Error('New Canonical Placement is occupied')
+    const deployments = relationsForCanonicalSource(source)
+    if (deployments.some((deployment) => deployment.management === 'observed')) {
+      throw new Error('Observed Subscription must be adopted or removed before Source Relocation')
+    }
+    for (const deployment of deployments) {
+      if (deployment.mode !== 'copy') assertObservedLink(deployment, source.path)
+    }
+    const snapshots: RelocationDeploymentSnapshot[] = deployments.map((deployment) => ({
+      deployment,
+      linkTarget: deployment.mode === 'copy' ? null : readlinkSync(deployment.target_path!)
+    }))
+    const id = randomUUID()
+    options.db.prepare(`INSERT INTO source_relocations
+      (id, status, skill_id, skill_name, source_id, old_path, new_path, source_hash,
+       deployments_snapshot, created_at)
+      VALUES (?, 'previewed', ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, skill.id, skill.name, source.id, source.path, newPath, source.hash,
+      JSON.stringify(snapshots), new Date().toISOString())
+    return {
+      status: 'confirmation-required', confirmationId: id, relocationId: id,
+      skillId: skill.id, skillName: skill.name,
+      oldCanonicalPath: source.path, newCanonicalPath: newPath,
+      deployments: deployments.map((deployment) => ({
+        deploymentId: deployment.id,
+        targetTool: deployment.target_tool,
+        targetPath: deployment.target_path!,
+        mode: deployment.mode
+      }))
+    }
   }
 
   function assertCanonicalParentConfined(placement: string): void {
@@ -463,17 +603,8 @@ export function createSkillLibraryFacade(options: {
     const ordered = [...new Set(resources)].sort()
     return runInTransaction(options.db, () => {
       const existing = options.db.prepare('SELECT resource FROM consolidation_operation_locks ORDER BY resource').all() as Array<{ resource: string }>
-      const conflicts = (left: string, right: string) => {
-        if (left === right) return true
-        if (!left.startsWith('path:') || !right.startsWith('path:')) return false
-        const leftPath = left.slice(5)
-        const rightPath = right.slice(5)
-        const rel = relative(leftPath, rightPath)
-        const reverse = relative(rightPath, leftPath)
-        return (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) ||
-          (reverse !== '..' && !reverse.startsWith(`..${sep}`) && !isAbsolute(reverse))
-      }
-      if (ordered.some((resource) => existing.some((locked) => conflicts(resource, locked.resource)))) return false
+      const relocationLocks = options.db.prepare('SELECT resource FROM source_relocation_locks ORDER BY resource').all() as Array<{ resource: string }>
+      if (ordered.some((resource) => [...existing, ...relocationLocks].some((locked) => resourcesConflict(resource, locked.resource)))) return false
       const insert = options.db.prepare('INSERT INTO consolidation_operation_locks (resource, batch_id) VALUES (?, ?)')
       for (const resource of ordered) insert.run(resource, batchId)
       options.db.prepare('UPDATE consolidation_batches SET phase = ?, evidence_json = ? WHERE id = ?')
@@ -487,7 +618,10 @@ export function createSkillLibraryFacade(options: {
   }
 
   function assertPathsUnlocked(paths: string[]): void {
-    const locked = (options.db.prepare("SELECT resource FROM consolidation_operation_locks WHERE resource LIKE 'path:%'").all() as Array<{ resource: string }>).map((row) => row.resource.slice(5))
+    const locked = [
+      ...(options.db.prepare("SELECT resource FROM consolidation_operation_locks WHERE resource LIKE 'path:%'").all() as Array<{ resource: string }>),
+      ...(options.db.prepare("SELECT resource FROM source_relocation_locks WHERE resource LIKE 'path:%'").all() as Array<{ resource: string }>)
+    ].map((row) => row.resource.slice(5))
     for (const path of paths) {
       const candidate = resolve(path)
       const busy = locked.some((lockedPath) => {
@@ -501,7 +635,10 @@ export function createSkillLibraryFacade(options: {
   }
 
   function assertSkillUnlocked(skillName: string): void {
-    const locked = options.db.prepare('SELECT 1 FROM consolidation_operation_locks WHERE resource = ?').get(`skill:${skillName}`)
+    const locked = options.db.prepare(`SELECT 1 FROM (
+      SELECT resource FROM consolidation_operation_locks
+      UNION ALL SELECT resource FROM source_relocation_locks
+    ) WHERE resource = ?`).get(`skill:${skillName}`)
     if (locked) throw new Error(`Skill Library identity is busy: ${skillName}`)
   }
 
@@ -903,6 +1040,272 @@ export function createSkillLibraryFacade(options: {
     }
   }
 
+  function relocationSnapshots(row: RelocationRow): RelocationDeploymentSnapshot[] {
+    return JSON.parse(row.deployments_snapshot) as RelocationDeploymentSnapshot[]
+  }
+
+  function relocationResources(row: RelocationRow): string[] {
+    return [
+      `source:${row.source_id}`,
+      `skill:${row.skill_name}`,
+      `path:${resolve(row.old_path)}`,
+      `path:${resolve(row.new_path)}`,
+      ...relocationSnapshots(row).map((snapshot) => `path:${resolve(snapshot.deployment.target_path!)}`)
+    ]
+  }
+
+  function resourcesConflict(left: string, right: string): boolean {
+    if (left === right) return true
+    if (!left.startsWith('path:') || !right.startsWith('path:')) return false
+    const leftPath = left.slice(5)
+    const rightPath = right.slice(5)
+    const rel = relative(leftPath, rightPath)
+    const reverse = relative(rightPath, leftPath)
+    return (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) ||
+      (reverse !== '..' && !reverse.startsWith(`..${sep}`) && !isAbsolute(reverse))
+  }
+
+  function acquireRelocationLocks(row: RelocationRow, phase: 'relocation-lock-acquired' | 'relocation-undo-lock-acquired'): boolean {
+    const resources = [...new Set(relocationResources(row))].sort()
+    return runInTransaction(options.db, () => {
+      const relocationLocks = options.db.prepare('SELECT resource FROM source_relocation_locks').all() as Array<{ resource: string }>
+      const consolidationLocks = options.db.prepare('SELECT resource FROM consolidation_operation_locks').all() as Array<{ resource: string }>
+      const existing = [...relocationLocks, ...consolidationLocks]
+      if (resources.some((resource) => existing.some((locked) => resourcesConflict(resource, locked.resource)))) return false
+      const insert = options.db.prepare('INSERT INTO source_relocation_locks (resource, relocation_id) VALUES (?, ?)')
+      for (const resource of resources) insert.run(resource, row.id)
+      options.db.prepare('UPDATE source_relocations SET phase = ?, journal_json = ? WHERE id = ?')
+        .run(phase, JSON.stringify([{ phase, intent: 'applied', at: new Date().toISOString() }]), row.id)
+      return true
+    })
+  }
+
+  function releaseRelocationLocks(id: string): void {
+    options.db.prepare('DELETE FROM source_relocation_locks WHERE relocation_id = ?').run(id)
+  }
+
+  function markRelocation(row: RelocationRow, phase: string, intent: 'prepared' | 'applied'): void {
+    const current = getRelocation(row.id)
+    const journal = current?.journal_json ? JSON.parse(current.journal_json) as Array<Record<string, unknown>> : []
+    journal.push({ phase, intent, at: new Date().toISOString() })
+    options.db.prepare('UPDATE source_relocations SET phase = ?, journal_json = ? WHERE id = ?')
+      .run(`${phase}:${intent}`, JSON.stringify(journal), row.id)
+    if (intent === 'applied') options.relocationHooks?.onPhase?.({ relocationId: row.id, phase })
+  }
+
+  function currentRelocationPlan(row: RelocationRow, expectedPath: string): {
+    source: SkillSource
+    snapshots: RelocationDeploymentSnapshot[]
+  } {
+    const source = getSourceById(options.db, row.source_id)
+    if (!source || source.source_role !== 'canonical' || resolve(source.path) !== resolve(expectedPath) || source.hash !== row.source_hash) {
+      throw new Error('Canonical Source registration changed')
+    }
+    if (!pathEntryExists(expectedPath) || !statSync(expectedPath).isDirectory() || hashDir(expectedPath) !== row.source_hash) {
+      throw new Error('Canonical Source content changed or is unavailable')
+    }
+    const snapshots = relocationSnapshots(row)
+    const current = relationsForCanonicalSource(source)
+    if (current.some((deployment) => deployment.management === 'observed')) {
+      throw new Error('Observed Subscription must be adopted or removed before Source Relocation')
+    }
+    const expectedDeployments = snapshots.map((snapshot) => ({ ...snapshot.deployment, source_path: expectedPath }))
+    if (JSON.stringify(current) !== JSON.stringify(expectedDeployments)) {
+      throw new Error('Managed Deployment set changed')
+    }
+    for (const deployment of current) {
+      if (deployment.mode !== 'copy') assertObservedLink(deployment, expectedPath)
+    }
+    return { source, snapshots }
+  }
+
+  function linkWorkPaths(relocationId: string, targetPath: string) {
+    return {
+      stage: resolveWithin(dirname(targetPath), `.${basename(targetPath)}.skill-switch-relocation-stage-${relocationId}`),
+      rollback: resolveWithin(dirname(targetPath), `.${basename(targetPath)}.skill-switch-relocation-rollback-${relocationId}`)
+    }
+  }
+
+  interface LinkReplacementState {
+    targetPath: string
+    rollback: string
+    stage: string
+    targetDisplaced: boolean
+    replacementInstalled: boolean
+  }
+
+  function installReplacementLink(
+    relocationId: string,
+    snapshot: RelocationDeploymentSnapshot,
+    linkTarget: string,
+    track: (state: LinkReplacementState) => void
+  ): void {
+    const targetPath = snapshot.deployment.target_path!
+    const paths = linkWorkPaths(relocationId, targetPath)
+    if (pathEntryExists(paths.stage) || pathEntryExists(paths.rollback)) throw new Error(`Deployment rollback path is occupied: ${targetPath}`)
+    const state: LinkReplacementState = {
+      targetPath, ...paths, targetDisplaced: false, replacementInstalled: false
+    }
+    track(state)
+    symlinkSync(linkTarget, paths.stage, snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
+    renameSync(targetPath, paths.rollback)
+    state.targetDisplaced = true
+    options.relocationHooks?.onPhase?.({ relocationId, phase: 'link-target-displaced' })
+    renameSync(paths.stage, targetPath)
+    state.replacementInstalled = true
+  }
+
+  function restoreReplacedLink(item: LinkReplacementState): void {
+    if (item.replacementInstalled) removePathEntry(item.targetPath)
+    if (item.targetDisplaced && pathEntryExists(item.rollback)) renameSync(item.rollback, item.targetPath)
+    removePathEntry(item.stage)
+  }
+
+  function confirmSourceRelocation(confirmationId: string): SourceRelocationOutcome {
+    const row = getRelocation(confirmationId)
+    if (!row) return { status: 'rejected', reason: 'confirmation-not-found', message: 'Source Relocation confirmation does not exist.' }
+    if (row.status === 'recovery-required') return { status: 'recovery-required', relocationId: row.id, message: row.failure_message ?? 'Source Relocation requires recovery.' }
+    if (row.status !== 'previewed') return { status: 'rejected', relocationId: row.id, reason: 'plan-stale', message: 'Source Relocation confirmation is no longer pending.' }
+    if (!acquireRelocationLocks(row, 'relocation-lock-acquired')) {
+      return { status: 'rejected', relocationId: row.id, reason: 'relocation-busy', message: 'Source Relocation resources are busy.' }
+    }
+    const replacedLinks: LinkReplacementState[] = []
+    const createdParents = missingParents(row.new_path)
+    let sourceMoved = false
+    let registryCommitted = false
+    try {
+      assertCanonicalParentConfined(row.new_path)
+      if (pathEntryExists(row.new_path)) throw new Error('New Canonical Placement is occupied')
+      const { source, snapshots } = currentRelocationPlan(row, row.old_path)
+      markRelocation(row, 'source-moved', 'prepared')
+      mkdirSync(dirname(row.new_path), { recursive: true })
+      renameSync(row.old_path, row.new_path)
+      sourceMoved = true
+      markRelocation(row, 'source-moved', 'applied')
+      markRelocation(row, 'links-updated', 'prepared')
+      for (const snapshot of snapshots) {
+        if (snapshot.deployment.mode === 'copy') continue
+        installReplacementLink(row.id, snapshot, row.new_path, (state) => replacedLinks.push(state))
+      }
+      markRelocation(row, 'links-updated', 'applied')
+      markRelocation(row, 'registry-committed', 'prepared')
+      runInTransaction(options.db, () => {
+        options.db.prepare('UPDATE skill_sources SET path = ?, mtime = ? WHERE id = ?')
+          .run(row.new_path, Math.floor(statSync(row.new_path).mtimeMs), source.id)
+        updatePrimarySourcePath(options.db, row.skill_id, row.new_path)
+        options.db.prepare('UPDATE deployments SET source_path = ? WHERE source_id = ?').run(row.new_path, source.id)
+        options.db.prepare("UPDATE source_relocations SET status = 'completed', completed_at = ?, phase = 'registry-committed:applied' WHERE id = ?")
+          .run(new Date().toISOString(), row.id)
+      })
+      registryCommitted = true
+      options.relocationHooks?.onPhase?.({ relocationId: row.id, phase: 'registry-committed' })
+      for (const item of replacedLinks) removePathEntry(item.rollback)
+      removeCreatedParents([])
+      runInTransaction(options.db, () => {
+        options.db.prepare('UPDATE source_relocations SET phase = NULL, failure_message = NULL WHERE id = ?').run(row.id)
+        releaseRelocationLocks(row.id)
+      })
+      return { status: 'completed', relocationId: row.id, sourceId: source.id, canonicalPath: row.new_path }
+    } catch (error) {
+      const message = errorMessage(error)
+      if (registryCommitted) {
+        options.db.prepare("UPDATE source_relocations SET status = 'recovery-required', failure_message = ? WHERE id = ?").run(message, row.id)
+        return { status: 'recovery-required', relocationId: row.id, message }
+      }
+      let compensationError: unknown = null
+      try {
+        for (const item of [...replacedLinks].reverse()) restoreReplacedLink(item)
+        if (sourceMoved && pathEntryExists(row.new_path) && !pathEntryExists(row.old_path)) renameSync(row.new_path, row.old_path)
+        removeCreatedParents(createdParents)
+      } catch (rollbackError) {
+        compensationError = rollbackError
+      }
+      if (compensationError) {
+        const recoveryMessage = `${message}; compensation failed: ${errorMessage(compensationError)}`
+        options.db.prepare("UPDATE source_relocations SET status = 'recovery-required', failure_message = ? WHERE id = ?").run(recoveryMessage, row.id)
+        return { status: 'recovery-required', relocationId: row.id, message: recoveryMessage }
+      }
+      runInTransaction(options.db, () => {
+        options.db.prepare("UPDATE source_relocations SET status = 'failed', phase = NULL, failure_message = ? WHERE id = ?").run(message, row.id)
+        releaseRelocationLocks(row.id)
+      })
+      return { status: 'rejected', relocationId: row.id, reason: 'plan-stale', message }
+    }
+  }
+
+  function undoSourceRelocation(relocationId: string): SourceRelocationOutcome {
+    const row = getRelocation(relocationId)
+    if (!row) return { status: 'rejected', reason: 'confirmation-not-found', message: 'Source Relocation does not exist.' }
+    if (row.status === 'recovery-required') return { status: 'recovery-required', relocationId: row.id, message: row.failure_message ?? 'Source Relocation requires recovery.' }
+    if (row.status !== 'completed' || row.phase !== null) {
+      return { status: 'rejected', relocationId: row.id, reason: 'relocation-not-undoable', message: 'Source Relocation is not safely undoable.' }
+    }
+    if (!acquireRelocationLocks(row, 'relocation-undo-lock-acquired')) {
+      return { status: 'rejected', relocationId: row.id, reason: 'relocation-busy', message: 'Source Relocation resources are busy.' }
+    }
+    const replacedLinks: LinkReplacementState[] = []
+    let sourceMoved = false
+    let registryCommitted = false
+    try {
+      if (pathEntryExists(row.old_path)) throw new Error('Previous Canonical Placement is occupied')
+      assertCanonicalParentConfined(row.old_path)
+      const { source, snapshots } = currentRelocationPlan(row, row.new_path)
+      markRelocation(row, 'undo-links-updated', 'prepared')
+      for (const snapshot of snapshots) {
+        if (snapshot.deployment.mode === 'copy') continue
+        installReplacementLink(row.id, snapshot, snapshot.linkTarget!, (state) => replacedLinks.push(state))
+      }
+      markRelocation(row, 'undo-links-updated', 'applied')
+      markRelocation(row, 'undo-source-moved', 'prepared')
+      mkdirSync(dirname(row.old_path), { recursive: true })
+      renameSync(row.new_path, row.old_path)
+      sourceMoved = true
+      markRelocation(row, 'undo-source-moved', 'applied')
+      runInTransaction(options.db, () => {
+        options.db.prepare('UPDATE skill_sources SET path = ?, mtime = ? WHERE id = ?')
+          .run(row.old_path, Math.floor(statSync(row.old_path).mtimeMs), source.id)
+        updatePrimarySourcePath(options.db, row.skill_id, row.old_path)
+        options.db.prepare('UPDATE deployments SET source_path = ? WHERE source_id = ?').run(row.old_path, source.id)
+        options.db.prepare("UPDATE source_relocations SET phase = 'undo-registry-committed:applied' WHERE id = ?").run(row.id)
+      })
+      registryCommitted = true
+      for (const item of replacedLinks) removePathEntry(item.rollback)
+      removeCreatedParents(missingParents(row.new_path))
+      runInTransaction(options.db, () => {
+        options.db.prepare("UPDATE source_relocations SET status = 'undone', undone_at = ?, phase = NULL, failure_message = NULL WHERE id = ?")
+          .run(new Date().toISOString(), row.id)
+        releaseRelocationLocks(row.id)
+      })
+      return { status: 'undone', relocationId: row.id, sourceId: source.id, canonicalPath: row.old_path }
+    } catch (error) {
+      const message = errorMessage(error)
+      if (registryCommitted) {
+        options.db.prepare("UPDATE source_relocations SET status = 'recovery-required', failure_message = ? WHERE id = ?").run(message, row.id)
+        return { status: 'recovery-required', relocationId: row.id, message }
+      }
+      let compensationError: unknown = null
+      try {
+        if (sourceMoved && pathEntryExists(row.old_path) && !pathEntryExists(row.new_path)) {
+          mkdirSync(dirname(row.new_path), { recursive: true })
+          renameSync(row.old_path, row.new_path)
+        }
+        for (const item of [...replacedLinks].reverse()) restoreReplacedLink(item)
+      } catch (rollbackError) {
+        compensationError = rollbackError
+      }
+      if (compensationError) {
+        const recoveryMessage = `${message}; undo compensation failed: ${errorMessage(compensationError)}`
+        options.db.prepare("UPDATE source_relocations SET status = 'recovery-required', failure_message = ? WHERE id = ?").run(recoveryMessage, row.id)
+        return { status: 'recovery-required', relocationId: row.id, message: recoveryMessage }
+      }
+      runInTransaction(options.db, () => {
+        options.db.prepare("UPDATE source_relocations SET phase = NULL, failure_message = ? WHERE id = ?").run(message, row.id)
+        releaseRelocationLocks(row.id)
+      })
+      return { status: 'rejected', relocationId: row.id, reason: 'plan-stale', message }
+    }
+  }
+
   function replaceCanonicalSource(request: {
     sourceDirectory: string
     skillName: string
@@ -954,6 +1357,9 @@ export function createSkillLibraryFacade(options: {
     restoreConsolidation: undoConsolidation,
     previewSourceArchivePurge,
     confirmSourceArchivePurge,
+    previewSourceRelocation,
+    confirmSourceRelocation,
+    undoSourceRelocation,
     replaceCanonicalSource,
     read() {
       const skills = getAllSkills(options.db).map((skill) => {
@@ -986,8 +1392,16 @@ export function createSkillLibraryFacade(options: {
             versions
           }
         })
+      const relocations = options.db.prepare('SELECT * FROM source_relocations ORDER BY created_at DESC').all() as RelocationRow[]
       return {
         canonicalRepository: { path: canonicalRepositoryPath }, skills, consolidationPlan,
+        sourceRelocations: relocations.map((relocation) => ({
+          id: relocation.id, status: relocation.status, skillId: relocation.skill_id,
+          skillName: relocation.skill_name, sourceId: relocation.source_id,
+          oldCanonicalPath: relocation.old_path, newCanonicalPath: relocation.new_path,
+          createdAt: relocation.created_at, completedAt: relocation.completed_at,
+          undoneAt: relocation.undone_at, failureMessage: relocation.failure_message
+        })),
         consolidationBatches: batches.map((batch) => {
           const itemRows = options.db.prepare('SELECT skill_id, skill_name, canonical_path, archive_path, candidate_source_snapshot, observed_deployments_snapshot, phase FROM consolidation_items WHERE batch_id = ? ORDER BY id ASC').all(batch.id) as Array<{ skill_id: number; skill_name: string; canonical_path: string; archive_path: string; candidate_source_snapshot: string; observed_deployments_snapshot: string; phase: string | null }>
           const phases = [...new Set([batch.phase, ...itemRows.map((item) => item.phase)].filter((phase): phase is string => phase !== null))]
@@ -1002,7 +1416,7 @@ export function createSkillLibraryFacade(options: {
           return {
             id: batch.id, status: batch.status,
             items: itemRows.map((item) => {
-              const original = JSON.parse(item.candidate_source_snapshot) as SkillSource
+              const original = snapshotSources(item.candidate_source_snapshot)[0]
               const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
               return {
                 skillId: item.skill_id, skillName: item.skill_name, canonicalPath: item.canonical_path,

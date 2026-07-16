@@ -81,7 +81,37 @@ export interface SkillLibraryReadModelView {
     recoveryDirection: 'rollback-consolidation' | 'finish-cleanup' | 'rollback-undo' | 'inspect' | null
     evidenceSummary: { itemCount: number; phases: string[] }
   }>
+  sourceRelocations: Array<{
+    id: string
+    status: 'previewed' | 'completed' | 'failed' | 'recovery-required' | 'undone'
+    skillId: number
+    skillName: string
+    sourceId: number
+    oldCanonicalPath: string
+    newCanonicalPath: string
+    createdAt: string
+    completedAt: string | null
+    undoneAt: string | null
+    failureMessage: string | null
+  }>
 }
+
+export type SourceRelocationPreviewView = {
+  status: 'confirmation-required'
+  confirmationId: string
+  relocationId: string
+  skillId: number
+  skillName: string
+  oldCanonicalPath: string
+  newCanonicalPath: string
+  deployments: Array<{ deploymentId: number; targetTool: string; targetPath: string; mode: DeployModeView }>
+}
+
+export type SourceRelocationOutcomeView =
+  | { status: 'completed'; relocationId: string; sourceId: number; canonicalPath: string }
+  | { status: 'undone'; relocationId: string; sourceId: number; canonicalPath: string }
+  | { status: 'rejected'; relocationId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'relocation-not-undoable' | 'relocation-busy'; message: string }
+  | { status: 'recovery-required'; relocationId: string; message: string }
 
 export type ConsolidationPreviewView = {
   status: 'confirmation-required'
@@ -374,6 +404,9 @@ declare global {
       restoreConsolidation: (batchId: string) => Promise<ConsolidationUndoOutcomeView>
       previewSourceArchivePurge: (batchId: string) => Promise<SourceArchivePurgePreviewView>
       confirmSourceArchivePurge: (confirmationId: string) => Promise<SourceArchivePurgeOutcomeView>
+      previewSourceRelocation: (request: { sourceId: number; canonicalRelativeParent: string }) => Promise<SourceRelocationPreviewView>
+      confirmSourceRelocation: (confirmationId: string) => Promise<SourceRelocationOutcomeView>
+      undoSourceRelocation: (relocationId: string) => Promise<SourceRelocationOutcomeView>
       getSettings: () => Promise<SettingsView>
       getSourceRoots: () => Promise<SourceRootView[]>
       registerSourceRoot: (path: string) => Promise<SourceRootScanResultView>

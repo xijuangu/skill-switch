@@ -19,6 +19,12 @@ const api = {
     ipcRenderer.invoke('skillLibrary:previewSourceArchivePurge', batchId),
   confirmSourceArchivePurge: (confirmationId: string) =>
     ipcRenderer.invoke('skillLibrary:confirmSourceArchivePurge', confirmationId),
+  previewSourceRelocation: (request: { sourceId: number; canonicalRelativeParent: string }) =>
+    ipcRenderer.invoke('skillLibrary:previewSourceRelocation', request),
+  confirmSourceRelocation: (confirmationId: string) =>
+    ipcRenderer.invoke('skillLibrary:confirmSourceRelocation', confirmationId),
+  undoSourceRelocation: (relocationId: string) =>
+    ipcRenderer.invoke('skillLibrary:undoSourceRelocation', relocationId),
   getSettings: () => ipcRenderer.invoke('getSettings'),
   getSourceRoots: () => ipcRenderer.invoke('getSourceRoots'),
   registerSourceRoot: (path: string) => ipcRenderer.invoke('registerSourceRoot', path),
