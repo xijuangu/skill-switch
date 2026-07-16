@@ -84,6 +84,8 @@ Spec'd via `/grill-me` → `/to-prd` → `/to-issues`. See:
 - UI 升级 Slices: [issues #30–#34](https://github.com/xijuangu/skill-switch/issues)
 - Review 后修复与增强: [issues #52–#62](https://github.com/xijuangu/skill-switch/issues)（白屏、滚动条、Skeleton 静态化、ADR 0002 分层落实、来源按 hash 分组展示等）
 - Deployment 生命周期深模块: [issues #69–#78](https://github.com/xijuangu/skill-switch/issues)（稳定语义 ID、Facade、聚合确认、目标锁、可补偿文件系统事务与 contract 收口）
+- 权威源码库整理生命周期 PRD: [issue #81](https://github.com/xijuangu/skill-switch/issues/81)
+- 整理生命周期 Slices: [issues #82–#92](https://github.com/xijuangu/skill-switch/issues)（候选/权威身份与 SkillLibraryFacade、全局一键接管、可撤销整理与原子批次、批量选择与去重、版本冲突与另存、权威版本替换与 copy 漂移、Source Archive 历史与永久清理、可撤销 Source Relocation、Source Recovery、仅权威 Source 可部署）。验收步骤见 [docs/manual-qa.md](docs/manual-qa.md)。
 
 ## Out of Scope (MVP)
 
