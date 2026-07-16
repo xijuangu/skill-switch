@@ -141,7 +141,7 @@ describe('App (integration)', () => {
     await userEvent.click(screen.getByRole('button', { name: '永久清理' }))
     await userEvent.click(screen.getByRole('button', { name: '预览清理' }))
     expect(api.previewSourceArchivePurge).toHaveBeenCalledWith('batch-88')
-    expect(screen.getByText(/将永久删除 1 个归档项/)).toBeInTheDocument()
+    expect(screen.getByText(/将永久清理 1 个归档项/)).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '确认永久清理' }))
     expect(api.confirmSourceArchivePurge).toHaveBeenCalledWith('purge-88')
   })

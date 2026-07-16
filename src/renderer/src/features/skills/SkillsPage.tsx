@@ -5,7 +5,7 @@ import {
   ChevronRight, ChevronDown, Hash, Calendar, GitBranch, AlertCircle
 } from 'lucide-react'
 import {
-  Button, Input, StatusDot, EmptyState, Tabs, Skeleton, Menu, Dialog, getDriftStatus
+  Button, Input, StatusDot, EmptyState, Tabs, Skeleton, Menu, getDriftStatus
 } from '../../shared'
 import { useToast } from '../../app/Toast'
 import {
@@ -16,12 +16,28 @@ import {
   ViewMdSourcePicker,
   UndeployDialog,
   RemoveRegistryDialog,
+  ConsolidationDialog,
+  BatchConsolidationDialog,
+  ConflictResolutionDialog,
+  UndoConsolidationDialog,
+  SourceRelocationDialog,
+  UndoRelocationDialog,
   sourceOriginLabel,
   sourceRoleLabel,
   type SkillView,
   type SkillSourceView,
   type DeployResultView,
   type InstallResultView,
+  type ConsolidationPreview,
+  type ConsolidationBatchPreview,
+  type ConsolidationBatch,
+  type ConsolidationPlanItem,
+  type ConflictResolutionDecision,
+  type ConsolidationDraft,
+  type ConflictResolutionEditor,
+  type UndoBatch,
+  type SourceRelocationPreview,
+  type SourceRelocation,
 } from './dialogs'
 import { groupByHash, shortHash } from './sourceGrouping'
 
@@ -30,34 +46,9 @@ type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 
 type DeployFilter = 'all' | 'deployed' | 'undeployed'
 type DeployTarget = { skill: SkillView; sourceId: number }
-type ConsolidationPreview = Awaited<ReturnType<typeof window.api.previewConsolidation>>
-type ConsolidationBatchPreview = Awaited<ReturnType<typeof window.api.previewConsolidationBatch>>
-type ConsolidationBatch = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationBatches'][number]
-type ConsolidationPlanItem = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationPlan'][number]
-type ConflictResolutionPreview = Awaited<ReturnType<typeof window.api.previewConflictResolution>>
-type ConflictResolutionDecision = NonNullable<Parameters<typeof window.api.previewConsolidationBatch>[0]['items'][number]['conflictResolution']>
-type ConsolidationDraft = ConsolidationPlanItem & {
-  selected: boolean
-  canonicalRelativeParent: string
-  conflictResolution?: ConflictResolutionDecision
-}
-type ConflictVersionAction = { action: 'archive' | 'save-as'; newSkillName: string; canonicalRelativeParent: string }
-type ConflictResolutionEditor = {
-  draftSkillId: number
-  preview: ConflictResolutionPreview
-  authoritativeSourceId: number | null
-  actions: Record<string, ConflictVersionAction>
-}
-type UndoBatch = { batch: ConsolidationBatch; item: ConsolidationBatch['items'][number] }
-type SourceRelocationPreview = Awaited<ReturnType<typeof window.api.previewSourceRelocation>>
-type SourceRelocation = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['sourceRelocations'][number]
 
 function managedDeploymentCount(skill: SkillView): number {
   return skill.deployments.filter((deployment) => deployment.management === 'managed').length
-}
-
-function conflictFileStatusLabel(status: 'added' | 'deleted' | 'modified'): string {
-  return { added: '新增', deleted: '删除', modified: '修改' }[status]
 }
 
 export function SkillsPage({
@@ -98,17 +89,14 @@ export function SkillsPage({
   const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string; management: 'managed' | 'observed' }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
   const [consolidationTarget, setConsolidationTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
-  const [canonicalRelativeParent, setCanonicalRelativeParent] = useState('')
   const [consolidationPreview, setConsolidationPreview] = useState<ConsolidationPreview | null>(null)
   const [consolidationBatches, setConsolidationBatches] = useState<ConsolidationBatch[]>([])
   const [consolidationPlan, setConsolidationPlan] = useState<ConsolidationPlanItem[]>([])
   const [consolidationDrafts, setConsolidationDrafts] = useState<ConsolidationDraft[] | null>(null)
-  const [batchRelativeParent, setBatchRelativeParent] = useState('')
   const [batchConsolidationPreview, setBatchConsolidationPreview] = useState<ConsolidationBatchPreview | null>(null)
   const [conflictResolutionEditor, setConflictResolutionEditor] = useState<ConflictResolutionEditor | null>(null)
   const [undoBatch, setUndoBatch] = useState<UndoBatch | null>(null)
   const [relocationTarget, setRelocationTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
-  const [relocationRelativeParent, setRelocationRelativeParent] = useState('')
   const [relocationPreview, setRelocationPreview] = useState<SourceRelocationPreview | null>(null)
   const [sourceRelocations, setSourceRelocations] = useState<SourceRelocation[]>([])
   const [undoRelocation, setUndoRelocation] = useState<SourceRelocation | null>(null)
@@ -364,11 +352,10 @@ export function SkillsPage({
   const closeConsolidation = () => {
     if (actionBusy) return
     setConsolidationTarget(null)
-    setCanonicalRelativeParent('')
     setConsolidationPreview(null)
   }
 
-  const handlePreviewConsolidation = async () => {
+  const handlePreviewConsolidation = async (canonicalRelativeParent: string) => {
     if (!consolidationTarget) return
     setActionBusy(true)
     try {
@@ -395,7 +382,6 @@ export function SkillsPage({
       }
       success(`「${consolidationPreview.skillName}」整理完成；请按需手动部署`)
       setConsolidationTarget(null)
-      setCanonicalRelativeParent('')
       setConsolidationPreview(null)
       await Promise.all([onRefresh(), refreshSkillLibrary()])
     } catch (e) {
@@ -430,7 +416,6 @@ export function SkillsPage({
       selected: item.selectedByDefault,
       canonicalRelativeParent: item.canonicalRelativeParent
     })))
-    setBatchRelativeParent('')
     setBatchConsolidationPreview(null)
   }
 
@@ -565,17 +550,16 @@ export function SkillsPage({
   const closeRelocation = () => {
     if (actionBusy) return
     setRelocationTarget(null)
-    setRelocationRelativeParent('')
     setRelocationPreview(null)
   }
 
-  const handlePreviewRelocation = async () => {
+  const handlePreviewRelocation = async (canonicalRelativeParent: string) => {
     if (!relocationTarget) return
     setActionBusy(true)
     try {
       setRelocationPreview(await window.api.previewSourceRelocation({
         sourceId: relocationTarget.source.id,
-        canonicalRelativeParent: relocationRelativeParent.trim()
+        canonicalRelativeParent: canonicalRelativeParent.trim()
       }))
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
@@ -595,7 +579,6 @@ export function SkillsPage({
       }
       success(`已移动「${relocationPreview.skillName}」的权威 Source`)
       setRelocationTarget(null)
-      setRelocationRelativeParent('')
       setRelocationPreview(null)
       await Promise.all([onRefresh(), refreshSkillLibrary()])
     } catch (e) {
@@ -794,13 +777,11 @@ export function SkillsPage({
             onDeploy={() => handleDeployClick(selected)}
             onConsolidate={(source) => {
               setConsolidationTarget({ skill: selected, source })
-              setCanonicalRelativeParent('')
               setConsolidationPreview(null)
             }}
             onUndoConsolidation={setUndoBatch}
             onRelocate={(source) => {
               setRelocationTarget({ skill: selected, source })
-              setRelocationRelativeParent('')
               setRelocationPreview(null)
             }}
             onUndoRelocation={setUndoRelocation}
@@ -894,338 +875,77 @@ export function SkillsPage({
       )}
 
       {consolidationTarget && (
-        <Dialog
-          open
-          onClose={closeConsolidation}
-          title={consolidationPreview ? `确认整理「${consolidationTarget.skill.name}」` : `整理「${consolidationTarget.skill.name}」`}
+        <ConsolidationDialog
+          skill={consolidationTarget.skill}
+          source={consolidationTarget.source}
+          preview={consolidationPreview}
           busy={actionBusy}
-          confirmLabel={consolidationPreview ? '确认整理' : '预览整理'}
-          onConfirm={consolidationPreview ? handleConfirmConsolidation : handlePreviewConsolidation}
-          closeOnOverlay={false}
-        >
-          {consolidationPreview ? (
-            <ConsolidationOperations operations={consolidationPreview.operations} />
-          ) : (
-            <div className="space-y-3">
-              <div className="space-y-1">
-                <label htmlFor="canonical-relative-parent" className="block text-xs font-medium text-foreground-secondary">
-                  权威库内父目录
-                </label>
-                <Input
-                  id="canonical-relative-parent"
-                  aria-label="权威库内父目录"
-                  value={canonicalRelativeParent}
-                  onChange={(event) => setCanonicalRelativeParent(event.target.value)}
-                  placeholder="留空表示权威库根目录"
-                  mono
-                  className="w-full"
-                />
-              </div>
-              <p className="text-2xs text-foreground-muted">
-                这里只填写权威库内的相对父目录；Skill 名称会自动保留。
-              </p>
-            </div>
-          )}
-        </Dialog>
+          onPreview={handlePreviewConsolidation}
+          onConfirm={handleConfirmConsolidation}
+          onClose={closeConsolidation}
+        />
       )}
 
       {consolidationDrafts && !conflictResolutionEditor && (
-        <Dialog
-          open
-          onClose={closeBatchConsolidation}
-          title={batchConsolidationPreview ? '确认批量整理' : '选择要整理的 Skill'}
-          description="无冲突项默认选中；冲突项需在冲突解决流程中明确版本后才能选择。"
+        <BatchConsolidationDialog
+          drafts={consolidationDrafts}
+          preview={batchConsolidationPreview}
           busy={actionBusy}
-          confirmLabel={batchConsolidationPreview ? '确认批量整理' : '预览批量整理'}
-          onConfirm={batchConsolidationPreview ? handleConfirmBatchConsolidation : handlePreviewBatchConsolidation}
-          closeOnOverlay={false}
-        >
-          {batchConsolidationPreview ? (
-            <ConsolidationOperations operations={batchConsolidationPreview.operations} />
-          ) : (
-            <div className="space-y-3">
-              <div className="rounded border border-border p-3 space-y-2">
-                <label htmlFor="batch-relative-parent" className="block text-xs font-medium text-foreground-secondary">
-                  批量设置权威库内父目录
-                </label>
-                <div className="flex gap-2">
-                  <Input
-                    id="batch-relative-parent"
-                    aria-label="批量设置权威库内父目录"
-                    value={batchRelativeParent}
-                    onChange={(event) => setBatchRelativeParent(event.target.value)}
-                    placeholder="留空表示权威库根目录"
-                    mono
-                    className="flex-1"
-                  />
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setConsolidationDrafts((drafts) => drafts?.map((draft) =>
-                      draft.selected ? { ...draft, canonicalRelativeParent: batchRelativeParent } : draft
-                    ) ?? null)}
-                  >
-                    应用到已选
-                  </Button>
-                </div>
-              </div>
-              <div className="space-y-2">
-                {consolidationDrafts.map((draft) => (
-                  <div key={draft.skillId} className="rounded border border-border p-3 space-y-2">
-                    <label className="flex items-center gap-2 text-xs font-medium">
-                      <input
-                        type="checkbox"
-                        aria-label={`选择 ${draft.skillName}`}
-                        checked={draft.selected}
-                        disabled={draft.hasConflict && !draft.conflictResolution}
-                        onChange={(event) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
-                          item.skillId === draft.skillId ? { ...item, selected: event.target.checked } : item
-                        ) ?? null)}
-                      />
-                      <span>{draft.skillName}</span>
-                      <span className="text-2xs text-foreground-muted">
-                        {draft.hasConflict
-                          ? draft.conflictResolution ? '冲突已解决' : `${draft.versions.length} 个冲突版本（未选择）`
-                          : `${draft.versions[0].candidateSourceIds.length} 个同内容来源`}
-                      </span>
-                    </label>
-                    {draft.hasConflict && (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => openConflictResolution(draft)}
-                        aria-label={`解决 ${draft.skillName} 的版本冲突`}
-                      >
-                        {draft.conflictResolution ? '修改冲突决策' : '解决冲突'}
-                      </Button>
-                    )}
-                    <Input
-                      aria-label={`${draft.skillName} 权威库内父目录`}
-                      value={draft.canonicalRelativeParent}
-                      disabled={!draft.selected}
-                      onChange={(event) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
-                        item.skillId === draft.skillId ? { ...item, canonicalRelativeParent: event.target.value } : item
-                      ) ?? null)}
-                      placeholder="权威库根目录"
-                      mono
-                      className="w-full"
-                    />
-                  </div>
-                ))}
-              </div>
-              <p className="text-2xs text-foreground-muted">最终目录名固定使用 Skill 名称；未选 Candidate 不会被本批次修改。</p>
-            </div>
-          )}
-        </Dialog>
+          onApplyBatchParent={(parent) => setConsolidationDrafts((drafts) => drafts?.map((draft) =>
+            draft.selected ? { ...draft, canonicalRelativeParent: parent } : draft
+          ) ?? null)}
+          onToggleDraft={(skillId, selected) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
+            item.skillId === skillId ? { ...item, selected } : item
+          ) ?? null)}
+          onDraftParentChange={(skillId, parent) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
+            item.skillId === skillId ? { ...item, canonicalRelativeParent: parent } : item
+          ) ?? null)}
+          onResolveConflict={openConflictResolution}
+          onPreview={handlePreviewBatchConsolidation}
+          onConfirm={handleConfirmBatchConsolidation}
+          onClose={closeBatchConsolidation}
+        />
       )}
 
       {conflictResolutionEditor && (
-        <Dialog
-          open
-          onClose={() => { if (!actionBusy) setConflictResolutionEditor(null) }}
-          title={`解决「${conflictResolutionEditor.preview.skillName}」的版本冲突`}
-          description="不会自动选版或合并；请明确原名权威版本，并处理每个其他版本。"
+        <ConflictResolutionDialog
+          editor={conflictResolutionEditor}
           busy={actionBusy}
-          confirmLabel="应用冲突决策"
-          onConfirm={applyConflictResolution}
-          closeOnOverlay={false}
-        >
-          <div className="space-y-4">
-            {conflictResolutionEditor.preview.versions.map((version, index) => {
-              const label = 'ABCDEFGH'[index] ?? String(index + 1)
-              const selectedVersion = version.sources.some((source) => source.id === conflictResolutionEditor.authoritativeSourceId)
-              const action = conflictResolutionEditor.actions[version.hash]
-              return (
-                <section key={version.hash} className="rounded border border-border p-3 space-y-2">
-                  <label className="flex items-center gap-2 text-xs font-medium">
-                    <input
-                      type="radio"
-                      name="authoritative-conflict-version"
-                      aria-label={`选择版本 ${label} 作为原名权威版本`}
-                      checked={selectedVersion}
-                      onChange={() => setConflictResolutionEditor((editor) => editor ? {
-                        ...editor, authoritativeSourceId: version.sources[0].id
-                      } : null)}
-                    />
-                    <span>版本 {label}</span>
-                    <code className="text-2xs text-foreground-muted">{shortHash(version.hash)}</code>
-                  </label>
-                  <div className="space-y-1">
-                    {version.sources.map((source) => (
-                      <div key={source.id} className="rounded bg-surface-secondary p-2">
-                        <code className="block text-2xs break-all">{source.path}</code>
-                        <span className="text-2xs text-foreground-muted">
-                          来源：{source.sourceOrigin}{source.sourceTool ? ` · ${source.sourceTool}` : ''}
-                        </span>
-                        {source.sourceRootId !== null && (
-                          <span className="block text-2xs text-foreground-muted">Source Root：{source.sourceRootId}</span>
-                        )}
-                        <span className="block text-2xs text-foreground-muted">发现时间：{source.discoveredAt}</span>
-                        {source.repoUrl && (
-                          <span className="block text-2xs text-foreground-muted break-all">
-                            仓库：{source.repoUrl}{source.commitSha ? ` @ ${source.commitSha}` : ''}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                  <div>
-                    <p className="text-2xs font-medium text-foreground-secondary mb-1">SKILL.md</p>
-                    <pre className="max-h-32 overflow-auto rounded bg-surface-secondary p-2 text-2xs whitespace-pre-wrap">{version.skillMd || '（无 SKILL.md）'}</pre>
-                  </div>
-                  {conflictResolutionEditor.authoritativeSourceId !== null && !selectedVersion && action && (
-                    <div className="space-y-2 border-t border-border-subtle pt-2">
-                      <label className="block text-2xs text-foreground-secondary">
-                        处理方式
-                        <select
-                          aria-label={`版本 ${label} 的处理方式`}
-                          value={action.action}
-                          onChange={(event) => setConflictResolutionEditor((editor) => editor ? {
-                            ...editor,
-                            actions: { ...editor.actions, [version.hash]: { ...action, action: event.target.value as 'archive' | 'save-as' } }
-                          } : null)}
-                          className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs"
-                        >
-                          <option value="archive">仅归档原版本</option>
-                          <option value="save-as">另存为新 Skill</option>
-                        </select>
-                      </label>
-                      {action.action === 'save-as' && (
-                        <>
-                          <Input
-                            aria-label={`版本 ${label} 的新 Skill 名称`}
-                            value={action.newSkillName}
-                            onChange={(event) => setConflictResolutionEditor((editor) => editor ? {
-                              ...editor,
-                              actions: { ...editor.actions, [version.hash]: { ...action, newSkillName: event.target.value } }
-                            } : null)}
-                            placeholder="新名称也将成为目录名"
-                            className="w-full"
-                          />
-                          <Input
-                            aria-label={`版本 ${label} 的权威库内父目录`}
-                            value={action.canonicalRelativeParent}
-                            onChange={(event) => setConflictResolutionEditor((editor) => editor ? {
-                              ...editor,
-                              actions: { ...editor.actions, [version.hash]: { ...action, canonicalRelativeParent: event.target.value } }
-                            } : null)}
-                            placeholder="留空表示权威库根目录"
-                            mono
-                            className="w-full"
-                          />
-                        </>
-                      )}
-                    </div>
-                  )}
-                </section>
-              )
-            })}
-            <section className="space-y-2">
-              <h4 className="text-xs font-medium">文件差异</h4>
-              {conflictResolutionEditor.preview.comparisons.map((comparison) => {
-                const leftIndex = conflictResolutionEditor.preview.versions.findIndex((version) => version.hash === comparison.leftHash)
-                const rightIndex = conflictResolutionEditor.preview.versions.findIndex((version) => version.hash === comparison.rightHash)
-                const leftLabel = 'ABCDEFGH'[leftIndex] ?? String(leftIndex + 1)
-                const rightLabel = 'ABCDEFGH'[rightIndex] ?? String(rightIndex + 1)
-                return (
-                  <div key={`${comparison.leftHash}-${comparison.rightHash}`} className="rounded border border-border p-2 space-y-2">
-                    <p className="text-2xs font-medium">版本 {leftLabel} 与版本 {rightLabel}</p>
-                    <p className="text-2xs text-foreground-muted font-mono break-all">
-                      {comparison.leftHash} ↔ {comparison.rightHash}
-                    </p>
-                    {comparison.files.map((file) => (
-                      <div key={file.path} className="rounded border border-border-subtle p-2">
-                        <div className="flex items-center gap-2 text-2xs">
-                          <code>{file.path}</code>
-                          <span className="text-foreground-muted">{conflictFileStatusLabel(file.status)}</span>
-                        </div>
-                        {file.textDiff && <pre className="mt-1 overflow-auto whitespace-pre-wrap text-2xs bg-surface-secondary p-2 rounded">{file.textDiff}</pre>}
-                      </div>
-                    ))}
-                  </div>
-                )
-              })}
-            </section>
-          </div>
-        </Dialog>
+          onEditorChange={(updater) => setConflictResolutionEditor((prev) => prev ? updater(prev) : null)}
+          onApply={applyConflictResolution}
+          onClose={() => { if (!actionBusy) setConflictResolutionEditor(null) }}
+        />
       )}
 
       {undoBatch && (
-        <Dialog
-          open
-          onClose={() => { if (!actionBusy) setUndoBatch(null) }}
-          title={`撤销整理「${undoBatch.item.skillName}」`}
-          description="将尝试恢复原候选来源并移除本次写入的权威来源；若恢复位置已被占用，操作会被拒绝。"
+        <UndoConsolidationDialog
+          undoBatch={undoBatch}
           busy={actionBusy}
-          confirmLabel="确认撤销"
           onConfirm={handleUndoConsolidation}
-          closeOnOverlay={false}
+          onClose={() => { if (!actionBusy) setUndoBatch(null) }}
         />
       )}
 
       {relocationTarget && (
-        <Dialog
-          open
-          onClose={closeRelocation}
-          title={relocationPreview ? `确认移动「${relocationTarget.skill.name}」` : `移动权威 Source「${relocationTarget.skill.name}」`}
-          description="只改变权威库内的位置；Skill 名称和内容保持不变。"
+        <SourceRelocationDialog
+          skill={relocationTarget.skill}
+          source={relocationTarget.source}
+          preview={relocationPreview}
           busy={actionBusy}
-          confirmLabel={relocationPreview ? '确认移动' : '预览移动'}
-          onConfirm={relocationPreview ? handleConfirmRelocation : handlePreviewRelocation}
-          closeOnOverlay={false}
-        >
-          {relocationPreview ? (
-            <div className="space-y-3 text-xs">
-              <div><p className="text-foreground-muted">旧位置</p><code className="break-all">{relocationPreview.oldCanonicalPath}</code></div>
-              <div><p className="text-foreground-muted">新位置</p><code className="break-all">{relocationPreview.newCanonicalPath}</code></div>
-              <div>
-                <p className="font-medium">受影响部署（{relocationPreview.deployments.length}）</p>
-                {relocationPreview.deployments.map((deployment) => (
-                  <div key={deployment.deploymentId} className="mt-1 rounded border border-border p-2">
-                    <span>{deployment.targetTool} · {deployment.mode}</span>
-                    <code className="block text-2xs break-all text-foreground-muted">{deployment.targetPath}</code>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <label htmlFor="relocation-relative-parent" className="block text-xs font-medium text-foreground-secondary">新的权威库内父目录</label>
-              <Input id="relocation-relative-parent" aria-label="新的权威库内父目录" value={relocationRelativeParent}
-                onChange={(event) => setRelocationRelativeParent(event.target.value)} placeholder="例如 team/backend" mono className="w-full" />
-            </div>
-          )}
-        </Dialog>
+          onPreview={handlePreviewRelocation}
+          onConfirm={handleConfirmRelocation}
+          onClose={closeRelocation}
+        />
       )}
 
       {undoRelocation && (
-        <Dialog open onClose={() => { if (!actionBusy) setUndoRelocation(null) }}
-          title={`撤销 Source 移动「${undoRelocation.skillName}」`}
-          description="仅当旧位置空闲、权威内容未变化且没有新增外部订阅时才能撤销。"
-          busy={actionBusy} confirmLabel="确认撤销移动" onConfirm={handleUndoRelocation} closeOnOverlay={false} />
+        <UndoRelocationDialog
+          relocation={undoRelocation}
+          busy={actionBusy}
+          onConfirm={handleUndoRelocation}
+          onClose={() => { if (!actionBusy) setUndoRelocation(null) }}
+        />
       )}
-    </div>
-  )
-}
-
-function ConsolidationOperations({ operations }: { operations: ConsolidationPreview['operations'] }) {
-  const labels: Record<ConsolidationPreview['operations'][number]['kind'], string> = {
-    'write-canonical': '写入权威源码库',
-    'archive-candidate': '永久归档候选来源',
-    'remove-observed-entry': '移除外部订阅入口'
-  }
-  return (
-    <div className="space-y-3">
-      <div className="space-y-2">
-        {operations.map((operation, index) => (
-          <div key={`${operation.kind}:${operation.path}:${index}`} className="rounded border border-border p-2">
-            <p className="text-xs font-medium text-foreground-secondary">{labels[operation.kind]}</p>
-            <code className="block mt-1 text-2xs text-foreground-muted break-all">{operation.path}</code>
-          </div>
-        ))}
-      </div>
-      <p className="text-xs text-warning">归档会永久保留，直到你手动清理归档批次。</p>
-      <p className="text-xs text-foreground-secondary">整理只建立权威来源，不会自动部署到任何工具。</p>
     </div>
   )
 }
