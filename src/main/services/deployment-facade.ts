@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync } from 'fs'
 import { randomUUID } from 'crypto'
 import type { DB } from '../db/database'
-import { adoptObservedDeployment, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
+import { adoptObservedDeployment, getAllDeployments, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
 import { getSourceById } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
 import type { DeployMode, DeployResult, Deployment, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
@@ -84,6 +84,51 @@ export type DeploymentMutationOutcome =
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
 
+export interface BulkAdoptionPreviewItem {
+  deploymentId: number
+  skillName: string
+}
+
+export interface BulkAdoptionPreviewFacts {
+  total: number
+  tools: Array<{
+    targetTool: string
+    targetDisplayName: string
+    items: BulkAdoptionPreviewItem[]
+  }>
+}
+
+export type BulkAdoptionPreviewOutcome =
+  | { status: 'empty'; facts: BulkAdoptionPreviewFacts }
+  | {
+      status: 'confirmation-required'
+      confirmationId: string
+      expiresAt: number
+      facts: BulkAdoptionPreviewFacts
+    }
+
+export interface BulkAdoptionResultItem extends BulkAdoptionPreviewItem {
+  targetTool: string
+}
+
+export interface BulkAdoptionFailure extends BulkAdoptionResultItem {
+  reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observation-stale' | 'recovery-required'
+  message: string
+}
+
+export type BulkAdoptionConfirmationOutcome =
+  | {
+      status: 'completed'
+      total: number
+      adopted: BulkAdoptionResultItem[]
+      failed: BulkAdoptionFailure[]
+    }
+  | {
+      status: 'rejected'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid'
+      message: string
+    }
+
 type TargetBusyOutcome = { status: 'rejected'; reason: 'target-busy'; message: string }
 export type DeploymentRedeployOutcome =
   | DeploymentOutcome
@@ -125,6 +170,8 @@ export interface DeploymentFacade {
   redeploy(deploymentId: number): Promise<DeploymentRedeployOutcome>
   undeploy(deploymentId: number): Promise<DeploymentMutationOutcome>
   adopt(deploymentId: number): Promise<DeploymentMutationOutcome>
+  previewBulkAdoption(): BulkAdoptionPreviewOutcome
+  confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome>
   inspect(deploymentId: number): DriftStatus | null
 }
 
@@ -142,6 +189,11 @@ export function createDeploymentFacade(options: {
   const createId = options.createId ?? randomUUID
   const ttl = options.confirmationTtlMs ?? 5 * 60_000
   const confirmations = new Map<string, ConfirmationPlan>()
+  const bulkAdoptionConfirmations = new Map<string, {
+    expiresAt: number
+    items: BulkAdoptionResultItem[]
+  }>()
+  const consumedBulkAdoptionConfirmations = new Set<string>()
   const consumed = new Set<string>()
   const lockedTargets = new Set<string>()
   const runMutation = options.runMutation ?? (async (mutation) => {
@@ -424,6 +476,101 @@ export function createDeploymentFacade(options: {
     }
   }
 
+  function previewBulkAdoption(): BulkAdoptionPreviewOutcome {
+    const runtime = options.getRuntime()
+    const groups = new Map<string, BulkAdoptionPreviewFacts['tools'][number]>()
+    for (const deployment of getAllDeployments(options.db)) {
+      if (deployment.management !== 'observed') continue
+      const skill = getSkillById(options.db, deployment.skill_id)
+      if (!skill) continue
+      const tool = runtime.tools.find((candidate) => candidate.key === deployment.target_tool)
+      const group = groups.get(deployment.target_tool) ?? {
+        targetTool: deployment.target_tool,
+        targetDisplayName: tool?.displayName ?? deployment.target_tool,
+        items: []
+      }
+      group.items.push({ deploymentId: deployment.id, skillName: skill.name })
+      groups.set(deployment.target_tool, group)
+    }
+    const facts = {
+      total: [...groups.values()].reduce((total, group) => total + group.items.length, 0),
+      tools: [...groups.values()]
+    }
+    if (facts.total === 0) return { status: 'empty', facts }
+    const confirmationId = createId()
+    const expiresAt = now() + ttl
+    bulkAdoptionConfirmations.set(confirmationId, {
+      expiresAt,
+      items: facts.tools.flatMap((group) => group.items.map((item) => ({
+        ...item,
+        targetTool: group.targetTool
+      })))
+    })
+    return { status: 'confirmation-required', confirmationId, expiresAt, facts }
+  }
+
+  function adoptOne(deploymentId: number, requireObserved = false): Promise<DeploymentMutationOutcome> {
+    const resolved = resolveExisting(deploymentId)
+    if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+    const { deployment, source, skill, target } = resolved
+    if (deployment.management === 'managed') {
+      return Promise.resolve(requireObserved
+        ? { status: 'rejected', reason: 'observation-stale', message: '外部订阅状态已变化，请刷新后重试。' } as const
+        : { status: 'completed', deploymentId: deployment.id } as const)
+    }
+    return withTargetLock(deployment.target_id!, () => {
+      const expectedTargetPath = resolveWithin(target.target.path, validateSkillName(skill.name))
+      try {
+        if (
+          deployment.mode !== 'symlink' ||
+          deployment.target_path !== expectedTargetPath ||
+          !lstatSync(expectedTargetPath).isSymbolicLink() ||
+          realpathSync(expectedTargetPath) !== realpathSync(source.path)
+        ) {
+          return { status: 'rejected', reason: 'observation-stale', message: '外部订阅已变化，拒绝接管。' } as const
+        }
+      } catch {
+        return { status: 'rejected', reason: 'observation-stale', message: '外部订阅已变化或不可访问，拒绝接管。' } as const
+      }
+      if (!adoptObservedDeployment(options.db, deployment.id)) {
+        return { status: 'rejected', reason: 'observation-stale', message: '外部订阅状态已变化，请刷新后重试。' } as const
+      }
+      return { status: 'completed', deploymentId: deployment.id } as const
+    }) as Promise<DeploymentMutationOutcome>
+  }
+
+  async function confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome> {
+    if (consumedBulkAdoptionConfirmations.has(confirmationId)) {
+      return { status: 'rejected', reason: 'confirmation-used', message: '批量接管确认已使用，请重新预览。' }
+    }
+    const confirmation = bulkAdoptionConfirmations.get(confirmationId)
+    if (!confirmation) {
+      return { status: 'rejected', reason: 'confirmation-invalid', message: '批量接管确认无效或应用已重启，请重新预览。' }
+    }
+    bulkAdoptionConfirmations.delete(confirmationId)
+    consumedBulkAdoptionConfirmations.add(confirmationId)
+    if (confirmation.expiresAt <= now()) {
+      return { status: 'rejected', reason: 'confirmation-expired', message: '批量接管确认已过期，请重新预览。' }
+    }
+    const adopted: BulkAdoptionResultItem[] = []
+    const failed: BulkAdoptionFailure[] = []
+    for (const item of confirmation.items) {
+      const outcome = await adoptOne(item.deploymentId, true)
+      if (outcome.status === 'completed') {
+        adopted.push(item)
+      } else {
+        failed.push({
+          ...item,
+          reason: outcome.status === 'rejected' && outcome.reason !== 'observed-read-only'
+            ? outcome.reason
+            : outcome.status === 'recovery-required' ? 'recovery-required' : 'observation-stale',
+          message: outcome.message
+        })
+      }
+    }
+    return { status: 'completed', total: confirmation.items.length, adopted, failed }
+  }
+
   return {
     deploy(request) {
       const requestedSource = getSourceById(options.db, request.sourceId)
@@ -472,6 +619,8 @@ export function createDeploymentFacade(options: {
       })
     },
     inspect,
+    previewBulkAdoption,
+    confirmBulkAdoption,
     redeploy(deploymentId) {
       const resolved = resolveExisting(deploymentId)
       if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
@@ -515,32 +664,6 @@ export function createDeploymentFacade(options: {
         }
       }) as Promise<DeploymentMutationOutcome>
     },
-    adopt(deploymentId) {
-      const resolved = resolveExisting(deploymentId)
-      if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
-      const { deployment, source, skill, target } = resolved
-      if (deployment.management === 'managed') {
-        return Promise.resolve({ status: 'completed', deploymentId: deployment.id } as const)
-      }
-      return withTargetLock(deployment.target_id!, () => {
-        const expectedTargetPath = resolveWithin(target.target.path, validateSkillName(skill.name))
-        try {
-          if (
-            deployment.mode !== 'symlink' ||
-            deployment.target_path !== expectedTargetPath ||
-            !lstatSync(expectedTargetPath).isSymbolicLink() ||
-            realpathSync(expectedTargetPath) !== realpathSync(source.path)
-          ) {
-            return { status: 'rejected', reason: 'observation-stale', message: '外部订阅已变化，拒绝接管。' } as const
-          }
-        } catch {
-          return { status: 'rejected', reason: 'observation-stale', message: '外部订阅已变化或不可访问，拒绝接管。' } as const
-        }
-        if (!adoptObservedDeployment(options.db, deployment.id)) {
-          return { status: 'rejected', reason: 'observation-stale', message: '外部订阅状态已变化，请刷新后重试。' } as const
-        }
-        return { status: 'completed', deploymentId: deployment.id } as const
-      }) as Promise<DeploymentMutationOutcome>
-    }
+    adopt: adoptOne
   }
 }

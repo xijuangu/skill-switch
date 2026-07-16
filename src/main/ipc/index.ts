@@ -403,6 +403,14 @@ export function registerIpcHandlers(db: DB): void {
     deploymentFacade.adopt(assertInteger(deploymentId, 'deploymentId'))
   )
 
+  ipcMain.handle('previewBulkAdoption', async () =>
+    deploymentFacade.previewBulkAdoption()
+  )
+
+  ipcMain.handle('confirmBulkAdoption', async (_e, confirmationId: unknown) =>
+    deploymentFacade.confirmBulkAdoption(assertNonEmptyString(confirmationId, 'confirmationId'))
+  )
+
   // issue #22:漂移"重新部署"——从 deployment 清单读取精确 target_path,
   // 不接收 renderer 提供的任意路径,不依赖当前工具配置重新推导。
   ipcMain.handle('redeploy', async (_e, deploymentId: number) =>

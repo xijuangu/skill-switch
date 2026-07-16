@@ -40,6 +40,8 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     redeploy: vi.fn(),
     undeploy: vi.fn(),
     adoptDeployment: vi.fn(),
+    previewBulkAdoption: vi.fn().mockResolvedValue({ status: 'empty', facts: { total: 0, tools: [] } }),
+    confirmBulkAdoption: vi.fn(),
     getTools: vi.fn().mockResolvedValue([]),
     removeFromManifest: vi.fn(),
     getDeploymentsForSkill: vi.fn().mockResolvedValue([]),
@@ -146,6 +148,91 @@ describe('App (integration)', () => {
     expect(dialog).toHaveTextContent('接管 agents 的外部订阅「to-tickets」?')
     await userEvent.click(screen.getAllByRole('button', { name: '接管' }).at(-1)!)
     await waitFor(() => expect(api.adoptDeployment).toHaveBeenCalledWith(9))
+  })
+
+  it('previews and confirms every observed subscription globally, then retries only failures', async () => {
+    const observedTool = (key: string, displayName: string, skillName: string, id: number) => ({
+      config: {
+        key, displayName, enabled: true,
+        paths: [`/${key}`], existingPaths: [`/${key}`],
+        targets: [{ id: `${key}-0`, path: `/${key}` }],
+        existingTargets: [{ id: `${key}-0`, path: `/${key}` }],
+        isCustom: false, exists: true
+      },
+      drifts: [{
+        skillId: id, skillName, targetTool: key,
+        targetPath: `/${key}/${skillName}`, targetExists: true,
+        currentSourceHash: 'hash', currentTargetHash: null, kind: 'normal' as const,
+        deployment: {
+          id, skill_id: id, target_tool: key, target_path: `/${key}/${skillName}`,
+          mode: 'symlink' as const, management: 'observed' as const, source_path: `/source/${skillName}`,
+          source_id: id, target_id: `${key}-0`, deployed_at: '2026-07-15T00:00:00.000Z',
+          source_hash_at_deploy: 'hash'
+        }
+      }]
+    })
+    const previewAll = {
+      status: 'confirmation-required' as const,
+      confirmationId: 'bulk-1',
+      expiresAt: 99_999,
+      facts: {
+        total: 2,
+        tools: [
+          { targetTool: 'agents', targetDisplayName: 'Agents', items: [{ deploymentId: 9, skillName: 'to-tickets' }] },
+          { targetTool: 'codex', targetDisplayName: 'Codex', items: [{ deploymentId: 10, skillName: 'research' }] }
+        ]
+      }
+    }
+    const previewRemaining = {
+      status: 'confirmation-required' as const,
+      confirmationId: 'bulk-2',
+      expiresAt: 99_999,
+      facts: {
+        total: 1,
+        tools: [{ targetTool: 'codex', targetDisplayName: 'Codex', items: [{ deploymentId: 10, skillName: 'research' }] }]
+      }
+    }
+    const api = mockWindowApi({
+      getTools: vi.fn().mockResolvedValue([
+        observedTool('agents', 'Agents', 'to-tickets', 9),
+        observedTool('codex', 'Codex', 'research', 10)
+      ]) as Window['api']['getTools'],
+      previewBulkAdoption: vi.fn()
+        .mockResolvedValueOnce(previewAll)
+        .mockResolvedValueOnce(previewRemaining),
+      confirmBulkAdoption: vi.fn().mockResolvedValue({
+        status: 'completed',
+        total: 2,
+        adopted: [{ deploymentId: 9, skillName: 'to-tickets', targetTool: 'agents' }],
+        failed: [{
+          deploymentId: 10, skillName: 'research', targetTool: 'codex',
+          reason: 'observation-stale', message: '外部订阅已变化，拒绝接管。'
+        }]
+      })
+    })
+
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    const bulkButton = await screen.findByRole('button', { name: '一键接管 2 个外部订阅' })
+    await userEvent.click(bulkButton)
+
+    expect(api.previewBulkAdoption).toHaveBeenCalledWith()
+    const previewDialog = screen.getByRole('dialog')
+    expect(previewDialog).toHaveTextContent('Agents')
+    expect(previewDialog).toHaveTextContent('to-tickets')
+    expect(previewDialog).toHaveTextContent('Codex')
+    expect(previewDialog).toHaveTextContent('research')
+
+    await userEvent.click(screen.getByRole('button', { name: '确认接管全部' }))
+    await waitFor(() => expect(api.confirmBulkAdoption).toHaveBeenCalledWith('bulk-1'))
+    const resultDialog = screen.getByRole('dialog')
+    expect(resultDialog).toHaveTextContent('已接管 1 个，失败 1 个')
+    expect(resultDialog).toHaveTextContent('research：外部订阅已变化，拒绝接管。')
+
+    await userEvent.click(screen.getByRole('button', { name: '重试剩余' }))
+    await waitFor(() => expect(api.previewBulkAdoption).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('dialog')).toHaveTextContent('共 1 个外部订阅')
+    expect(screen.getByRole('dialog')).toHaveTextContent('research')
   })
 
   it('renders empty state on Skills page when no skills', async () => {

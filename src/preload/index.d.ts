@@ -202,6 +202,43 @@ export type DeploymentRedeployOutcomeView =
   | DeploymentOutcomeView
   | Extract<DeploymentMutationOutcomeView, { status: 'rejected' }>
 
+export interface BulkAdoptionPreviewFactsView {
+  total: number
+  tools: Array<{
+    targetTool: string
+    targetDisplayName: string
+    items: Array<{ deploymentId: number; skillName: string }>
+  }>
+}
+
+export type BulkAdoptionPreviewOutcomeView =
+  | { status: 'empty'; facts: BulkAdoptionPreviewFactsView }
+  | {
+      status: 'confirmation-required'
+      confirmationId: string
+      expiresAt: number
+      facts: BulkAdoptionPreviewFactsView
+    }
+
+export interface BulkAdoptionResultItemView {
+  deploymentId: number
+  skillName: string
+  targetTool: string
+}
+
+export type BulkAdoptionConfirmationOutcomeView =
+  | {
+      status: 'completed'
+      total: number
+      adopted: BulkAdoptionResultItemView[]
+      failed: Array<BulkAdoptionResultItemView & { reason: string; message: string }>
+    }
+  | {
+      status: 'rejected'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid'
+      message: string
+    }
+
 export interface DeploymentView {
   id: number
   skill_id: number
@@ -287,6 +324,8 @@ declare global {
       redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
       undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
+      previewBulkAdoption: () => Promise<BulkAdoptionPreviewOutcomeView>
+      confirmBulkAdoption: (confirmationId: string) => Promise<BulkAdoptionConfirmationOutcomeView>
       getTools: () => Promise<ToolWithDriftsView[]>
       // Drift + Remove from Registry (#8)
       removeFromManifest: (deploymentId: number) => Promise<void>

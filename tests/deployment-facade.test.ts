@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { upsertSkill } from '../src/main/db/dao/skills'
@@ -55,12 +55,140 @@ function setup() {
     runMutation: options.runMutation,
     mutationHooks: options.mutationHooks
   })
-  return { ...database, skillId, sourceId, targetId, targetRoot, sourcePath, create, advance: (ms: number) => { now += ms } }
+  return { ...database, skillId, sourceId, targetId, targetRoot, sourcePath, tool, create, advance: (ms: number) => { now += ms } }
 }
 
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
 
 describe('Deployment Facade', () => {
+  test.runIf(process.platform !== 'win32')('previews every observed subscription grouped by tool without changing links', () => {
+    const env = setup()
+    const targetPath = join(env.targetRoot, 'demo')
+    symlinkSync(env.sourcePath, targetPath)
+    upsertDeployment(
+      env.db,
+      env.skillId,
+      'codex',
+      targetPath,
+      'symlink',
+      env.sourcePath,
+      hashDir(env.sourcePath),
+      { sourceId: env.sourceId, targetId: env.targetId },
+      'observed'
+    )
+    const observed = getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)!
+    const agentsRoot = join(dirname(env.targetRoot), 'agents-target')
+    const agentsTargetId = 'target-agents'
+    mkdirSync(agentsRoot)
+    symlinkSync(env.sourcePath, join(agentsRoot, 'demo'))
+    upsertDeployment(
+      env.db,
+      env.skillId,
+      'agents',
+      join(agentsRoot, 'demo'),
+      'symlink',
+      env.sourcePath,
+      hashDir(env.sourcePath),
+      { sourceId: env.sourceId, targetId: agentsTargetId },
+      'observed'
+    )
+    const agentsObserved = getDeploymentBySkillAndTargetId(env.db, env.skillId, agentsTargetId)!
+    const agentsTool: ToolConfig = {
+      key: 'agents', displayName: 'Agents', enabled: true,
+      paths: [agentsRoot], existingPaths: [agentsRoot],
+      targets: [{ id: agentsTargetId, path: agentsRoot }],
+      existingTargets: [{ id: agentsTargetId, path: agentsRoot }],
+      isCustom: false, exists: true
+    }
+
+    expect(env.create({ tools: [env.tool, agentsTool] }).previewBulkAdoption()).toMatchObject({
+      status: 'confirmation-required',
+      confirmationId: 'confirmation-1',
+      facts: {
+        total: 2,
+        tools: expect.arrayContaining([
+          {
+            targetTool: 'codex',
+            targetDisplayName: 'Codex',
+            items: [{ deploymentId: observed.id, skillName: 'demo' }]
+          },
+          {
+            targetTool: 'agents',
+            targetDisplayName: 'Agents',
+            items: [{ deploymentId: agentsObserved.id, skillName: 'demo' }]
+          }
+        ])
+      }
+    })
+    expect(realpathSync(targetPath)).toBe(realpathSync(env.sourcePath))
+    expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)).toMatchObject({
+      management: 'observed'
+    })
+    expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, agentsTargetId)).toMatchObject({
+      management: 'observed'
+    })
+  })
+
+  test.runIf(process.platform !== 'win32')('bulk adoption revalidates each previewed link and reports partial success without changing files', async () => {
+    const env = setup()
+    const firstTarget = join(env.targetRoot, 'demo')
+    symlinkSync(env.sourcePath, firstTarget)
+    upsertDeployment(
+      env.db, env.skillId, 'codex', firstTarget, 'symlink', env.sourcePath,
+      hashDir(env.sourcePath), { sourceId: env.sourceId, targetId: env.targetId }, 'observed'
+    )
+
+    const secondSource = join(dirname(env.sourcePath), 'second')
+    const secondTarget = join(env.targetRoot, 'second')
+    const replacement = join(dirname(env.sourcePath), 'replacement')
+    mkdirSync(secondSource)
+    mkdirSync(replacement)
+    writeFileSync(join(secondSource, 'SKILL.md'), '# second')
+    const secondSkillId = upsertSkill(env.db, 'second', secondSource)
+    upsertSource(env.db, secondSkillId, secondSource, hashDir(secondSource), 0, 'indexed', { origin: 'scan' })
+    const secondSourceId = getSourceByPath(env.db, secondSource)!.id
+    symlinkSync(secondSource, secondTarget)
+    upsertDeployment(
+      env.db, secondSkillId, 'codex', secondTarget, 'symlink', secondSource,
+      hashDir(secondSource), { sourceId: secondSourceId, targetId: env.targetId }, 'observed'
+    )
+
+    const first = getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)!
+    const second = getDeploymentBySkillAndTargetId(env.db, secondSkillId, env.targetId)!
+    const facade = env.create()
+    const preview = facade.previewBulkAdoption()
+    if (preview.status !== 'confirmation-required') throw new Error('expected bulk adoption confirmation')
+    unlinkSync(secondTarget)
+    symlinkSync(replacement, secondTarget)
+
+    expect(await facade.confirmBulkAdoption(preview.confirmationId)).toEqual({
+      status: 'completed',
+      total: 2,
+      adopted: [{ deploymentId: first.id, skillName: 'demo', targetTool: 'codex' }],
+      failed: [{
+        deploymentId: second.id,
+        skillName: 'second',
+        targetTool: 'codex',
+        reason: 'observation-stale',
+        message: '外部订阅已变化，拒绝接管。'
+      }]
+    })
+    expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, env.targetId)?.management).toBe('managed')
+    expect(getDeploymentBySkillAndTargetId(env.db, secondSkillId, env.targetId)?.management).toBe('observed')
+    expect(readlinkSync(firstTarget)).toBe(env.sourcePath)
+    expect(readlinkSync(secondTarget)).toBe(replacement)
+    expect(facade.previewBulkAdoption()).toMatchObject({
+      status: 'confirmation-required',
+      facts: {
+        total: 1,
+        tools: [{
+          targetTool: 'codex',
+          items: [{ deploymentId: second.id, skillName: 'second' }]
+        }]
+      }
+    })
+  })
+
   test.runIf(process.platform !== 'win32')('keeps observed subscriptions read-only until an exact link is explicitly adopted', async () => {
     const env = setup()
     const targetPath = join(env.targetRoot, 'demo')

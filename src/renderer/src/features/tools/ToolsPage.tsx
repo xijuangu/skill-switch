@@ -7,6 +7,8 @@ import { type DriftKey, driftKeyEquals } from './driftKey'
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 type DriftStatusView = ToolWithDriftsView['drifts'][number]
 type ConfirmationRequiredView = Extract<Awaited<ReturnType<typeof window.api.deploymentConfirm>>, { status: 'confirmation-required' }>
+type BulkAdoptionPreviewView = Extract<Awaited<ReturnType<typeof window.api.previewBulkAdoption>>, { status: 'confirmation-required' }>
+type BulkAdoptionResultView = Extract<Awaited<ReturnType<typeof window.api.confirmBulkAdoption>>, { status: 'completed' }>
 
 export function ToolsPage({
   tools,
@@ -24,8 +26,15 @@ export function ToolsPage({
   const [confirmRedeploy, setConfirmRedeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmAdopt, setConfirmAdopt] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [redeployRisk, setRedeployRisk] = useState<ConfirmationRequiredView | null>(null)
+  const [bulkPreview, setBulkPreview] = useState<BulkAdoptionPreviewView | null>(null)
+  const [bulkResult, setBulkResult] = useState<BulkAdoptionResultView | null>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
 
-  const { success, error: toastError } = useToast()
+  const { success, error: toastError, info } = useToast()
+  const observedCount = tools.reduce(
+    (count, tool) => count + tool.drifts.filter((drift) => drift.deployment?.management === 'observed').length,
+    0
+  )
 
   const toggleExpand = (key: string) => {
     setExpanded((prev) => {
@@ -111,6 +120,41 @@ export function ToolsPage({
     }
   }
 
+  const handleBulkPreview = async () => {
+    setBulkBusy(true)
+    try {
+      const outcome = await window.api.previewBulkAdoption()
+      setBulkResult(null)
+      if (outcome.status === 'empty') {
+        setBulkPreview(null)
+        info('当前没有可接管的外部订阅')
+        return
+      }
+      setBulkPreview(outcome)
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  const handleBulkConfirm = async () => {
+    if (!bulkPreview) return
+    setBulkBusy(true)
+    try {
+      const outcome = await window.api.confirmBulkAdoption(bulkPreview.confirmationId)
+      if (outcome.status !== 'completed') throw new Error(outcome.message)
+      setBulkPreview(null)
+      setBulkResult(outcome)
+      await onRefresh()
+      if (outcome.failed.length === 0) success(`已接管 ${outcome.adopted.length} 个外部订阅`)
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   const handleRedeployRiskConfirm = async () => {
     if (!redeployRisk) return
     if (confirmRedeploy) setBusyKey({ skillId: confirmRedeploy.skillId, targetTool: confirmRedeploy.targetTool })
@@ -160,9 +204,16 @@ export function ToolsPage({
           <Wrench className="h-4 w-4 text-foreground-secondary" />
           <h2 className="text-sm font-semibold">工具</h2>
         </div>
-        <Button variant="secondary" size="sm" onClick={onRefresh} icon={<RefreshCw className="h-3 w-3" />}>
-          刷新
-        </Button>
+        <div className="flex items-center gap-2">
+          {observedCount > 0 && (
+            <Button variant="primary" size="sm" onClick={handleBulkPreview} disabled={bulkBusy}>
+              一键接管 {observedCount} 个外部订阅
+            </Button>
+          )}
+          <Button variant="secondary" size="sm" onClick={onRefresh} icon={<RefreshCw className="h-3 w-3" />}>
+            刷新
+          </Button>
+        </div>
       </div>
 
       {tools.length === 0 ? (
@@ -188,6 +239,56 @@ export function ToolsPage({
           ))}
         </ul>
       )}
+
+      <Dialog
+        open={bulkPreview !== null}
+        onClose={() => setBulkPreview(null)}
+        title="一键接管外部订阅"
+        description={`共 ${bulkPreview?.facts.total ?? 0} 个外部订阅；确认时会逐条重新校验，失败项不会影响其他项。接管不会修改文件或链接。`}
+        confirmLabel="确认接管全部"
+        onConfirm={handleBulkConfirm}
+        busy={bulkBusy}
+        closeOnOverlay={false}
+      >
+        <div className="space-y-3">
+          {bulkPreview?.facts.tools.map((tool) => (
+            <section key={tool.targetTool}>
+              <h4 className="text-xs font-semibold text-foreground">
+                {tool.targetDisplayName} · {tool.items.length}
+              </h4>
+              <ul className="mt-1 space-y-1">
+                {tool.items.map((item) => (
+                  <li key={item.deploymentId} className="text-xs text-foreground-secondary">
+                    {item.skillName}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={bulkResult !== null}
+        onClose={() => setBulkResult(null)}
+        title="批量接管结果"
+        description={`已接管 ${bulkResult?.adopted.length ?? 0} 个，失败 ${bulkResult?.failed.length ?? 0} 个`}
+        confirmLabel={(bulkResult?.failed.length ?? 0) > 0 ? '重试剩余' : '完成'}
+        onConfirm={(bulkResult?.failed.length ?? 0) > 0 ? handleBulkPreview : () => setBulkResult(null)}
+        hideCancel
+        busy={bulkBusy}
+        closeOnOverlay={false}
+      >
+        {(bulkResult?.failed.length ?? 0) > 0 && (
+          <ul className="space-y-1">
+            {bulkResult?.failed.map((item) => (
+              <li key={item.deploymentId} className="text-xs text-warning">
+                {item.skillName}：{item.message}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Dialog>
 
       <Dialog
         open={confirmAdopt !== null}
