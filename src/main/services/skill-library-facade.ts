@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import matter from 'gray-matter'
 import { basename, dirname, isAbsolute, relative, resolve, sep, win32 } from 'path'
 import {
   cpSync,
@@ -6,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   readlinkSync,
   realpathSync,
   renameSync,
@@ -13,12 +15,14 @@ import {
   rmSync,
   statSync,
   symlinkSync,
-  unlinkSync
+  unlinkSync,
+  writeFileSync
 } from 'fs'
 import type { DB } from '../db/database'
 import { runInTransaction, setCanonicalRepositoryPath } from '../db/database'
 import { getSourceById, getSourceByPath, upsertSource } from '../db/dao/skill-sources'
-import { getAllSkills, getSkillById, updatePrimarySourcePath, upsertSkill } from '../db/dao/skills'
+import { deleteSkill, getAllSkills, getSkillById, getSkillByName, updatePrimarySourcePath, upsertSkill } from '../db/dao/skills'
+import { markConsolidationItemRegistryCommitted } from '../db/dao/consolidations'
 import { getDeploymentsBySkillId } from '../db/dao/deployments'
 import type { Deployment, SkillSource, SourceOrigin } from '../types'
 import { createBackup } from './backup'
@@ -83,6 +87,46 @@ export interface ConsolidationPlanItem {
   versions: Array<{ hash: string; candidateSourceIds: number[]; paths: string[] }>
 }
 
+export interface ConflictResolutionPreview {
+  skillId: number
+  skillName: string
+  versions: Array<{
+    hash: string
+    skillMd: string
+    sources: Array<{
+      id: number
+      path: string
+      sourceOrigin: SourceOrigin
+      sourceTool: string | null
+      sourceRootId: number | null
+      discoveredAt: string
+      repoUrl: string | null
+      commitSha: string | null
+    }>
+  }>
+  comparisons: Array<{
+    leftHash: string
+    rightHash: string
+    files: Array<{ path: string; status: 'added' | 'deleted' | 'modified'; textDiff: string | null }>
+  }>
+}
+
+export interface ConflictResolutionDecision {
+  authoritativeSourceId: number
+  otherVersions: Array<{
+    sourceId: number
+    action: 'archive' | 'save-as'
+    newSkillName?: string
+    canonicalRelativeParent?: string
+  }>
+}
+
+export interface ConsolidationRequestItem {
+  candidateSourceId: number
+  canonicalRelativeParent: string
+  conflictResolution?: ConflictResolutionDecision
+}
+
 export interface SourceRelocationSummary {
   id: string
   status: SourceRelocationStatus
@@ -141,8 +185,9 @@ export type ConsolidationOutcome =
 
 export interface SkillLibraryFacade {
   read(): SkillLibraryReadModel
+  previewConflictResolution(skillId: number): ConflictResolutionPreview
   previewConsolidation(request: { candidateSourceId: number; canonicalRelativeParent: string }): ConsolidationPreview
-  previewConsolidationBatch(request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }): ConsolidationBatchPreview
+  previewConsolidationBatch(request: { items: ConsolidationRequestItem[] }): ConsolidationBatchPreview
   confirmConsolidation(confirmationId: string): ConsolidationOutcome
   undoConsolidation(batchId: string): ConsolidationOutcome | { status: 'undone'; batchId: string }
   restoreConsolidation(batchId: string): ConsolidationOutcome | { status: 'undone'; batchId: string }
@@ -210,11 +255,32 @@ interface ObservedEntrySnapshot {
   linkTarget: string
 }
 
-type CandidateSourceSnapshot = SkillSource | { sources: SkillSource[] }
+interface CandidateSourcePlanSnapshot {
+  sources: SkillSource[]
+  canonicalSourceId?: number
+  originalSkillId?: number
+  outputSkillName?: string
+  rewriteIdentity?: boolean
+}
+
+type CandidateSourceSnapshot = SkillSource | CandidateSourcePlanSnapshot
 
 function snapshotSources(snapshot: string): SkillSource[] {
   const parsed = JSON.parse(snapshot) as CandidateSourceSnapshot
   return 'sources' in parsed ? parsed.sources : [parsed]
+}
+
+function snapshotPlan(item: ItemRow): Required<Pick<CandidateSourcePlanSnapshot,
+  'sources' | 'canonicalSourceId' | 'originalSkillId' | 'outputSkillName' | 'rewriteIdentity'>> {
+  const parsed = JSON.parse(item.candidate_source_snapshot) as CandidateSourceSnapshot
+  const sources = 'sources' in parsed ? parsed.sources : [parsed]
+  return {
+    sources,
+    canonicalSourceId: 'sources' in parsed && parsed.canonicalSourceId !== undefined ? parsed.canonicalSourceId : sources[0].id,
+    originalSkillId: 'sources' in parsed && parsed.originalSkillId !== undefined ? parsed.originalSkillId : sources[0].skill_id,
+    outputSkillName: 'sources' in parsed && parsed.outputSkillName !== undefined ? parsed.outputSkillName : item.skill_name,
+    rewriteIdentity: 'sources' in parsed && parsed.rewriteIdentity === true
+  }
 }
 
 interface RelocationRow {
@@ -265,6 +331,61 @@ function directorySize(path: string): number {
   const entry = lstatSync(path)
   if (!entry.isDirectory() || entry.isSymbolicLink()) return entry.size
   return readdirSync(path).reduce((total, name) => total + directorySize(resolve(path, name)), 0)
+}
+
+function readPreviewFiles(root: string): Map<string, Buffer> {
+  const files = new Map<string, Buffer>()
+  const visit = (directory: string, parent: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      const absolute = resolve(directory, entry.name)
+      const relativePath = parent ? `${parent}/${entry.name}` : entry.name
+      if (entry.isDirectory()) visit(absolute, relativePath)
+      else if (entry.isFile()) files.set(relativePath, readFileSync(absolute))
+    }
+  }
+  visit(root, '')
+  return files
+}
+
+function isTextPreview(value: Buffer): boolean {
+  return value.length <= 1024 * 1024 && !value.includes(0)
+}
+
+function lineDiff(left: string, right: string): string {
+  const leftLines = left.split('\n')
+  const rightLines = right.split('\n')
+  let prefix = 0
+  while (prefix < leftLines.length && prefix < rightLines.length && leftLines[prefix] === rightLines[prefix]) prefix += 1
+  let leftEnd = leftLines.length - 1
+  let rightEnd = rightLines.length - 1
+  while (leftEnd >= prefix && rightEnd >= prefix && leftLines[leftEnd] === rightLines[rightEnd]) {
+    leftEnd -= 1
+    rightEnd -= 1
+  }
+  return [
+    ...leftLines.slice(prefix, leftEnd + 1).map((line) => `-${line}`),
+    ...rightLines.slice(prefix, rightEnd + 1).map((line) => `+${line}`)
+  ].join('\n')
+}
+
+function compareVersionFiles(leftRoot: string, rightRoot: string): ConflictResolutionPreview['comparisons'][number]['files'] {
+  const left = readPreviewFiles(leftRoot)
+  const right = readPreviewFiles(rightRoot)
+  return [...new Set([...left.keys(), ...right.keys()])].sort().flatMap((path) => {
+    const before = left.get(path)
+    const after = right.get(path)
+    if (before && after && before.equals(after)) return []
+    const status = before === undefined ? 'added' as const : after === undefined ? 'deleted' as const : 'modified' as const
+    let textDiff: string | null = null
+    if (before && after && isTextPreview(before) && isTextPreview(after)) {
+      textDiff = lineDiff(before.toString('utf8'), after.toString('utf8'))
+    } else if (before && isTextPreview(before)) {
+      textDiff = before.toString('utf8').split('\n').map((line) => `-${line}`).join('\n')
+    } else if (after && isTextPreview(after)) {
+      textDiff = after.toString('utf8').split('\n').map((line) => `+${line}`).join('\n')
+    }
+    return [{ path, status, textDiff }]
+  })
 }
 
 function restoreSourceSnapshot(db: DB, source: SkillSource): void {
@@ -494,7 +615,52 @@ export function createSkillLibraryFacade(options: {
     }
   }
 
-  function buildPreviewItem(request: { candidateSourceId: number; canonicalRelativeParent: string }, batchId: string) {
+  function previewConflictResolution(skillId: number): ConflictResolutionPreview {
+    if (!Number.isInteger(skillId)) throw new Error('skillId must be an integer')
+    const skill = getSkillById(options.db, skillId)
+    if (!skill) throw new Error('Skill does not exist')
+    const candidates = getAllSkills(options.db).find((item) => item.id === skillId)?.sources
+      .filter((source) => source.source_role === 'candidate') ?? []
+    const groups = new Map<string, SkillSource[]>()
+    for (const source of candidates) {
+      if (!pathEntryExists(source.path) || !statSync(source.path).isDirectory() || hashDir(source.path) !== source.hash) {
+        throw new Error('Candidate Source changed; rescan before conflict resolution')
+      }
+      const group = groups.get(source.hash) ?? []
+      group.push(source)
+      groups.set(source.hash, group)
+    }
+    if (groups.size < 2) throw new Error('Skill does not have conflicting Candidate versions')
+    const versions = [...groups.entries()].map(([hash, sources]) => ({
+      hash,
+      skillMd: pathEntryExists(resolveWithin(sources[0].path, 'SKILL.md'))
+        ? readFileSync(resolveWithin(sources[0].path, 'SKILL.md'), 'utf8')
+        : '',
+      sources: sources.map((source) => ({
+        id: source.id,
+        path: source.path,
+        sourceOrigin: source.source_origin,
+        sourceTool: source.source_tool,
+        sourceRootId: source.source_root_id,
+        discoveredAt: source.discovered_at,
+        repoUrl: source.repo_url,
+        commitSha: source.commit_sha
+      }))
+    }))
+    const comparisons: ConflictResolutionPreview['comparisons'] = []
+    for (let left = 0; left < versions.length; left += 1) {
+      for (let right = left + 1; right < versions.length; right += 1) {
+        comparisons.push({
+          leftHash: versions[left].hash,
+          rightHash: versions[right].hash,
+          files: compareVersionFiles(versions[left].sources[0].path, versions[right].sources[0].path)
+        })
+      }
+    }
+    return { skillId, skillName: skill.name, versions, comparisons }
+  }
+
+  function buildPreviewItems(request: ConsolidationRequestItem, batchId: string) {
     if (!Number.isInteger(request.candidateSourceId)) throw new Error('candidateSourceId must be an integer')
     const source = getSourceById(options.db, request.candidateSourceId)
     if (!source || source.source_role !== 'candidate') throw new Error('Consolidation requires a Candidate Source ID')
@@ -508,41 +674,106 @@ export function createSkillLibraryFacade(options: {
     }
     const candidates = getAllSkills(options.db).find((item) => item.id === skill.id)?.sources
       .filter((candidate) => candidate.source_role === 'candidate') ?? []
-    if (candidates.some((candidate) => candidate.hash !== source.hash)) {
-      throw new Error('Consolidation requires an explicit decision for conflicting Candidate versions')
+    const distinctHashes = new Set(candidates.map((candidate) => candidate.hash))
+    const outputs: Array<{
+      canonicalSource: SkillSource
+      sources: SkillSource[]
+      skillName: string
+      canonicalRelativeParent: string
+      rewriteIdentity: boolean
+    }> = []
+    if (distinctHashes.size > 1) {
+      const decision = request.conflictResolution
+      if (!decision) throw new Error('Consolidation requires an explicit decision for conflicting Candidate versions')
+      if (decision.authoritativeSourceId !== source.id) throw new Error('Authoritative Candidate Source must match the selected consolidation version')
+      const authoritative = candidates.find((candidate) => candidate.id === decision.authoritativeSourceId)
+      if (!authoritative) throw new Error('Authoritative Candidate Source is not part of this Skill')
+      const remainingHashes = new Set([...distinctHashes].filter((hash) => hash !== authoritative.hash))
+      const decidedHashes = new Set<string>()
+      const originalSources = candidates.filter((candidate) => candidate.hash === authoritative.hash)
+      for (const other of decision.otherVersions) {
+        const candidate = candidates.find((item) => item.id === other.sourceId)
+        if (!candidate || candidate.hash === authoritative.hash) throw new Error('Conflict decision references an invalid other version')
+        if (decidedHashes.has(candidate.hash)) throw new Error('Conflict decision contains a duplicate version')
+        const versionSources = candidates.filter((item) => item.hash === candidate.hash)
+        if (other.action === 'archive') originalSources.push(...versionSources)
+        else {
+          const newSkillName = validateSkillName(other.newSkillName ?? '')
+          if (getAllSkills(options.db).some((item) => item.name === newSkillName)) {
+            throw new Error(`Save-as Skill identity already exists: ${newSkillName}`)
+          }
+          outputs.push({
+            canonicalSource: candidate,
+            sources: versionSources,
+            skillName: newSkillName,
+            canonicalRelativeParent: other.canonicalRelativeParent ?? '',
+            rewriteIdentity: true
+          })
+        }
+        decidedHashes.add(candidate.hash)
+      }
+      if (decidedHashes.size !== remainingHashes.size || [...remainingHashes].some((hash) => !decidedHashes.has(hash))) {
+        throw new Error('Every conflicting Candidate version requires an explicit action')
+      }
+      outputs.unshift({
+        canonicalSource: authoritative,
+        sources: originalSources,
+        skillName: skill.name,
+        canonicalRelativeParent: request.canonicalRelativeParent,
+        rewriteIdentity: false
+      })
+    } else {
+      outputs.push({
+        canonicalSource: source,
+        sources: candidates,
+        skillName: skill.name,
+        canonicalRelativeParent: request.canonicalRelativeParent,
+        rewriteIdentity: false
+      })
     }
     for (const candidate of candidates) {
       if (!existsSync(candidate.path) || !statSync(candidate.path).isDirectory() || hashDir(candidate.path) !== candidate.hash) {
         throw new Error('Candidate Source changed; rescan before consolidation')
       }
     }
-    const canonicalPath = canonicalPlacement(validateSkillName(skill.name), request.canonicalRelativeParent)
-    if (pathEntryExists(canonicalPath)) throw new Error('Canonical Placement is occupied')
-    const archivePath = resolveWithin(sourceArchivePath, batchId, 'source', skill.name)
-    const allRelations = candidates.flatMap(allKnownRelationsForSource)
-    if (allRelations.some((deployment) => deployment.source_id == null)) {
-      throw new Error('Candidate Source has an unresolved legacy Deployment; reconcile it before consolidation')
-    }
-    if (allRelations.some((deployment) => deployment.management !== 'observed')) {
-      throw new Error('Candidate Source has a Managed Deployment and cannot be consolidated')
-    }
-    const observed = candidates.flatMap(observedForSource).sort((a, b) => a.id - b.id)
-    for (const deployment of observed) {
-      const candidate = candidates.find((item) => item.id === deployment.source_id)!
-      assertObservedLink(deployment, candidate.path)
-    }
-    const observedSnapshots = observed.map(snapshotObservedEntry)
-    return { source, sources: candidates, skill, canonicalPath, archivePath, observed, observedSnapshots }
+    return outputs.map((output) => {
+      const canonicalPath = canonicalPlacement(output.skillName, output.canonicalRelativeParent)
+      if (pathEntryExists(canonicalPath)) throw new Error('Canonical Placement is occupied')
+      const archivePath = resolveWithin(sourceArchivePath, batchId, 'source', output.skillName)
+      const allRelations = output.sources.flatMap(allKnownRelationsForSource)
+      if (allRelations.some((deployment) => deployment.source_id == null)) {
+        throw new Error('Candidate Source has an unresolved legacy Deployment; reconcile it before consolidation')
+      }
+      if (allRelations.some((deployment) => deployment.management !== 'observed')) {
+        throw new Error('Candidate Source has a Managed Deployment and cannot be consolidated')
+      }
+      const observed = output.sources.flatMap(observedForSource).sort((a, b) => a.id - b.id)
+      for (const deployment of observed) {
+        const candidate = output.sources.find((item) => item.id === deployment.source_id)!
+        assertObservedLink(deployment, candidate.path)
+      }
+      return {
+        source: output.canonicalSource,
+        sources: output.sources,
+        skill,
+        outputSkillName: output.skillName,
+        rewriteIdentity: output.rewriteIdentity,
+        canonicalPath,
+        archivePath,
+        observed,
+        observedSnapshots: observed.map(snapshotObservedEntry)
+      }
+    })
   }
 
-  function previewConsolidationBatch(request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }): ConsolidationBatchPreview {
+  function previewConsolidationBatch(request: { items: ConsolidationRequestItem[] }): ConsolidationBatchPreview {
     if (!Array.isArray(request.items) || request.items.length === 0) throw new Error('Consolidation Batch requires at least one item')
     const batchId = randomUUID()
-    const prepared = request.items.map((item) => buildPreviewItem(item, batchId))
+    const prepared = request.items.flatMap((item) => buildPreviewItems(item, batchId))
     if (new Set(prepared.map((item) => item.source.id)).size !== prepared.length) throw new Error('Consolidation Batch contains a duplicate Candidate Source')
-    if (new Set(prepared.map((item) => item.skill.id)).size !== prepared.length) throw new Error('Consolidation Batch contains multiple items for one Skill')
+    if (new Set(prepared.map((item) => item.outputSkillName)).size !== prepared.length) throw new Error('Consolidation Batch contains duplicate output Skill identities')
     if (new Set(prepared.map((item) => resolve(item.canonicalPath))).size !== prepared.length) throw new Error('Consolidation Batch contains duplicate Canonical Placements')
-    const claimedPaths = prepared.flatMap((item) => [item.source.path, item.canonicalPath, ...item.observed.map((entry) => entry.target_path!)].map((path) => resolve(path)))
+    const claimedPaths = prepared.flatMap((item) => [...item.sources.map((source) => source.path), item.canonicalPath, ...item.observed.map((entry) => entry.target_path!)].map((path) => resolve(path)))
     const overlaps = claimedPaths.some((path, index) => claimedPaths.some((other, otherIndex) => {
       if (index >= otherIndex) return false
       const rel = relative(path, other)
@@ -558,11 +789,17 @@ export function createSkillLibraryFacade(options: {
         (batch_id, skill_id, skill_name, candidate_source_snapshot, observed_deployments_snapshot, canonical_path, archive_path)
         VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-      for (const item of prepared) insert.run(batchId, item.skill.id, item.skill.name, JSON.stringify({ sources: item.sources }), JSON.stringify(item.observedSnapshots), item.canonicalPath, item.archivePath)
+      for (const item of prepared) insert.run(batchId, item.skill.id, item.outputSkillName, JSON.stringify({
+        sources: item.sources,
+        canonicalSourceId: item.source.id,
+        originalSkillId: item.skill.id,
+        outputSkillName: item.outputSkillName,
+        rewriteIdentity: item.rewriteIdentity
+      }), JSON.stringify(item.observedSnapshots), item.canonicalPath, item.archivePath)
     })
     return {
       status: 'confirmation-required', confirmationId: batchId, batchId,
-      items: prepared.map((item) => ({ skillId: item.skill.id, skillName: item.skill.name, canonicalPath: item.canonicalPath })),
+      items: prepared.map((item) => ({ skillId: item.skill.id, skillName: item.outputSkillName, canonicalPath: item.canonicalPath })),
       operations: prepared.flatMap((item) => [
         { kind: 'write-canonical' as const, path: item.canonicalPath },
         ...item.sources.map((source) => ({ kind: 'archive-candidate' as const, path: archivePathForSource(item.archivePath, source, item.sources) })),
@@ -583,18 +820,20 @@ export function createSkillLibraryFacade(options: {
 
   function validatePlan(batch: BatchRow, item: ItemRow): { source: SkillSource; sources: SkillSource[]; observed: ObservedEntrySnapshot[] } {
     if (batch.status !== 'previewed') throw new Error('Confirmation is no longer pending')
-    const sources = snapshotSources(item.candidate_source_snapshot)
-    const sourceSnapshot = sources[0]
+    const snapshot = snapshotPlan(item)
+    const sources = snapshot.sources
+    const originalSkill = getSkillById(options.db, snapshot.originalSkillId)
+    if (!originalSkill) throw new Error('Original Skill identity changed')
+    if (snapshot.outputSkillName !== originalSkill.name && getSkillByName(options.db, snapshot.outputSkillName)) {
+      throw new Error(`Save-as Skill identity is now occupied: ${snapshot.outputSkillName}`)
+    }
     const observedSnapshot = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
     const currentSources = sources.map((snapshot) => getSourceById(options.db, snapshot.id))
     if (currentSources.some((source, index) => !source || source.source_role !== 'candidate' || JSON.stringify(source) !== JSON.stringify(sources[index]))) {
       throw new Error('Candidate Source registration changed')
     }
-    const source = currentSources[0]!
-    const currentSkillSources = getAllSkills(options.db).find((skill) => skill.id === source.skill_id)?.sources ?? []
-    if (currentSkillSources.length !== sources.length || currentSkillSources.some((candidate, index) => candidate.id !== sources[index].id)) {
-      throw new Error('Skill Source set changed')
-    }
+    const source = currentSources.find((candidate) => candidate!.id === snapshot.canonicalSourceId)!
+    if (!source) throw new Error('Selected authoritative Candidate version changed')
     if (sources.some((candidate) => !existsSync(candidate.path) || hashDir(candidate.path) !== candidate.hash)) throw new Error('Candidate Source content changed')
     assertCanonicalParentConfined(item.canonical_path)
     if (pathEntryExists(item.canonical_path) || pathEntryExists(item.archive_path)) throw new Error('Destination or Source Archive is occupied')
@@ -638,10 +877,12 @@ export function createSkillLibraryFacade(options: {
 
   function resourcesForItems(items: ItemRow[]): string[] {
     return items.flatMap((item) => {
-      const sources = snapshotSources(item.candidate_source_snapshot)
+      const plan = snapshotPlan(item)
+      const sources = plan.sources
       const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
       return [
         `skill:${item.skill_name}`,
+        `skill:${getSkillById(options.db, plan.originalSkillId)?.name ?? plan.originalSkillId}`,
         ...sources.flatMap((source) => [`source:${source.id}`, `path:${resolve(source.path)}`]),
         `path:${resolve(item.canonical_path)}`,
         ...observed.map((entry) => `path:${resolve(entry.deployment.target_path!)}`)
@@ -735,6 +976,19 @@ export function createSkillLibraryFacade(options: {
       let plans: Array<{ item: ItemRow; source: SkillSource; sources: SkillSource[]; observed: ObservedEntrySnapshot[] }>
       try {
         plans = persisted.items.map((item) => ({ item, ...validatePlan(persisted.batch, item) }))
+        const plannedBySkill = new Map<number, number[]>()
+        for (const plan of plans) {
+          const originalSkillId = snapshotPlan(plan.item).originalSkillId
+          plannedBySkill.set(originalSkillId, [...(plannedBySkill.get(originalSkillId) ?? []), ...plan.sources.map((source) => source.id)])
+        }
+        for (const [skillId, plannedIds] of plannedBySkill) {
+          const currentIds = (getAllSkills(options.db).find((skill) => skill.id === skillId)?.sources ?? [])
+            .filter((source) => source.source_role === 'candidate').map((source) => source.id).sort((a, b) => a - b)
+          const sortedPlanned = [...plannedIds].sort((a, b) => a - b)
+          if (new Set(sortedPlanned).size !== sortedPlanned.length || JSON.stringify(currentIds) !== JSON.stringify(sortedPlanned)) {
+            throw new Error('Skill Source set changed')
+          }
+        }
       } catch (error) {
         runInTransaction(options.db, () => {
           if (persisted.batch.status === 'previewed') markBatch(persisted.batch.id, 'failed', errorMessage(error))
@@ -781,8 +1035,15 @@ export function createSkillLibraryFacade(options: {
           mkdirSync(dirname(plan.item.canonical_path), { recursive: true })
           mkdirSync(dirname(plan.item.archive_path), { recursive: true })
           cpSync(plan.source.path, stage, { recursive: true, force: false })
+          if (hashDir(stage) !== plan.source.hash) throw new Error('Staged canonical content failed hash verification')
+          const output = snapshotPlan(plan.item)
+          if (output.rewriteIdentity) {
+            const skillMdPath = resolveWithin(stage, 'SKILL.md')
+            if (!pathEntryExists(skillMdPath)) throw new Error('Save-as requires a SKILL.md file')
+            const parsed = matter(readFileSync(skillMdPath, 'utf8'))
+            writeFileSync(skillMdPath, matter.stringify(parsed.content, { ...parsed.data, name: output.outputSkillName }))
+          }
           state.canonicalHash = hashDir(stage)
-          if (state.canonicalHash !== plan.source.hash) throw new Error('Staged canonical content failed hash verification')
           for (const source of plan.sources) {
             const archivePath = archivePathForSource(plan.item.archive_path, source, plan.sources)
             mkdirSync(dirname(archivePath), { recursive: true })
@@ -816,12 +1077,17 @@ export function createSkillLibraryFacade(options: {
         runInTransaction(options.db, () => {
           for (const state of applied) {
             const { plan } = state
+            const output = snapshotPlan(plan.item)
             for (const snapshot of plan.observed) options.db.prepare('DELETE FROM deployments WHERE id = ?').run(snapshot.deployment.id)
             for (const source of plan.sources) options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(source.id)
-            updatePrimarySourcePath(options.db, plan.source.skill_id, plan.item.canonical_path)
-            upsertSource(options.db, plan.source.skill_id, plan.item.canonical_path, state.canonicalHash!,
+            const outputSkillId = output.outputSkillName === getSkillById(options.db, output.originalSkillId)?.name
+              ? output.originalSkillId
+              : upsertSkill(options.db, output.outputSkillName, plan.item.canonical_path)
+            updatePrimarySourcePath(options.db, outputSkillId, plan.item.canonical_path)
+            upsertSource(options.db, outputSkillId, plan.item.canonical_path, state.canonicalHash!,
               Math.floor(statSync(plan.item.canonical_path).mtimeMs), 'central-repo', { role: 'canonical', origin: 'local' })
-            options.db.prepare("UPDATE consolidation_items SET canonical_hash = ?, phase = 'db-committed' WHERE id = ?").run(state.canonicalHash, plan.item.id)
+            markConsolidationItemRegistryCommitted(options.db, plan.item.id, outputSkillId, state.canonicalHash!)
+            plan.item.skill_id = outputSkillId
           }
           options.db.prepare("UPDATE consolidation_batches SET phase = 'registry-committed' WHERE id = ?").run(persisted.batch.id)
         })
@@ -998,10 +1264,14 @@ export function createSkillLibraryFacade(options: {
       }
       runInTransaction(options.db, () => {
         for (const state of applied) {
+          const output = snapshotPlan(state.plan.item)
           options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(state.plan.canonical.id)
+          if (state.plan.canonical.skill_id !== output.originalSkillId) {
+            deleteSkill(options.db, state.plan.canonical.skill_id)
+          }
           for (const source of state.plan.sources) restoreSourceSnapshot(options.db, source)
           for (const snapshot of state.plan.observed) restoreDeploymentSnapshot(options.db, snapshot.deployment)
-          updatePrimarySourcePath(options.db, state.plan.source.skill_id, state.plan.source.path)
+          if (!output.rewriteIdentity) updatePrimarySourcePath(options.db, output.originalSkillId, state.plan.source.path)
           options.db.prepare("UPDATE consolidation_items SET phase = 'undo-registry-committed' WHERE id = ?").run(state.plan.item.id)
         }
         options.db.prepare("UPDATE consolidation_batches SET phase = 'undo-registry-committed' WHERE id = ?").run(batchId)
@@ -1461,6 +1731,7 @@ export function createSkillLibraryFacade(options: {
   }
 
   return {
+    previewConflictResolution,
     previewConsolidation,
     previewConsolidationBatch,
     confirmConsolidation,

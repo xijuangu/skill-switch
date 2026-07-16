@@ -104,6 +104,44 @@ export interface SkillLibraryReadModelView {
   }>
 }
 
+export interface ConflictResolutionPreviewView {
+  skillId: number
+  skillName: string
+  versions: Array<{
+    hash: string
+    skillMd: string
+    sources: Array<{
+      id: number
+      path: string
+      sourceOrigin: SourceOriginView
+      sourceTool: string | null
+      sourceRootId: number | null
+      discoveredAt: string
+      repoUrl: string | null
+      commitSha: string | null
+    }>
+  }>
+  comparisons: Array<{
+    leftHash: string
+    rightHash: string
+    files: Array<{ path: string; status: 'added' | 'deleted' | 'modified'; textDiff: string | null }>
+  }>
+}
+
+export interface ConsolidationRequestItemView {
+  candidateSourceId: number
+  canonicalRelativeParent: string
+  conflictResolution?: {
+    authoritativeSourceId: number
+    otherVersions: Array<{
+      sourceId: number
+      action: 'archive' | 'save-as'
+      newSkillName?: string
+      canonicalRelativeParent?: string
+    }>
+  }
+}
+
 export type SourceRelocationPreviewView = {
   status: 'confirmation-required'
   confirmationId: string
@@ -405,8 +443,9 @@ declare global {
       scan: () => Promise<MultiScanResultView>
       getSkills: () => Promise<SkillWithConflictView[]>
       getSkillLibrary: () => Promise<SkillLibraryReadModelView>
+      previewConflictResolution: (skillId: number) => Promise<ConflictResolutionPreviewView>
       previewConsolidation: (request: { candidateSourceId: number; canonicalRelativeParent: string }) => Promise<ConsolidationPreviewView>
-      previewConsolidationBatch: (request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }) => Promise<ConsolidationBatchPreviewView>
+      previewConsolidationBatch: (request: { items: ConsolidationRequestItemView[] }) => Promise<ConsolidationBatchPreviewView>
       confirmConsolidation: (confirmationId: string) => Promise<ConsolidationConfirmationOutcomeView>
       undoConsolidation: (batchId: string) => Promise<ConsolidationUndoOutcomeView>
       restoreConsolidation: (batchId: string) => Promise<ConsolidationUndoOutcomeView>

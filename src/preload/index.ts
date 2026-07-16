@@ -5,9 +5,25 @@ const api = {
   scan: () => ipcRenderer.invoke('scan'),
   getSkills: () => ipcRenderer.invoke('getSkills'),
   getSkillLibrary: () => ipcRenderer.invoke('getSkillLibrary'),
+  previewConflictResolution: (skillId: number) =>
+    ipcRenderer.invoke('skillLibrary:previewConflictResolution', skillId),
   previewConsolidation: (request: { candidateSourceId: number; canonicalRelativeParent: string }) =>
     ipcRenderer.invoke('skillLibrary:previewConsolidation', request),
-  previewConsolidationBatch: (request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }) =>
+  previewConsolidationBatch: (request: {
+    items: Array<{
+      candidateSourceId: number
+      canonicalRelativeParent: string
+      conflictResolution?: {
+        authoritativeSourceId: number
+        otherVersions: Array<{
+          sourceId: number
+          action: 'archive' | 'save-as'
+          newSkillName?: string
+          canonicalRelativeParent?: string
+        }>
+      }
+    }>
+  }) =>
     ipcRenderer.invoke('skillLibrary:previewConsolidationBatch', request),
   confirmConsolidation: (confirmationId: string) =>
     ipcRenderer.invoke('skillLibrary:confirmConsolidation', confirmationId),

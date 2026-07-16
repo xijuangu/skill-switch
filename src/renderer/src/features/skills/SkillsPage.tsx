@@ -34,13 +34,30 @@ type ConsolidationPreview = Awaited<ReturnType<typeof window.api.previewConsolid
 type ConsolidationBatchPreview = Awaited<ReturnType<typeof window.api.previewConsolidationBatch>>
 type ConsolidationBatch = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationBatches'][number]
 type ConsolidationPlanItem = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationPlan'][number]
-type ConsolidationDraft = ConsolidationPlanItem & { selected: boolean; canonicalRelativeParent: string }
+type ConflictResolutionPreview = Awaited<ReturnType<typeof window.api.previewConflictResolution>>
+type ConflictResolutionDecision = NonNullable<Parameters<typeof window.api.previewConsolidationBatch>[0]['items'][number]['conflictResolution']>
+type ConsolidationDraft = ConsolidationPlanItem & {
+  selected: boolean
+  canonicalRelativeParent: string
+  conflictResolution?: ConflictResolutionDecision
+}
+type ConflictVersionAction = { action: 'archive' | 'save-as'; newSkillName: string; canonicalRelativeParent: string }
+type ConflictResolutionEditor = {
+  draftSkillId: number
+  preview: ConflictResolutionPreview
+  authoritativeSourceId: number | null
+  actions: Record<string, ConflictVersionAction>
+}
 type UndoBatch = { batch: ConsolidationBatch; item: ConsolidationBatch['items'][number] }
 type SourceRelocationPreview = Awaited<ReturnType<typeof window.api.previewSourceRelocation>>
 type SourceRelocation = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['sourceRelocations'][number]
 
 function managedDeploymentCount(skill: SkillView): number {
   return skill.deployments.filter((deployment) => deployment.management === 'managed').length
+}
+
+function conflictFileStatusLabel(status: 'added' | 'deleted' | 'modified'): string {
+  return { added: '新增', deleted: '删除', modified: '修改' }[status]
 }
 
 export function SkillsPage({
@@ -88,6 +105,7 @@ export function SkillsPage({
   const [consolidationDrafts, setConsolidationDrafts] = useState<ConsolidationDraft[] | null>(null)
   const [batchRelativeParent, setBatchRelativeParent] = useState('')
   const [batchConsolidationPreview, setBatchConsolidationPreview] = useState<ConsolidationBatchPreview | null>(null)
+  const [conflictResolutionEditor, setConflictResolutionEditor] = useState<ConflictResolutionEditor | null>(null)
   const [undoBatch, setUndoBatch] = useState<UndoBatch | null>(null)
   const [relocationTarget, setRelocationTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
   const [relocationRelativeParent, setRelocationRelativeParent] = useState('')
@@ -422,6 +440,85 @@ export function SkillsPage({
     setBatchConsolidationPreview(null)
   }
 
+  const openConflictResolution = async (draft: ConsolidationDraft) => {
+    setActionBusy(true)
+    try {
+      const preview = await window.api.previewConflictResolution(draft.skillId)
+      setConflictResolutionEditor({
+        draftSkillId: draft.skillId,
+        preview,
+        authoritativeSourceId: draft.conflictResolution?.authoritativeSourceId ?? null,
+        actions: Object.fromEntries(preview.versions.map((version) => {
+          const existing = draft.conflictResolution?.otherVersions.find((decision) =>
+            version.sources.some((source) => source.id === decision.sourceId)
+          )
+          return [version.hash, {
+            action: existing?.action ?? 'archive',
+            newSkillName: existing?.newSkillName ?? '',
+            canonicalRelativeParent: existing?.canonicalRelativeParent ?? ''
+          }]
+        }))
+      })
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const applyConflictResolution = () => {
+    if (!conflictResolutionEditor?.authoritativeSourceId) {
+      toastError('请选择一个版本作为原名权威版本')
+      return
+    }
+    const authoritative = conflictResolutionEditor.preview.versions.find((version) =>
+      version.sources.some((source) => source.id === conflictResolutionEditor.authoritativeSourceId)
+    )
+    if (!authoritative) {
+      toastError('所选权威版本已不可用')
+      return
+    }
+    const otherVersions: ConflictResolutionDecision['otherVersions'] = []
+    const reservedNames = new Set(skills.map((skill) => skill.name))
+    for (const version of conflictResolutionEditor.preview.versions) {
+      if (version.hash === authoritative.hash) continue
+      const action = conflictResolutionEditor.actions[version.hash]
+      if (!action) {
+        toastError('请为每个其他版本选择处理方式')
+        return
+      }
+      const decision: ConflictResolutionDecision['otherVersions'][number] = {
+        sourceId: version.sources[0].id,
+        action: action.action
+      }
+      if (action.action === 'save-as') {
+        const newName = action.newSkillName.trim()
+        if (!newName || newName === '.' || newName === '..' || /[\\/\u0000-\u001f\u007f]/.test(newName)) {
+          toastError('新 Skill 名称不合法')
+          return
+        }
+        if (reservedNames.has(newName)) {
+          toastError(`新 Skill 名称「${newName}」已存在`)
+          return
+        }
+        reservedNames.add(newName)
+        decision.newSkillName = newName
+        decision.canonicalRelativeParent = action.canonicalRelativeParent.trim()
+      }
+      otherVersions.push(decision)
+    }
+    const conflictResolution: ConflictResolutionDecision = {
+      authoritativeSourceId: conflictResolutionEditor.authoritativeSourceId,
+      otherVersions
+    }
+    setConsolidationDrafts((drafts) => drafts?.map((draft) =>
+      draft.skillId === conflictResolutionEditor.draftSkillId
+        ? { ...draft, selected: true, conflictResolution }
+        : draft
+    ) ?? null)
+    setConflictResolutionEditor(null)
+  }
+
   const handlePreviewBatchConsolidation = async () => {
     const selectedDrafts = consolidationDrafts?.filter((draft) => draft.selected) ?? []
     if (selectedDrafts.length === 0) {
@@ -432,8 +529,9 @@ export function SkillsPage({
     try {
       const preview = await window.api.previewConsolidationBatch({
         items: selectedDrafts.map((draft) => ({
-          candidateSourceId: draft.versions[0].candidateSourceIds[0],
-          canonicalRelativeParent: draft.canonicalRelativeParent.trim()
+          candidateSourceId: draft.conflictResolution?.authoritativeSourceId ?? draft.versions[0].candidateSourceIds[0],
+          canonicalRelativeParent: draft.canonicalRelativeParent.trim(),
+          ...(draft.conflictResolution ? { conflictResolution: draft.conflictResolution } : {})
         }))
       })
       setBatchConsolidationPreview(preview)
@@ -831,7 +929,7 @@ export function SkillsPage({
         </Dialog>
       )}
 
-      {consolidationDrafts && (
+      {consolidationDrafts && !conflictResolutionEditor && (
         <Dialog
           open
           onClose={closeBatchConsolidation}
@@ -879,16 +977,28 @@ export function SkillsPage({
                         type="checkbox"
                         aria-label={`选择 ${draft.skillName}`}
                         checked={draft.selected}
-                        disabled={draft.hasConflict}
+                        disabled={draft.hasConflict && !draft.conflictResolution}
                         onChange={(event) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
                           item.skillId === draft.skillId ? { ...item, selected: event.target.checked } : item
                         ) ?? null)}
                       />
                       <span>{draft.skillName}</span>
                       <span className="text-2xs text-foreground-muted">
-                        {draft.hasConflict ? `${draft.versions.length} 个冲突版本（未选择）` : `${draft.versions[0].candidateSourceIds.length} 个同内容来源`}
+                        {draft.hasConflict
+                          ? draft.conflictResolution ? '冲突已解决' : `${draft.versions.length} 个冲突版本（未选择）`
+                          : `${draft.versions[0].candidateSourceIds.length} 个同内容来源`}
                       </span>
                     </label>
+                    {draft.hasConflict && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => openConflictResolution(draft)}
+                        aria-label={`解决 ${draft.skillName} 的版本冲突`}
+                      >
+                        {draft.conflictResolution ? '修改冲突决策' : '解决冲突'}
+                      </Button>
+                    )}
                     <Input
                       aria-label={`${draft.skillName} 权威库内父目录`}
                       value={draft.canonicalRelativeParent}
@@ -906,6 +1016,137 @@ export function SkillsPage({
               <p className="text-2xs text-foreground-muted">最终目录名固定使用 Skill 名称；未选 Candidate 不会被本批次修改。</p>
             </div>
           )}
+        </Dialog>
+      )}
+
+      {conflictResolutionEditor && (
+        <Dialog
+          open
+          onClose={() => { if (!actionBusy) setConflictResolutionEditor(null) }}
+          title={`解决「${conflictResolutionEditor.preview.skillName}」的版本冲突`}
+          description="不会自动选版或合并；请明确原名权威版本，并处理每个其他版本。"
+          busy={actionBusy}
+          confirmLabel="应用冲突决策"
+          onConfirm={applyConflictResolution}
+          closeOnOverlay={false}
+        >
+          <div className="space-y-4">
+            {conflictResolutionEditor.preview.versions.map((version, index) => {
+              const label = 'ABCDEFGH'[index] ?? String(index + 1)
+              const selectedVersion = version.sources.some((source) => source.id === conflictResolutionEditor.authoritativeSourceId)
+              const action = conflictResolutionEditor.actions[version.hash]
+              return (
+                <section key={version.hash} className="rounded border border-border p-3 space-y-2">
+                  <label className="flex items-center gap-2 text-xs font-medium">
+                    <input
+                      type="radio"
+                      name="authoritative-conflict-version"
+                      aria-label={`选择版本 ${label} 作为原名权威版本`}
+                      checked={selectedVersion}
+                      onChange={() => setConflictResolutionEditor((editor) => editor ? {
+                        ...editor, authoritativeSourceId: version.sources[0].id
+                      } : null)}
+                    />
+                    <span>版本 {label}</span>
+                    <code className="text-2xs text-foreground-muted">{shortHash(version.hash)}</code>
+                  </label>
+                  <div className="space-y-1">
+                    {version.sources.map((source) => (
+                      <div key={source.id} className="rounded bg-surface-secondary p-2">
+                        <code className="block text-2xs break-all">{source.path}</code>
+                        <span className="text-2xs text-foreground-muted">
+                          来源：{source.sourceOrigin}{source.sourceTool ? ` · ${source.sourceTool}` : ''}
+                        </span>
+                        {source.sourceRootId !== null && (
+                          <span className="block text-2xs text-foreground-muted">Source Root：{source.sourceRootId}</span>
+                        )}
+                        <span className="block text-2xs text-foreground-muted">发现时间：{source.discoveredAt}</span>
+                        {source.repoUrl && (
+                          <span className="block text-2xs text-foreground-muted break-all">
+                            仓库：{source.repoUrl}{source.commitSha ? ` @ ${source.commitSha}` : ''}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <p className="text-2xs font-medium text-foreground-secondary mb-1">SKILL.md</p>
+                    <pre className="max-h-32 overflow-auto rounded bg-surface-secondary p-2 text-2xs whitespace-pre-wrap">{version.skillMd || '（无 SKILL.md）'}</pre>
+                  </div>
+                  {conflictResolutionEditor.authoritativeSourceId !== null && !selectedVersion && action && (
+                    <div className="space-y-2 border-t border-border-subtle pt-2">
+                      <label className="block text-2xs text-foreground-secondary">
+                        处理方式
+                        <select
+                          aria-label={`版本 ${label} 的处理方式`}
+                          value={action.action}
+                          onChange={(event) => setConflictResolutionEditor((editor) => editor ? {
+                            ...editor,
+                            actions: { ...editor.actions, [version.hash]: { ...action, action: event.target.value as 'archive' | 'save-as' } }
+                          } : null)}
+                          className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs"
+                        >
+                          <option value="archive">仅归档原版本</option>
+                          <option value="save-as">另存为新 Skill</option>
+                        </select>
+                      </label>
+                      {action.action === 'save-as' && (
+                        <>
+                          <Input
+                            aria-label={`版本 ${label} 的新 Skill 名称`}
+                            value={action.newSkillName}
+                            onChange={(event) => setConflictResolutionEditor((editor) => editor ? {
+                              ...editor,
+                              actions: { ...editor.actions, [version.hash]: { ...action, newSkillName: event.target.value } }
+                            } : null)}
+                            placeholder="新名称也将成为目录名"
+                            className="w-full"
+                          />
+                          <Input
+                            aria-label={`版本 ${label} 的权威库内父目录`}
+                            value={action.canonicalRelativeParent}
+                            onChange={(event) => setConflictResolutionEditor((editor) => editor ? {
+                              ...editor,
+                              actions: { ...editor.actions, [version.hash]: { ...action, canonicalRelativeParent: event.target.value } }
+                            } : null)}
+                            placeholder="留空表示权威库根目录"
+                            mono
+                            className="w-full"
+                          />
+                        </>
+                      )}
+                    </div>
+                  )}
+                </section>
+              )
+            })}
+            <section className="space-y-2">
+              <h4 className="text-xs font-medium">文件差异</h4>
+              {conflictResolutionEditor.preview.comparisons.map((comparison) => {
+                const leftIndex = conflictResolutionEditor.preview.versions.findIndex((version) => version.hash === comparison.leftHash)
+                const rightIndex = conflictResolutionEditor.preview.versions.findIndex((version) => version.hash === comparison.rightHash)
+                const leftLabel = 'ABCDEFGH'[leftIndex] ?? String(leftIndex + 1)
+                const rightLabel = 'ABCDEFGH'[rightIndex] ?? String(rightIndex + 1)
+                return (
+                  <div key={`${comparison.leftHash}-${comparison.rightHash}`} className="rounded border border-border p-2 space-y-2">
+                    <p className="text-2xs font-medium">版本 {leftLabel} 与版本 {rightLabel}</p>
+                    <p className="text-2xs text-foreground-muted font-mono break-all">
+                      {comparison.leftHash} ↔ {comparison.rightHash}
+                    </p>
+                    {comparison.files.map((file) => (
+                      <div key={file.path} className="rounded border border-border-subtle p-2">
+                        <div className="flex items-center gap-2 text-2xs">
+                          <code>{file.path}</code>
+                          <span className="text-foreground-muted">{conflictFileStatusLabel(file.status)}</span>
+                        </div>
+                        {file.textDiff && <pre className="mt-1 overflow-auto whitespace-pre-wrap text-2xs bg-surface-secondary p-2 rounded">{file.textDiff}</pre>}
+                      </div>
+                    ))}
+                  </div>
+                )
+              })}
+            </section>
+          </div>
         </Dialog>
       )}
 

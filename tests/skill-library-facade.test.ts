@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { dirname, join, resolve } from 'path'
-import { upsertSkill } from '../src/main/db/dao/skills'
+import { getSkillById, upsertSkill } from '../src/main/db/dao/skills'
 import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { getAllDeployments, upsertDeployment } from '../src/main/db/dao/deployments'
 import { createDatabase } from '../src/main/db/database'
@@ -635,6 +635,155 @@ describe('SkillLibraryFacade', () => {
 
     fixture.db.close()
     fixture.root.cleanup()
+  })
+
+  test('previews every conflicting Candidate version with provenance and file-level text differences', () => {
+    const fixture = consolidationFixture('skill-library-conflict-preview-')
+    const sibling = join(fixture.root.dir, 'other', 'demo')
+    mkdirSync(join(sibling, 'notes'), { recursive: true })
+    writeFileSync(join(sibling, 'SKILL.md'), '---\nname: demo\n---\n# second\n')
+    writeFileSync(join(sibling, 'notes', 'added.txt'), 'added\n')
+    writeFileSync(join(fixture.candidatePath, 'SKILL.md'), '---\nname: demo\n---\n# first\n')
+    writeFileSync(join(fixture.candidatePath, 'removed.txt'), 'removed\n')
+    upsertSource(fixture.db, fixture.source.skill_id, fixture.candidatePath, hashDir(fixture.candidatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    upsertSource(fixture.db, fixture.source.skill_id, sibling, hashDir(sibling), 2, 'indexed', {
+      role: 'candidate', origin: 'scan', tool: 'claude'
+    })
+    const refreshed = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive
+    })
+
+    const preview = refreshed.previewConflictResolution(fixture.source.skill_id)
+
+    expect(preview.versions).toHaveLength(2)
+    expect(preview.versions.flatMap((version) => version.sources.map((source) => source.path)))
+      .toEqual(expect.arrayContaining([fixture.candidatePath, sibling]))
+    expect(preview.versions.find((version) => version.sources.some((source) => source.path === sibling)))
+      .toMatchObject({ skillMd: expect.stringContaining('# second'), sources: [{ sourceTool: 'claude', sourceOrigin: 'scan' }] })
+    expect(preview.comparisons).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        files: expect.arrayContaining([
+          expect.objectContaining({ path: 'SKILL.md', status: 'modified', textDiff: expect.stringContaining('-# first') }),
+          expect.objectContaining({ path: 'notes/added.txt', status: 'added', textDiff: expect.stringContaining('+added') }),
+          expect.objectContaining({ path: 'removed.txt', status: 'deleted', textDiff: expect.stringContaining('-removed') })
+        ])
+      })
+    ]))
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('uses an explicit authoritative version and archives the remaining conflicting version without merging', () => {
+    const fixture = consolidationFixture('skill-library-conflict-archive-')
+    const sibling = join(fixture.root.dir, 'other', 'demo')
+    mkdirSync(sibling, { recursive: true })
+    writeFileSync(join(sibling, 'SKILL.md'), '---\nname: demo\n---\n# second\n')
+    upsertSource(fixture.db, fixture.source.skill_id, sibling, hashDir(sibling), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    const second = getSourceByPath(fixture.db, sibling)!
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: fixture.source.id,
+      canonicalRelativeParent: '',
+      conflictResolution: {
+        authoritativeSourceId: fixture.source.id,
+        otherVersions: [{ sourceId: second.id, action: 'archive' }]
+      }
+    }] })
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+
+    const canonical = join(fixture.canonicalRepository, 'demo')
+    expect(readFileSync(join(canonical, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+    expect(existsSync(fixture.candidatePath)).toBe(false)
+    expect(existsSync(sibling)).toBe(false)
+    const archived = preview.operations.filter((operation) => operation.kind === 'archive-candidate')
+    expect(archived).toHaveLength(2)
+    expect(archived.some((operation) => readFileSync(join(operation.path, 'SKILL.md'), 'utf8').includes('# second'))).toBe(true)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('saves another version as a new Skill by rewriting only the canonical copy identity', () => {
+    const fixture = consolidationFixture('skill-library-conflict-save-as-')
+    const sibling = join(fixture.root.dir, 'other', 'demo')
+    mkdirSync(sibling, { recursive: true })
+    const original = '---\nname: demo\ndescription: second\n---\n# second\n'
+    writeFileSync(join(sibling, 'SKILL.md'), original)
+    upsertSource(fixture.db, fixture.source.skill_id, sibling, hashDir(sibling), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    const second = getSourceByPath(fixture.db, sibling)!
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: fixture.source.id,
+      canonicalRelativeParent: 'primary',
+      conflictResolution: {
+        authoritativeSourceId: fixture.source.id,
+        otherVersions: [{
+          sourceId: second.id,
+          action: 'save-as',
+          newSkillName: 'demo-second',
+          canonicalRelativeParent: 'alternatives'
+        }]
+      }
+    }] })
+    expect(preview.items.map((item) => item.skillName)).toEqual(['demo', 'demo-second'])
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+
+    expect(readFileSync(join(fixture.canonicalRepository, 'primary', 'demo', 'SKILL.md'), 'utf8'))
+      .toBe('# candidate demo')
+    const renamed = readFileSync(join(fixture.canonicalRepository, 'alternatives', 'demo-second', 'SKILL.md'), 'utf8')
+    expect(renamed).toContain('name: demo-second')
+    expect(renamed).toContain('description: second')
+    const archivedSecond = preview.operations
+      .filter((operation) => operation.kind === 'archive-candidate')
+      .find((operation) => readFileSync(join(operation.path, 'SKILL.md'), 'utf8').includes('# second'))!
+    expect(readFileSync(join(archivedSecond.path, 'SKILL.md'), 'utf8')).toBe(original)
+    expect(fixture.facade.read().skills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'demo', canonicalSource: expect.objectContaining({ path: join(fixture.canonicalRepository, 'primary', 'demo') }) }),
+      expect.objectContaining({ name: 'demo-second', canonicalSource: expect.objectContaining({ path: join(fixture.canonicalRepository, 'alternatives', 'demo-second') }) })
+    ]))
+
+    expect(fixture.facade.undoConsolidation(preview.batchId)).toEqual({ status: 'undone', batchId: preview.batchId })
+    expect(readFileSync(join(sibling, 'SKILL.md'), 'utf8')).toBe(original)
+    expect(fixture.facade.read().skills.some((skill) => skill.name === 'demo-second')).toBe(false)
+    expect(getSkillById(fixture.db, fixture.source.skill_id)?.primary_source_path).toBe(fixture.candidatePath)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('rejects an illegal or occupied save-as identity before creating a batch', () => {
+    for (const newSkillName of ['../escape', 'occupied']) {
+      const fixture = consolidationFixture(`skill-library-conflict-invalid-${newSkillName.replace('/', '-')}-`)
+      const sibling = join(fixture.root.dir, 'other', 'demo')
+      mkdirSync(sibling, { recursive: true })
+      writeFileSync(join(sibling, 'SKILL.md'), '---\nname: demo\n---\n# second\n')
+      upsertSource(fixture.db, fixture.source.skill_id, sibling, hashDir(sibling), 2, 'indexed', { role: 'candidate', origin: 'scan' })
+      const second = getSourceByPath(fixture.db, sibling)!
+      if (newSkillName === 'occupied') upsertSkill(fixture.db, 'occupied', join(fixture.root.dir, 'existing'))
+
+      expect(() => fixture.facade.previewConsolidationBatch({ items: [{
+        candidateSourceId: fixture.source.id,
+        canonicalRelativeParent: '',
+        conflictResolution: {
+          authoritativeSourceId: fixture.source.id,
+          otherVersions: [{ sourceId: second.id, action: 'save-as', newSkillName }]
+        }
+      }] })).toThrow()
+      expect(fixture.facade.read().consolidationBatches).toEqual([])
+      expect(existsSync(fixture.candidatePath)).toBe(true)
+      expect(existsSync(sibling)).toBe(true)
+      fixture.db.close()
+      fixture.root.cleanup()
+    }
   })
 
   test('groups hash-identical Candidates into one default-selected consolidation decision', () => {

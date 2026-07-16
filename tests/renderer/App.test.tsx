@@ -20,7 +20,9 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
       consolidationBatches: [],
       sourceRelocations: []
     }),
+    previewConflictResolution: vi.fn(),
     previewConsolidation: vi.fn(),
+    previewConsolidationBatch: vi.fn(),
     confirmConsolidation: vi.fn(),
     undoConsolidation: vi.fn(),
     restoreConsolidation: vi.fn(),
@@ -846,6 +848,158 @@ describe('SkillsPage bulk consolidation planning (#86)', () => {
     await userEvent.click(screen.getByRole('button', { name: '确认批量整理' }))
     await waitFor(() => expect(api.confirmConsolidation).toHaveBeenCalledWith('confirm-86'))
     expect(await screen.findByRole('alert')).toHaveTextContent('已整理 2 个 Skill')
+  })
+})
+
+describe('SkillsPage Candidate conflict resolution (#87)', () => {
+  function renderConflictSkills(skills: SkillWithConflictView[]) {
+    return render(
+      <ToastProvider>
+        <SkillsPage
+          skills={skills} tools={[]} scanning={false} lastScan={null} loading={false} loadError={null}
+          onScan={vi.fn()} onRefresh={vi.fn().mockResolvedValue(undefined)} onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+  }
+
+  function conflictFixture() {
+    const skill = buildFakeSkills(1)[0]
+    const plan = [{
+      skillId: skill.id,
+      skillName: skill.name,
+      selectedByDefault: false,
+      hasConflict: true,
+      canonicalRelativeParent: '',
+      versions: [
+        { hash: 'hash-a', candidateSourceIds: [31], paths: ['/codex/demo'] },
+        { hash: 'hash-b', candidateSourceIds: [32], paths: ['/claude/demo'] },
+        { hash: 'hash-c', candidateSourceIds: [33], paths: ['/agents/demo'] }
+      ]
+    }]
+    const conflictPreview = {
+      skillId: skill.id,
+      skillName: skill.name,
+      versions: [
+        {
+          hash: 'hash-a',
+          skillMd: '---\nname: demo\n---\n# version A',
+          sources: [{
+            id: 31, path: '/codex/demo', sourceOrigin: 'scan' as const, sourceTool: 'codex',
+            sourceRootId: 1, discoveredAt: '2026-07-16T01:00:00.000Z', repoUrl: null, commitSha: null
+          }]
+        },
+        {
+          hash: 'hash-b',
+          skillMd: '---\nname: demo\n---\n# version B',
+          sources: [{
+            id: 32, path: '/claude/demo', sourceOrigin: 'scan' as const, sourceTool: 'claude',
+            sourceRootId: 2, discoveredAt: '2026-07-16T02:00:00.000Z',
+            repoUrl: 'https://github.com/example/skills', commitSha: 'abcdef123456'
+          }]
+        },
+        {
+          hash: 'hash-c',
+          skillMd: '---\nname: demo\n---\n# version C',
+          sources: [{
+            id: 33, path: '/agents/demo', sourceOrigin: 'scan' as const, sourceTool: 'agents',
+            sourceRootId: 3, discoveredAt: '2026-07-16T03:00:00.000Z', repoUrl: null, commitSha: null
+          }]
+        }
+      ],
+      comparisons: [
+        {
+          leftHash: 'hash-a', rightHash: 'hash-b',
+          files: [
+            { path: 'SKILL.md', status: 'modified' as const, textDiff: '-# version A\n+# version B' },
+            { path: 'notes/new.txt', status: 'added' as const, textDiff: '+added' }
+          ]
+        },
+        { leftHash: 'hash-a', rightHash: 'hash-c', files: [{ path: 'SKILL.md', status: 'modified' as const, textDiff: '-A\n+C' }] },
+        { leftHash: 'hash-b', rightHash: 'hash-c', files: [{ path: 'SKILL.md', status: 'modified' as const, textDiff: '-B\n+C' }] }
+      ]
+    }
+    return { skill, plan, conflictPreview }
+  }
+
+  it('requires an explicit authoritative version and shows provenance, SKILL.md, and file text differences', async () => {
+    const { skill, plan, conflictPreview } = conflictFixture()
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [], consolidationPlan: plan,
+        consolidationBatches: [], sourceRelocations: []
+      }),
+      previewConflictResolution: vi.fn().mockResolvedValue(conflictPreview),
+      previewConsolidationBatch: vi.fn().mockResolvedValue({
+        status: 'confirmation-required', confirmationId: 'confirm-87', batchId: 'batch-87',
+        items: [], operations: []
+      })
+    })
+    renderConflictSkills([skill])
+
+    await userEvent.click(await screen.findByRole('button', { name: '批量整理 (1)' }))
+    await userEvent.click(screen.getByRole('button', { name: `解决 ${skill.name} 的版本冲突` }))
+    expect(api.previewConflictResolution).toHaveBeenCalledWith(skill.id)
+    expect(await screen.findByText('/codex/demo')).toBeInTheDocument()
+    expect(screen.getByText('/claude/demo')).toBeInTheDocument()
+    expect(screen.getByText('来源：scan · codex')).toBeInTheDocument()
+    expect(screen.getByText('Source Root：1')).toBeInTheDocument()
+    expect(screen.getByText('发现时间：2026-07-16T01:00:00.000Z')).toBeInTheDocument()
+    expect(screen.getByText('仓库：https://github.com/example/skills @ abcdef123456')).toBeInTheDocument()
+    expect(screen.getAllByText(/# version A/).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('notes/new.txt')).toBeInTheDocument()
+    expect(screen.getByText(/-# version A/)).toBeInTheDocument()
+    expect(screen.getByText('版本 A 与版本 B')).toBeInTheDocument()
+    expect(screen.getByText('版本 A 与版本 C')).toBeInTheDocument()
+    expect(screen.getByText('版本 B 与版本 C')).toBeInTheDocument()
+    expect(screen.getByText('hash-a ↔ hash-c')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: '选择版本 A 作为原名权威版本' })).not.toBeChecked()
+    expect(screen.getByRole('radio', { name: '选择版本 B 作为原名权威版本' })).not.toBeChecked()
+
+    await userEvent.click(screen.getByRole('radio', { name: '选择版本 A 作为原名权威版本' }))
+    await userEvent.selectOptions(screen.getByLabelText('版本 B 的处理方式'), 'save-as')
+    await userEvent.type(screen.getByLabelText('版本 B 的新 Skill 名称'), 'demo-second')
+    await userEvent.type(screen.getByLabelText('版本 B 的权威库内父目录'), 'alternatives')
+    await userEvent.click(screen.getByRole('button', { name: '应用冲突决策' }))
+
+    expect(screen.getByText('冲突已解决')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: `选择 ${skill.name}` })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '预览批量整理' }))
+    expect(api.previewConsolidationBatch).toHaveBeenCalledWith({ items: [{
+      candidateSourceId: 31,
+      canonicalRelativeParent: '',
+      conflictResolution: {
+        authoritativeSourceId: 31,
+        otherVersions: [{
+          sourceId: 32,
+          action: 'save-as',
+          newSkillName: 'demo-second',
+          canonicalRelativeParent: 'alternatives'
+        }, { sourceId: 33, action: 'archive' }]
+      }
+    }] })
+  })
+
+  it('blocks an illegal save-as name before consolidation preview', async () => {
+    const { skill, plan, conflictPreview } = conflictFixture()
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [], consolidationPlan: plan,
+        consolidationBatches: [], sourceRelocations: []
+      }),
+      previewConflictResolution: vi.fn().mockResolvedValue(conflictPreview)
+    })
+    renderConflictSkills([skill])
+    await userEvent.click(await screen.findByRole('button', { name: '批量整理 (1)' }))
+    await userEvent.click(screen.getByRole('button', { name: `解决 ${skill.name} 的版本冲突` }))
+    await screen.findByText('/codex/demo')
+    await userEvent.click(screen.getByRole('radio', { name: '选择版本 A 作为原名权威版本' }))
+    await userEvent.selectOptions(screen.getByLabelText('版本 B 的处理方式'), 'save-as')
+    await userEvent.type(screen.getByLabelText('版本 B 的新 Skill 名称'), '../escape')
+    await userEvent.click(screen.getByRole('button', { name: '应用冲突决策' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('新 Skill 名称不合法')
+    expect(api.previewConsolidationBatch).not.toHaveBeenCalled()
   })
 })
 

@@ -50,7 +50,7 @@ import {
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 import { readToolDrifts } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
-import { createSkillLibraryFacade } from '../services/skill-library-facade'
+import { createSkillLibraryFacade, type ConflictResolutionDecision } from '../services/skill-library-facade'
 import {
   detachSourceRoot,
   listSourceRoots,
@@ -277,6 +277,10 @@ export function registerIpcHandlers(db: DB): void {
 
   ipcMain.handle('getSkillLibrary', async () => skillLibraryFacade.read())
 
+  ipcMain.handle('skillLibrary:previewConflictResolution', async (_e, skillId: unknown) =>
+    skillLibraryFacade.previewConflictResolution(assertInteger(skillId, 'skillId'))
+  )
+
   ipcMain.handle('skillLibrary:previewConsolidation', async (_e, request: unknown) => {
     if (typeof request !== 'object' || request === null) throw new Error('consolidation request must be an object')
     const dto = request as Record<string, unknown>
@@ -293,9 +297,34 @@ export function registerIpcHandlers(db: DB): void {
       items: (request as { items: unknown[] }).items.map((item) => {
         if (typeof item !== 'object' || item === null) throw new Error('consolidation batch item must be an object')
         const dto = item as Record<string, unknown>
+        let conflictResolution: ConflictResolutionDecision | undefined
+        if (dto.conflictResolution !== undefined) {
+          if (typeof dto.conflictResolution !== 'object' || dto.conflictResolution === null) {
+            throw new Error('conflictResolution must be an object')
+          }
+          const resolution = dto.conflictResolution as Record<string, unknown>
+          if (!Array.isArray(resolution.otherVersions)) throw new Error('conflictResolution.otherVersions must be an array')
+          conflictResolution = {
+            authoritativeSourceId: assertInteger(resolution.authoritativeSourceId, 'authoritativeSourceId'),
+            otherVersions: resolution.otherVersions.map((entry) => {
+              if (typeof entry !== 'object' || entry === null) throw new Error('other version decision must be an object')
+              const decision = entry as Record<string, unknown>
+              if (decision.action !== 'archive' && decision.action !== 'save-as') throw new Error('other version action is invalid')
+              return {
+                sourceId: assertInteger(decision.sourceId, 'sourceId'),
+                action: decision.action as 'archive' | 'save-as',
+                ...(decision.newSkillName === undefined ? {} : { newSkillName: assertString(decision.newSkillName, 'newSkillName') }),
+                ...(decision.canonicalRelativeParent === undefined ? {} : {
+                  canonicalRelativeParent: assertString(decision.canonicalRelativeParent, 'canonicalRelativeParent')
+                })
+              }
+            })
+          }
+        }
         return {
           candidateSourceId: assertInteger(dto.candidateSourceId, 'candidateSourceId'),
-          canonicalRelativeParent: assertString(dto.canonicalRelativeParent, 'canonicalRelativeParent')
+          canonicalRelativeParent: assertString(dto.canonicalRelativeParent, 'canonicalRelativeParent'),
+          ...(conflictResolution ? { conflictResolution } : {})
         }
       })
     })
