@@ -30,6 +30,7 @@ import {
   type InstallResultView,
   type ConsolidationBatch,
   type SourceRelocation,
+  type UndoBatch,
 } from './dialogs'
 import { useConsolidationFlow, useBatchConsolidationFlow, useConflictResolutionFlow, useSourceRelocationFlow } from './hooks'
 import { groupByHash, shortHash } from './sourceGrouping'
@@ -99,7 +100,7 @@ export function SkillsPage({
   const consolidationFlow = useConsolidationFlow(flowDeps, refreshLibrary)
   const batchFlow = useBatchConsolidationFlow(flowDeps, refreshLibrary)
   const conflictFlow = useConflictResolutionFlow(
-    { actionBusy, setActionBusy, toastError },
+    flowDeps,
     skills,
     (skillId, cr) => batchFlow.updateDraft(skillId, { selected: true, conflictResolution: cr })
   )

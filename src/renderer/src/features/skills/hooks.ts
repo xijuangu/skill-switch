@@ -240,7 +240,7 @@ export function useBatchConsolidationFlow(
 // ---------------------------------------------------------------------------
 
 export function useConflictResolutionFlow(
-  deps: Pick<FlowDeps, 'actionBusy' | 'setActionBusy' | 'toastError'>,
+  deps: FlowDeps,
   skills: SkillView[],
   onApply: (skillId: number, conflictResolution: ConflictResolutionDecision) => void
 ) {

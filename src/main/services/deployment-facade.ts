@@ -126,7 +126,7 @@ export interface BulkAdoptionResultItem extends BulkAdoptionPreviewItem {
 }
 
 export interface BulkAdoptionFailure extends BulkAdoptionResultItem {
-  reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observation-stale' | 'recovery-required'
+  reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observation-stale' | 'recovery-required' | 'canonical-source-unavailable' | 'source-not-canonical'
   message: string
 }
 
@@ -261,7 +261,7 @@ export function createDeploymentFacade(options: {
     message: '只有权威 Source 可以创建部署,请先整理为 Canonical Source。'
   }
 
-  async function withTargetLock<T extends DeploymentOutcome | DeploymentMutationOutcome>(
+  async function withTargetLock<T extends DeploymentOutcome | DeploymentMutationOutcome | TargetAdoptionOutcome>(
     targetId: string,
     mutation: () => T
   ): Promise<T | TargetBusyOutcome> {
@@ -353,8 +353,9 @@ export function createDeploymentFacade(options: {
     }
   }
 
+  // resolveExisting 只可能因 deployment 不存在或身份未解析而拒绝,窄化 rejection reason 避免污染调用方返回类型
   function resolveExisting(deploymentId: number):
-    | { rejection: Extract<DeploymentMutationOutcome, { status: 'rejected' }> }
+    | { rejection: { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved'; message: string } }
     | {
         deployment: NonNullable<ReturnType<typeof getDeploymentById>>
         source: NonNullable<ReturnType<typeof getSourceById>>
@@ -653,7 +654,8 @@ export function createDeploymentFacade(options: {
         return { status: 'rejected', reason: 'not-target-modified', message: '仅目标侧修改可保留为 Candidate Source；当前漂移类型不适用。' } as const
       }
       // 将修改后的目标内容复制到 canonical repository 同级的 adopted-candidates 目录
-      const adoptedDir = join(dirname(options.canonicalRepositoryPath), 'adopted-candidates', `${skill.name}-${deployment.id}`)
+      // 第 645 行已守卫 !options.canonicalRepositoryPath 并 return,闭包内收窄失效故用非空断言
+      const adoptedDir = join(dirname(options.canonicalRepositoryPath!), 'adopted-candidates', `${skill.name}-${deployment.id}`)
       mkdirSync(dirname(adoptedDir), { recursive: true })
       rmSync(adoptedDir, { recursive: true, force: true })
       cpSync(deployment.target_path!, adoptedDir, { recursive: true })

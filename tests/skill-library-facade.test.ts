@@ -1697,6 +1697,7 @@ describe('SourceRecoveryFacade (#91)', () => {
     })
 
     expect(result.status).toBe('completed')
+    if (result.status !== 'completed') throw new Error('expected completed')
     expect(result.canonicalPath).toBe(fixture.canonicalPath)
     // canonical 恢复并可读
     expect(existsSync(fixture.canonicalPath)).toBe(true)

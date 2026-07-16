@@ -332,7 +332,7 @@ export function createSourceRecoveryFacade(options: {
     return (options.db.prepare('SELECT * FROM source_recoveries WHERE id = ?').get(id) as RecoveryRow | undefined) ?? null
   }
 
-  function markRecovery(id: string, status: 'completed' | 'failed' | 'recovery-required', phase: string | null, failureMessage: string | null, journal: unknown): void {
+  function markRecovery(id: string, status: 'completed' | 'failed' | 'recovery-required' | 'previewed', phase: string | null, failureMessage: string | null, journal: unknown): void {
     const completedAt = status === 'completed' ? new Date().toISOString() : null
     options.db.prepare(
       `UPDATE source_recoveries
