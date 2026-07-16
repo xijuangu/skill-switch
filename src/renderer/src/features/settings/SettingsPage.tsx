@@ -5,6 +5,7 @@ import { Button, Input, StatusDot } from '../../shared'
 type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 type ToolConfigView = SettingsView['tools'][number]
 type SourceRootView = Awaited<ReturnType<typeof window.api.getSourceRoots>>[number]
+type SkillLibraryView = Awaited<ReturnType<typeof window.api.getSkillLibrary>>
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<SettingsView | null>(null)
@@ -15,16 +16,19 @@ export function SettingsPage() {
   const [editingPaths, setEditingPaths] = useState<Record<string, string>>({})
   const [retention, setRetention] = useState<number>(20)
   const [sourceRoots, setSourceRoots] = useState<SourceRootView[]>([])
+  const [skillLibrary, setSkillLibrary] = useState<SkillLibraryView | null>(null)
   const [sourceRootBusy, setSourceRootBusy] = useState(false)
   const [sourceRootMessage, setSourceRootMessage] = useState<string | null>(null)
 
   const load = useCallback(async () => {
-    const [s, roots] = await Promise.all([
+    const [s, roots, library] = await Promise.all([
       window.api.getSettings(),
-      window.api.getSourceRoots()
+      window.api.getSourceRoots(),
+      window.api.getSkillLibrary()
     ])
     setSettings(s)
     setSourceRoots(roots)
+    setSkillLibrary(library)
     setRetention(s.backupRetention)
     const pathsMap: Record<string, string> = {}
     for (const t of s.tools) {
@@ -96,7 +100,7 @@ export function SettingsPage() {
     try {
       const result = await window.api.registerSourceRoot(path)
       await refreshSourceRoots()
-      setSourceRootMessage(`已登记源码库，发现 ${result.discovered} 个 Skill`)
+      setSourceRootMessage(`已登记候选来源目录，发现 ${result.discovered} 个 Skill`)
     } catch (error) {
       setSourceRootMessage(error instanceof Error ? error.message : String(error))
     } finally {
@@ -119,7 +123,7 @@ export function SettingsPage() {
   }
 
   const handleDetachSourceRoot = async (root: SourceRootView) => {
-    if (!window.confirm(`解除登记「${root.path}」？\n不会删除源码库中的任何文件。`)) return
+    if (!window.confirm(`解除登记「${root.path}」？\n不会删除候选目录中的任何文件。`)) return
     setSourceRootBusy(true)
     setSourceRootMessage(null)
     try {
@@ -133,7 +137,7 @@ export function SettingsPage() {
     }
   }
 
-  if (!settings) {
+  if (!settings || !skillLibrary) {
     return (
       <div className="space-y-3 p-1 h-full overflow-auto">
         {Array.from({ length: 4 }).map((_, i) => (
@@ -194,17 +198,30 @@ export function SettingsPage() {
       </section>
 
       <section className="mb-8">
+        <div className="flex items-center gap-2 mb-4">
+          <Database className="h-4 w-4 text-foreground-secondary" />
+          <h2 className="text-sm font-semibold">权威源码库</h2>
+        </div>
+        <p className="text-xs text-foreground-secondary mb-2">
+          已整理 Skill 的唯一权威内容位置，由 skill-switch 固定管理。
+        </p>
+        <div className="border border-border rounded-md p-3 font-mono text-xs text-foreground break-all">
+          {skillLibrary.canonicalRepository.path}
+        </div>
+      </section>
+
+      <section className="mb-8">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <FolderTree className="h-4 w-4 text-foreground-secondary" />
-            <h2 className="text-sm font-semibold">权威源码库</h2>
+            <h2 className="text-sm font-semibold">候选来源目录</h2>
           </div>
           <Button variant="primary" onClick={handleAddSourceRoot} disabled={sourceRootBusy} size="sm">
-            登记源码库
+            登记候选目录
           </Button>
         </div>
         <p className="text-xs text-foreground-secondary mb-3">
-          递归发现源码库中的 Skill，但不复制、不移动，也不会自动部署到任何工具。
+          递归发现待整理的 Skill，但不复制、不移动，也不会自动部署到任何工具。
         </p>
         {sourceRootMessage && (
           <div className="mb-3 px-3 py-2 rounded border border-border bg-surface-secondary text-xs text-foreground-secondary">
@@ -213,7 +230,7 @@ export function SettingsPage() {
         )}
         {sourceRoots.length === 0 ? (
           <div className="border border-dashed border-border rounded-md p-4 text-xs text-foreground-muted">
-            尚未登记源码库。
+            尚未登记候选来源目录。
           </div>
         ) : (
           <ul className="space-y-2">

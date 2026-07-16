@@ -24,6 +24,10 @@ export function sourceOriginLabel(origin: SkillSourceView['source_origin']): str
   return labels[origin]
 }
 
+export function sourceRoleLabel(role: SkillSourceView['source_role']): string {
+  return role === 'canonical' ? '权威来源' : '候选来源'
+}
+
 export function ConflictDialog({
   skill,
   onCancel,
@@ -74,7 +78,7 @@ export function ConflictDialog({
                   <div className="font-mono text-foreground break-all">{src.path}</div>
                   <div className="font-mono text-foreground-secondary text-2xs">{src.hash}</div>
                   <div className="text-foreground-muted text-2xs">
-                    {sourceOriginLabel(src.source_origin)} · {src.source_type}
+                    {sourceRoleLabel(src.source_role)} · {sourceOriginLabel(src.source_origin)} · {src.source_type}
                     {sameHashCount > 1 && ` · 与另外 ${sameHashCount - 1} 个来源内容一致`}
                   </div>
                 </div>
@@ -513,7 +517,9 @@ export function ViewMdSourcePicker({
               <div className="flex-1 min-w-0 text-xs space-y-0.5">
                 <div className="font-mono text-foreground break-all">{src.path}</div>
                 <div className="font-mono text-foreground-secondary text-2xs">{src.hash}</div>
-                <div className="text-foreground-muted text-2xs">{sourceOriginLabel(src.source_origin)}</div>
+                <div className="text-foreground-muted text-2xs">
+                  {sourceRoleLabel(src.source_role)} · {sourceOriginLabel(src.source_origin)}
+                </div>
               </div>
             </div>
           </label>

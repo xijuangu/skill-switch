@@ -734,6 +734,7 @@ function SourcePanel({ skill }: { skill: SkillView }) {
 
 function SourceItem({ source }: { source: SkillSourceView }) {
   const [expanded, setExpanded] = useState(false)
+  const roleLabel = source.source_role === 'canonical' ? '权威来源' : '候选来源'
 
   return (
     <div className="border border-border rounded-md">
@@ -742,6 +743,13 @@ function SourceItem({ source }: { source: SkillSourceView }) {
         onClick={() => setExpanded(!expanded)}
       >
         <div className="flex items-center gap-2 min-w-0">
+          <span className={`text-2xs px-1.5 py-0.5 rounded-full border ${
+            source.source_role === 'canonical'
+              ? 'bg-primary-subtle text-primary border-primary/20'
+              : 'bg-warning-subtle text-warning border-warning/20'
+          }`}>
+            {roleLabel}
+          </span>
           <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface-secondary text-foreground-secondary border border-border-subtle">
             {sourceOriginLabel(source.source_origin)}
           </span>

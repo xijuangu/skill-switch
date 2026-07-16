@@ -49,6 +49,7 @@ function mkSrc(partial: Partial<SkillSource> & Pick<SkillSource, 'id' | 'path' |
     skill_id: 7,
     mtime: 100,
     source_type: 'indexed',
+    source_role: 'candidate',
     source_origin: 'legacy',
     source_tool: null,
     source_root_id: null,

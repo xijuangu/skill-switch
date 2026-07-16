@@ -1,9 +1,11 @@
-// SQLite schema 定义 —— skill-switch 中央注册表
+// SQLite schema 定义 —— skill-switch Skill Library 注册表
 // 四张表:source_roots / skills / skill_sources / deployments
 //
 // skill_sources 的 repo_url / commit_sha 列用于 GitHub 安装记录源仓库元数据
 // (MVP 不做更新检查,仅留元数据)。CREATE TABLE 里的列对新建 DB 生效;
 // 对已存在的旧 DB,runMigrations 用 ALTER TABLE ADD COLUMN 补列。
+
+import { isAbsolute, relative, resolve, sep } from 'path'
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS source_roots (
@@ -28,6 +30,7 @@ CREATE TABLE IF NOT EXISTS skill_sources (
   hash TEXT NOT NULL,
   mtime INTEGER NOT NULL,
   source_type TEXT NOT NULL,
+  source_role TEXT NOT NULL DEFAULT 'candidate' CHECK (source_role IN ('candidate', 'canonical')),
   source_origin TEXT NOT NULL DEFAULT 'legacy',
   source_tool TEXT,
   source_root_id INTEGER,
@@ -64,7 +67,10 @@ CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_too
  * 对老 DB 做幂等列迁移:逐列检查 pragma table_info,缺失则 ALTER TABLE ADD COLUMN。
  * 新建 DB 的 CREATE TABLE 已含这些列,迁移会跳过。
  */
-export function runMigrations(db: import('better-sqlite3').Database): void {
+export function runMigrations(
+  db: import('better-sqlite3').Database,
+  canonicalRepositoryPath?: string
+): void {
   const cols = db.prepare('PRAGMA table_info(skill_sources)').all() as { name: string }[]
   const names = new Set(cols.map((c) => c.name))
   if (!names.has('repo_url')) {
@@ -86,6 +92,25 @@ export function runMigrations(db: import('better-sqlite3').Database): void {
   }
   if (!names.has('source_root_id')) {
     db.exec('ALTER TABLE skill_sources ADD COLUMN source_root_id INTEGER')
+  }
+  if (!names.has('source_role')) {
+    db.exec(
+      "ALTER TABLE skill_sources ADD COLUMN source_role TEXT NOT NULL DEFAULT 'candidate' CHECK (source_role IN ('candidate', 'canonical'))"
+    )
+    if (canonicalRepositoryPath && names.has('path')) {
+      const repository = resolve(canonicalRepositoryPath)
+      const rows = db.prepare('SELECT id, path FROM skill_sources').all() as Array<{
+        id: number
+        path: string
+      }>
+      const update = db.prepare("UPDATE skill_sources SET source_role = 'canonical' WHERE id = ?")
+      for (const row of rows) {
+        const rel = relative(repository, resolve(row.path))
+        if (rel.length > 0 && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
+          update.run(row.id)
+        }
+      }
+    }
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS source_roots (

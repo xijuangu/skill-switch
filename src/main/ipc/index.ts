@@ -50,6 +50,7 @@ import {
 import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 import { readToolDrifts } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
+import { createSkillLibraryFacade } from '../services/skill-library-facade'
 import {
   detachSourceRoot,
   listSourceRoots,
@@ -236,6 +237,10 @@ function assertDeployMode(value: unknown): DeployMode {
 }
 
 export function registerIpcHandlers(db: DB): void {
+  const skillLibraryFacade = createSkillLibraryFacade({
+    db,
+    canonicalRepositoryPath: SKILLS_DIR
+  })
   const deploymentFacade = createDeploymentFacade({
     db,
     backupsDir: BACKUPS_DIR,
@@ -262,6 +267,8 @@ export function registerIpcHandlers(db: DB): void {
     const toolConfigs = resolveToolConfigs(settings, homedir())
     return readSkillsView(db, toolConfigs, deploymentFacade.inspect)
   })
+
+  ipcMain.handle('getSkillLibrary', async () => skillLibraryFacade.read())
 
   ipcMain.handle('getSettings', async () => {
     const settings = readSettings(SETTINGS_PATH)

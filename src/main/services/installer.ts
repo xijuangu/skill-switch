@@ -213,7 +213,8 @@ export function installFromGitHub(
         {
           repoUrl: parsed.repoWebUrl,
           commitSha,
-          origin: 'github'
+          origin: 'github',
+          role: 'canonical'
         }
       )
       return id
@@ -272,7 +273,7 @@ export function installFromZip(
         hash,
         mtime,
         'central-repo',
-        { origin: 'zip' }
+        { origin: 'zip', role: 'canonical' }
       )
       return id
     })

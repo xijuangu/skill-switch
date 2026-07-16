@@ -1,6 +1,6 @@
 // skill_sources 表 DAO
 import type { DB } from '../database'
-import type { SkillSource, SourceOrigin, SourceType } from '../../types'
+import type { SkillSource, SourceOrigin, SourceRole, SourceType } from '../../types'
 
 /**
  * Upsert 一个 source:按 (skill_id, path) UNIQUE 约束。
@@ -18,39 +18,67 @@ export function upsertSource(
     repoUrl?: string
     commitSha?: string
     origin?: SourceOrigin
+    role?: SourceRole
     tool?: string | null
     rootId?: number | null
   } = {}
 ): void {
   const sourceOrigin = metadata.origin ?? 'legacy'
+  const sourceRole = metadata.role ?? 'candidate'
   const sourceTool = metadata.tool ?? null
   const sourceRootId = metadata.rootId ?? null
   db.prepare(
-    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, source_origin, source_tool, source_root_id, discovered_at, repo_url, commit_sha)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO skill_sources (skill_id, path, hash, mtime, source_type, source_role, source_origin, source_tool, source_root_id, discovered_at, repo_url, commit_sha)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(skill_id, path) DO UPDATE SET
        hash = excluded.hash,
        mtime = excluded.mtime,
-       source_type = excluded.source_type,
+       source_type = CASE
+         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+           THEN skill_sources.source_type
+         ELSE excluded.source_type
+       END,
+       source_role = CASE
+         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+           THEN skill_sources.source_role
+         ELSE excluded.source_role
+       END,
        source_origin = CASE
+         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+           THEN skill_sources.source_origin
          WHEN skill_sources.source_root_id IS NOT NULL AND excluded.source_root_id IS NULL
            THEN skill_sources.source_origin
          ELSE excluded.source_origin
        END,
        source_tool = CASE
+         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+           THEN skill_sources.source_tool
          WHEN skill_sources.source_root_id IS NOT NULL AND excluded.source_root_id IS NULL
            THEN skill_sources.source_tool
          ELSE excluded.source_tool
        END,
-       source_root_id = COALESCE(excluded.source_root_id, skill_sources.source_root_id),
-       repo_url = excluded.repo_url,
-       commit_sha = excluded.commit_sha`
+       source_root_id = CASE
+         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+           THEN skill_sources.source_root_id
+         ELSE COALESCE(excluded.source_root_id, skill_sources.source_root_id)
+       END,
+       repo_url = CASE
+         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+           THEN skill_sources.repo_url
+         ELSE excluded.repo_url
+       END,
+       commit_sha = CASE
+         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+           THEN skill_sources.commit_sha
+         ELSE excluded.commit_sha
+       END`
   ).run(
     skillId,
     path,
     hash,
     mtime,
     sourceType,
+    sourceRole,
     sourceOrigin,
     sourceTool,
     sourceRootId,
@@ -77,7 +105,7 @@ export function moveSourceToSkill(
   db.prepare(
     `UPDATE skill_sources
      SET skill_id = ?, hash = ?, mtime = ?, source_type = 'indexed',
-         source_origin = 'local', source_tool = NULL, source_root_id = ?,
+         source_role = 'candidate', source_origin = 'local', source_tool = NULL, source_root_id = ?,
          repo_url = NULL, commit_sha = NULL
      WHERE id = ?`
   ).run(skillId, hash, mtime, rootId, sourceId)

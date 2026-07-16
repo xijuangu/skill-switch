@@ -6,6 +6,7 @@
 
 import Database from 'better-sqlite3'
 import { SCHEMA, runMigrations } from './schema'
+import { SKILLS_DIR } from '../paths'
 
 export type DB = Database.Database
 
@@ -28,12 +29,12 @@ function withMutex<T>(fn: () => T): T {
  * 创建/打开 SQLite 数据库并初始化 schema。
  * @param dbPath 数据库文件路径
  */
-export function createDatabase(dbPath: string): DB {
+export function createDatabase(dbPath: string, canonicalRepositoryPath: string = SKILLS_DIR): DB {
   const db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   db.exec(SCHEMA)
-  runMigrations(db)
+  runMigrations(db, canonicalRepositoryPath)
   return db
 }
 

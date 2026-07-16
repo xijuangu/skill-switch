@@ -7,6 +7,37 @@ import { runMigrations } from '../src/main/db/schema'
 import { createDatabase } from '../src/main/db/database'
 
 describe('database migrations', () => {
+  test('classifies legacy Source rows by the fixed Canonical Repository without changing IDs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'skill-switch-source-role-'))
+    const canonicalRepository = join(dir, 'canonical')
+    const db = new Database(':memory:')
+    db.exec(`
+      CREATE TABLE skill_sources (
+        id INTEGER PRIMARY KEY,
+        path TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        repo_url TEXT,
+        commit_sha TEXT
+      );
+      CREATE TABLE deployments (id INTEGER PRIMARY KEY);
+    `)
+    db.prepare(
+      'INSERT INTO skill_sources (id, path, source_type) VALUES (?, ?, ?)'
+    ).run(11, join(canonicalRepository, 'engineering', 'demo'), 'central-repo')
+    db.prepare(
+      'INSERT INTO skill_sources (id, path, source_type) VALUES (?, ?, ?)'
+    ).run(27, join(dir, 'discovered', 'demo'), 'indexed')
+
+    runMigrations(db, canonicalRepository)
+
+    expect(db.prepare('SELECT id, source_role FROM skill_sources ORDER BY id').all()).toEqual([
+      { id: 11, source_role: 'canonical' },
+      { id: 27, source_role: 'candidate' }
+    ])
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   test('createDatabase upgrades the pre-identity schema before installing identity constraints', () => {
     const dir = mkdtempSync(join(tmpdir(), 'skill-switch-schema-'))
     const path = join(dir, 'registry.db')

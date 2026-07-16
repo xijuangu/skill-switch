@@ -9,11 +9,11 @@ Modern AI coding tools each maintain their own local skill directory (`~/.trae-c
 ## Core Flow
 
 ```
-Register an authoritative Source Root and recursively discover its Skills
+Establish the fixed Canonical Repository (~/.skill-switch/skills)
          ↓
-Scan tool skill dirs to import unmanaged legacy content and observed link subscriptions
+Register Candidate Source directories and scan tool dirs for legacy content and observed link subscriptions
          ↓
-Index into central registry (~/.skill-switch/ccswitch.db — hybrid: index-only for existing, central-repo for newly installed)
+Index into the registry with an explicit canonical / candidate Source role
          ↓
 User picks a skill → "Deploy to..."
          ↓
@@ -27,8 +27,9 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 ## Scope (MVP)
 
 - Scan skills from multiple tool directories, including unmanaged valid directory symlinks; linked aliases discover the authoritative real Source and are recorded as read-only Observed Subscriptions. They become managed Deployments only after explicit adoption; managed targets are excluded from re-import (no file moving for existing skills)
-- Register external authoritative Source Roots, recursively discover multiple Skills, rescan or detach metadata without deleting source files
-- Install new skills from GitHub repo (single + subpath), ZIP, or local directory
+- Use `~/.skill-switch/skills` as the fixed Canonical Repository; external registered roots and tool scans produce Candidate Sources
+- Register external Candidate Source directories, recursively discover multiple Skills, rescan or detach metadata without deleting source files
+- Install new skills from GitHub repo (single + subpath) or ZIP into the Canonical Repository; adding a local directory records a Candidate Source
 - Deploy via copy / symlink / Windows junction; every linked-to-copy degradation requires confirmation
 - Stable Source / Discovery Target / Deployment identities; renderer mutation calls never submit paths
 - Deployment manifest + authoritative per-Deployment inspection, including recovery-required crash evidence

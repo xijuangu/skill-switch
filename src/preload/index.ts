@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 const api = {
   scan: () => ipcRenderer.invoke('scan'),
   getSkills: () => ipcRenderer.invoke('getSkills'),
+  getSkillLibrary: () => ipcRenderer.invoke('getSkillLibrary'),
   getSettings: () => ipcRenderer.invoke('getSettings'),
   getSourceRoots: () => ipcRenderer.invoke('getSourceRoots'),
   registerSourceRoot: (path: string) => ipcRenderer.invoke('registerSourceRoot', path),

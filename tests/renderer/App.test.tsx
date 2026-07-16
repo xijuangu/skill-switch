@@ -13,6 +13,10 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
   const api: Window['api'] = {
     scan: vi.fn().mockResolvedValue({ tools: [], totalScanned: 0, totalUpserted: 0 }),
     getSkills: vi.fn().mockResolvedValue([]),
+    getSkillLibrary: vi.fn().mockResolvedValue({
+      canonicalRepository: { path: '/canonical' },
+      skills: []
+    }),
     getSettings: vi.fn().mockResolvedValue({
       tools: [],
       backupRetention: 5,
@@ -80,11 +84,15 @@ describe('App (integration)', () => {
     expect(screen.getByRole('button', { name: '技能' })).toBeInTheDocument()
   })
 
-  it('shows registered authoritative Source Roots separately from tool targets', async () => {
+  it('shows the fixed Canonical Repository separately from Candidate Source directories', async () => {
     mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical/skills' },
+        skills: []
+      }),
       getSourceRoots: vi.fn().mockResolvedValue([{
         id: 1,
-        path: '/canonical/skills',
+        path: '/imports/team-skills',
         created_at: '2026-07-15T00:00:00.000Z',
         last_scanned_at: '2026-07-15T01:00:00.000Z',
         last_scan_error: null
@@ -94,6 +102,8 @@ describe('App (integration)', () => {
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     expect(await screen.findByText('权威源码库')).toBeInTheDocument()
     expect(screen.getByText('/canonical/skills')).toBeInTheDocument()
+    expect(screen.getByText('候选来源目录')).toBeInTheDocument()
+    expect(screen.getByText('/imports/team-skills')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重新扫描' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '解除登记' })).toBeInTheDocument()
   })
@@ -175,6 +185,7 @@ function buildFakeSkills(n: number): SkillWithConflictView[] {
       hash: `hash${i}`,
       mtime: Date.now(),
       source_type: 'indexed',
+      source_role: 'candidate',
       source_origin: 'scan',
       source_tool: 'trae',
       discovered_at: new Date().toISOString(),
@@ -263,6 +274,51 @@ describe('SkillsPage 1000-row smoke (#56)', () => {
     await userEvent.click(screen.getByRole('button', { name: '已部署' }))
     expect(screen.queryByText('skill-0001')).not.toBeInTheDocument()
   })
+
+  it('distinguishes the Canonical Source from Candidate Sources', () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources = [
+      {
+        ...skill.sources[0],
+        id: 10,
+        path: '/canonical/demo',
+        source_role: 'canonical'
+      },
+      {
+        ...skill.sources[0],
+        id: 11,
+        path: '/discovered/demo',
+        source_role: 'candidate'
+      }
+    ]
+    skill.conflict = {
+      skillId: skill.id,
+      sourceCount: 2,
+      distinctHashCount: 1,
+      hasConflict: false,
+      primarySource: skill.sources[0]
+    }
+    mockWindowApi()
+
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={[skill]}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+
+    expect(screen.getByText('权威来源')).toBeInTheDocument()
+    expect(screen.getByText('候选来源')).toBeInTheDocument()
+  })
 })
 
 // #62: 多版本冲突时,详情列来源应按 hash 分组渲染(版本 A / 版本 B 标题)
@@ -276,18 +332,21 @@ function buildConflictSkill(): SkillWithConflictView {
       {
         id: 1, skill_id: 1, path: '/repo/v1', hash: 'aaaa1111aaaa',
         mtime: Date.now(), source_type: 'indexed', source_origin: 'scan',
+        source_role: 'candidate',
         source_tool: 'trae', discovered_at: new Date().toISOString(),
         repo_url: null, commit_sha: null,
       },
       {
         id: 2, skill_id: 1, path: '/repo/v1-dup', hash: 'aaaa1111aaaa',
         mtime: Date.now(), source_type: 'indexed', source_origin: 'scan',
+        source_role: 'candidate',
         source_tool: 'trae', discovered_at: new Date().toISOString(),
         repo_url: null, commit_sha: null,
       },
       {
         id: 3, skill_id: 1, path: '/repo/v2', hash: 'bbbb2222bbbb',
         mtime: Date.now(), source_type: 'indexed', source_origin: 'local',
+        source_role: 'candidate',
         source_tool: null, discovered_at: new Date().toISOString(),
         repo_url: null, commit_sha: null,
       },

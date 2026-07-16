@@ -2,11 +2,12 @@
 
 ## 技能
 
-- 扫描后，技能行显示 source 类型、source 数量和已部署工具。
+- 扫描后，技能行显示 source 类型、source 数量和已部署工具；详情中的每个来源明确标记为“权威来源”或“候选来源”。
 - Discovery Target 中未受管理、且指向有效 Skill 目录的软链接会登记为只读“外部订阅”；Source 路径必须是 `realpath` 后的权威目录，link path 不得成为 Source。两个 Target 的 alias 指向同一目录时应显示一个 Source、两个外部订阅；接管前不显示重新部署或取消部署，接管时重新校验链接且不改文件，接管后才可独立取消。copy / symlink / junction managed target 均不反向登记为 Source，broken link 与文件 link 被安全跳过且不中断整次扫描。
 - 展开 Source 后，“发现时间”按当前系统本地时区显示，不直接展示 UTC `Z` 字符串。
 - “安装”默认打开 GitHub 安装；“添加本地”直接打开本地目录页。
-- 在“设置 → 权威源码库”登记一个包含多层目录和多个 `SKILL.md` 的 Root；系统递归发现每个真实 Skill，但不向任何工具自动写入文件。
+- “设置 → 权威源码库”显示固定的 `~/.skill-switch/skills`，不提供任意路径修改入口。
+- 在“设置 → 候选来源目录”登记一个包含多层目录和多个 `SKILL.md` 的 Root；系统递归发现每个真实 Skill 为 Candidate Source，但不向任何工具自动写入文件。
 - 对同一个 Root 重新扫描可发现新增 Skill；解除登记只删除注册元数据，Root 和 Skill 文件仍保留在磁盘。
 - 从 Root 发现两个 Skill 后，只部署其中一个到选定 Discovery Target；未选择的 Skill 不应出现在该工具，取消单个订阅不删除 Source 或其他 Target 的订阅。
 - 多 source 冲突时，部署和查看 SKILL.md 都要求选择具体 source。

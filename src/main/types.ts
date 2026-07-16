@@ -3,6 +3,7 @@
 /** skill 来源类型:索引(不搬文件)/ 中央仓库实体(新安装) */
 export type SourceType = 'indexed' | 'central-repo'
 export type SourceOrigin = 'scan' | 'local' | 'github' | 'zip' | 'legacy'
+export type SourceRole = 'candidate' | 'canonical'
 
 /** 部署模式 */
 export type DeployMode = 'symlink' | 'junction' | 'copy'
@@ -16,7 +17,7 @@ export interface Skill {
   created_at: string
 }
 
-/** 用户登记的权威内容根目录。 */
+/** 用户登记的 Candidate Source 发现根目录。 */
 export interface SourceRoot {
   id: number
   path: string
@@ -33,6 +34,7 @@ export interface SkillSource {
   hash: string
   mtime: number
   source_type: SourceType
+  source_role: SourceRole
   source_origin: SourceOrigin
   source_tool: string | null
   /** 由 Source Root 发现时指向所属根；其他来源为空。 */

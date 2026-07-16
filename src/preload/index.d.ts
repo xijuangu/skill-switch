@@ -14,6 +14,7 @@ export interface SkillSourceView {
   hash: string
   mtime: number
   source_type: 'indexed' | 'central-repo'
+  source_role: 'candidate' | 'canonical'
   source_origin: 'scan' | 'local' | 'github' | 'zip' | 'legacy'
   source_tool: string | null
   discovered_at: string
@@ -39,6 +40,18 @@ export interface SkillWithConflictView {
   conflict: ConflictStatusView
   /** 每条 deployment 附带与工具页一致的完整 drift 状态 */
   deployments: SkillDeploymentView[]
+}
+
+export type SkillLibrarySourceView = SkillSourceView
+
+export interface SkillLibraryReadModelView {
+  canonicalRepository: { path: string }
+  skills: Array<{
+    id: number
+    name: string
+    canonicalSource: SkillLibrarySourceView | null
+    candidates: SkillLibrarySourceView[]
+  }>
 }
 
 /** issue #23:Skills 页展开视图用,DeploymentView + 当前状态描述 */
@@ -248,6 +261,7 @@ declare global {
     api: {
       scan: () => Promise<MultiScanResultView>
       getSkills: () => Promise<SkillWithConflictView[]>
+      getSkillLibrary: () => Promise<SkillLibraryReadModelView>
       getSettings: () => Promise<SettingsView>
       getSourceRoots: () => Promise<SourceRootView[]>
       registerSourceRoot: (path: string) => Promise<SourceRootScanResultView>
