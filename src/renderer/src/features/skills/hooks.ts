@@ -25,72 +25,77 @@ interface FlowDeps {
   toastError: (msg: string) => void
 }
 
+/** busy-guard 包裹器,消除跨 hook 的重复 try/catch/finally 模式。 */
+async function withBusy<T>(deps: FlowDeps, fn: () => Promise<T>): Promise<T | undefined> {
+  deps.setActionBusy(true)
+  try {
+    return await fn()
+  } catch (e) {
+    deps.toastError(e instanceof Error ? e.message : String(e))
+    return undefined
+  } finally {
+    deps.setActionBusy(false)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // useConsolidationFlow — 单 Skill 整理 + 撤销
 // ---------------------------------------------------------------------------
+
+interface ConsolidationState {
+  target: { skill: SkillView; source: SkillSourceView }
+  preview: ConsolidationPreview | null
+}
 
 export function useConsolidationFlow(
   deps: FlowDeps,
   refreshLibrary: () => Promise<SkillLibraryView>
 ) {
-  const [target, setTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
-  const [preview, setPreview] = useState<ConsolidationPreview | null>(null)
+  // target + preview 打包为单个 state 对象,消除 Data Clumps
+  const [state, setState] = useState<ConsolidationState | null>(null)
   const [batches, setBatches] = useState<ConsolidationBatch[]>([])
   const [undoBatch, setUndoBatch] = useState<UndoBatch | null>(null)
 
+  const target = state?.target ?? null
+  const preview = state?.preview ?? null
+
   const open = useCallback((skill: SkillView, source: SkillSourceView) => {
-    setTarget({ skill, source })
-    setPreview(null)
+    setState({ target: { skill, source }, preview: null })
   }, [])
 
   const close = useCallback(() => {
     if (deps.actionBusy) return
-    setTarget(null)
-    setPreview(null)
+    setState(null)
   }, [deps.actionBusy])
 
   const handlePreview = useCallback(async (canonicalRelativeParent: string) => {
-    if (!target) return
-    deps.setActionBusy(true)
-    try {
+    if (!state) return
+    await withBusy(deps, async () => {
       const p = await window.api.previewConsolidation({
-        candidateSourceId: target.source.id,
+        candidateSourceId: state.target.source.id,
         canonicalRelativeParent: canonicalRelativeParent.trim()
       })
-      setPreview(p)
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
-  }, [target, deps])
+      setState((prev) => prev ? { ...prev, preview: p } : null)
+    })
+  }, [state, deps])
 
   const handleConfirm = useCallback(async () => {
-    if (!preview) return
-    deps.setActionBusy(true)
-    try {
-      const outcome = await window.api.confirmConsolidation(preview.confirmationId)
+    if (!state?.preview) return
+    await withBusy(deps, async () => {
+      const outcome = await window.api.confirmConsolidation(state.preview!.confirmationId)
       if (outcome.status !== 'completed') {
         deps.toastError('message' in outcome ? outcome.message : '整理未完成，请刷新后重试。')
         return
       }
-      deps.success(`「${preview.skillName}」整理完成；请按需手动部署`)
-      setTarget(null)
-      setPreview(null)
-      const library = await refreshLibrary()
-      setBatches(library.consolidationBatches ?? [])
-      await deps.onRefresh()
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
-  }, [preview, deps, refreshLibrary])
+      deps.success(`「${state.preview!.skillName}」整理完成；请按需手动部署`)
+      setState(null)
+      await Promise.all([refreshLibrary(), deps.onRefresh()])
+    })
+  }, [state, deps, refreshLibrary])
 
   const handleUndo = useCallback(async () => {
     if (!undoBatch) return
-    deps.setActionBusy(true)
-    try {
+    await withBusy(deps, async () => {
       const outcome = await window.api.undoConsolidation(undoBatch.batch.id)
       if (outcome.status !== 'undone') {
         deps.toastError('message' in outcome ? outcome.message : '撤销未完成，请刷新后重试。')
@@ -98,14 +103,8 @@ export function useConsolidationFlow(
       }
       deps.success(`已撤销「${undoBatch.item.skillName}」的整理`)
       setUndoBatch(null)
-      const library = await refreshLibrary()
-      setBatches(library.consolidationBatches ?? [])
-      await deps.onRefresh()
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
+      await Promise.all([refreshLibrary(), deps.onRefresh()])
+    })
   }, [undoBatch, deps, refreshLibrary])
 
   const applyLibrary = useCallback((library: SkillLibraryView) => {
@@ -123,62 +122,83 @@ export function useConsolidationFlow(
 // useBatchConsolidationFlow — 批量整理
 // ---------------------------------------------------------------------------
 
+interface BatchConsolidationState {
+  drafts: ConsolidationDraft[]
+  preview: ConsolidationBatchPreview | null
+}
+
 export function useBatchConsolidationFlow(
   deps: FlowDeps,
   refreshLibrary: () => Promise<SkillLibraryView>
 ) {
   const [plan, setPlan] = useState<ConsolidationPlanItem[]>([])
-  const [drafts, setDrafts] = useState<ConsolidationDraft[] | null>(null)
-  const [preview, setPreview] = useState<ConsolidationBatchPreview | null>(null)
+  // drafts + preview 打包为单个 state 对象,消除 Data Clumps
+  const [state, setState] = useState<BatchConsolidationState | null>(null)
+
+  const drafts = state?.drafts ?? null
+  const preview = state?.preview ?? null
 
   const open = useCallback(() => {
-    setDrafts(plan.map((item) => ({
-      ...item,
-      selected: item.selectedByDefault,
-      canonicalRelativeParent: item.canonicalRelativeParent
-    })))
-    setPreview(null)
+    setState({
+      drafts: plan.map((item) => ({
+        ...item,
+        selected: item.selectedByDefault,
+        canonicalRelativeParent: item.canonicalRelativeParent
+      })),
+      preview: null
+    })
   }, [plan])
 
   const close = useCallback(() => {
     if (deps.actionBusy) return
-    setDrafts(null)
-    setPreview(null)
+    setState(null)
   }, [deps.actionBusy])
 
   const applyBatchParent = useCallback((parent: string) => {
-    setDrafts((items) => items?.map((draft) =>
-      draft.selected ? { ...draft, canonicalRelativeParent: parent } : draft
-    ) ?? null)
+    setState((prev) => prev ? {
+      ...prev,
+      drafts: prev.drafts.map((draft) =>
+        draft.selected ? { ...draft, canonicalRelativeParent: parent } : draft
+      )
+    } : null)
   }, [])
 
   const toggleDraft = useCallback((skillId: number, selected: boolean) => {
-    setDrafts((items) => items?.map((item) =>
-      item.skillId === skillId ? { ...item, selected } : item
-    ) ?? null)
+    setState((prev) => prev ? {
+      ...prev,
+      drafts: prev.drafts.map((item) =>
+        item.skillId === skillId ? { ...item, selected } : item
+      )
+    } : null)
   }, [])
 
   const draftParentChange = useCallback((skillId: number, parent: string) => {
-    setDrafts((items) => items?.map((item) =>
-      item.skillId === skillId ? { ...item, canonicalRelativeParent: parent } : item
-    ) ?? null)
+    setState((prev) => prev ? {
+      ...prev,
+      drafts: prev.drafts.map((item) =>
+        item.skillId === skillId ? { ...item, canonicalRelativeParent: parent } : item
+      )
+    } : null)
   }, [])
 
   /** 冲突解决后更新对应 draft (#95 hook 间通信) */
   const updateDraft = useCallback((skillId: number, patch: Partial<ConsolidationDraft>) => {
-    setDrafts((items) => items?.map((item) =>
-      item.skillId === skillId ? { ...item, ...patch } : item
-    ) ?? null)
+    setState((prev) => prev ? {
+      ...prev,
+      drafts: prev.drafts.map((item) =>
+        item.skillId === skillId ? { ...item, ...patch } : item
+      )
+    } : null)
   }, [])
 
   const handlePreview = useCallback(async () => {
-    const selectedDrafts = drafts?.filter((draft) => draft.selected) ?? []
+    if (!state) return
+    const selectedDrafts = state.drafts.filter((draft) => draft.selected)
     if (selectedDrafts.length === 0) {
       deps.toastError('请至少选择一个无冲突 Skill')
       return
     }
-    deps.setActionBusy(true)
-    try {
+    await withBusy(deps, async () => {
       const p = await window.api.previewConsolidationBatch({
         items: selectedDrafts.map((draft) => ({
           candidateSourceId: draft.conflictResolution?.authoritativeSourceId ?? draft.versions[0].candidateSourceIds[0],
@@ -186,35 +206,23 @@ export function useBatchConsolidationFlow(
           ...(draft.conflictResolution ? { conflictResolution: draft.conflictResolution } : {})
         }))
       })
-      setPreview(p)
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
-  }, [drafts, deps])
+      setState((prev) => prev ? { ...prev, preview: p } : null)
+    })
+  }, [state, deps])
 
   const handleConfirm = useCallback(async () => {
-    if (!preview) return
-    deps.setActionBusy(true)
-    try {
-      const outcome = await window.api.confirmConsolidation(preview.confirmationId)
+    if (!state?.preview) return
+    await withBusy(deps, async () => {
+      const outcome = await window.api.confirmConsolidation(state.preview!.confirmationId)
       if (outcome.status !== 'completed') {
         deps.toastError('message' in outcome ? outcome.message : '整理未完成，请刷新后重试。')
         return
       }
-      deps.success(`已整理 ${preview.items.length} 个 Skill；请按需手动部署`)
-      setDrafts(null)
-      setPreview(null)
-      const library = await refreshLibrary()
-      setPlan(library.consolidationPlan ?? [])
-      await deps.onRefresh()
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
-  }, [preview, deps, refreshLibrary])
+      deps.success(`已整理 ${state.preview!.items.length} 个 Skill；请按需手动部署`)
+      setState(null)
+      await Promise.all([refreshLibrary(), deps.onRefresh()])
+    })
+  }, [state, deps, refreshLibrary])
 
   const applyLibrary = useCallback((library: SkillLibraryView) => {
     setPlan(library.consolidationPlan ?? [])
@@ -239,8 +247,7 @@ export function useConflictResolutionFlow(
   const [editor, setEditor] = useState<ConflictResolutionEditor | null>(null)
 
   const open = useCallback(async (draft: ConsolidationDraft) => {
-    deps.setActionBusy(true)
-    try {
+    await withBusy(deps, async () => {
       const preview = await window.api.previewConflictResolution(draft.skillId)
       setEditor({
         draftSkillId: draft.skillId,
@@ -257,11 +264,7 @@ export function useConflictResolutionFlow(
           }]
         }))
       })
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
+    })
   }, [deps])
 
   const apply = useCallback(() => {
@@ -329,67 +332,60 @@ export function useConflictResolutionFlow(
 // useSourceRelocationFlow — Source 移动 + 撤销
 // ---------------------------------------------------------------------------
 
+interface RelocationState {
+  target: { skill: SkillView; source: SkillSourceView }
+  preview: SourceRelocationPreview | null
+}
+
 export function useSourceRelocationFlow(
   deps: FlowDeps,
   refreshLibrary: () => Promise<SkillLibraryView>
 ) {
-  const [target, setTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
-  const [preview, setPreview] = useState<SourceRelocationPreview | null>(null)
+  // target + preview 打包为单个 state 对象,消除 Data Clumps
+  const [state, setState] = useState<RelocationState | null>(null)
   const [relocations, setRelocations] = useState<SourceRelocation[]>([])
   const [undo, setUndo] = useState<SourceRelocation | null>(null)
 
+  const target = state?.target ?? null
+  const preview = state?.preview ?? null
+
   const open = useCallback((skill: SkillView, source: SkillSourceView) => {
-    setTarget({ skill, source })
-    setPreview(null)
+    setState({ target: { skill, source }, preview: null })
   }, [])
 
   const close = useCallback(() => {
     if (deps.actionBusy) return
-    setTarget(null)
-    setPreview(null)
+    setState(null)
   }, [deps.actionBusy])
 
   const handlePreview = useCallback(async (canonicalRelativeParent: string) => {
-    if (!target) return
-    deps.setActionBusy(true)
-    try {
-      setPreview(await window.api.previewSourceRelocation({
-        sourceId: target.source.id,
+    if (!state) return
+    await withBusy(deps, async () => {
+      const p = await window.api.previewSourceRelocation({
+        sourceId: state.target.source.id,
         canonicalRelativeParent: canonicalRelativeParent.trim()
-      }))
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
-  }, [target, deps])
+      })
+      setState((prev) => prev ? { ...prev, preview: p } : null)
+    })
+  }, [state, deps])
 
   const handleConfirm = useCallback(async () => {
-    if (!preview) return
-    deps.setActionBusy(true)
-    try {
-      const outcome = await window.api.confirmSourceRelocation(preview.confirmationId)
+    if (!state?.preview) return
+    await withBusy(deps, async () => {
+      const outcome = await window.api.confirmSourceRelocation(state.preview!.confirmationId)
       if (outcome.status !== 'completed') {
         deps.toastError('message' in outcome ? outcome.message : '移动未完成，请刷新后重试。')
         return
       }
-      deps.success(`已移动「${preview.skillName}」的权威 Source`)
-      setTarget(null)
-      setPreview(null)
-      const library = await refreshLibrary()
-      setRelocations(library.sourceRelocations ?? [])
-      await deps.onRefresh()
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
-  }, [preview, deps, refreshLibrary])
+      deps.success(`已移动「${state.preview!.skillName}」的权威 Source`)
+      setState(null)
+      await Promise.all([refreshLibrary(), deps.onRefresh()])
+    })
+  }, [state, deps, refreshLibrary])
 
   const handleUndo = useCallback(async () => {
     if (!undo) return
-    deps.setActionBusy(true)
-    try {
+    await withBusy(deps, async () => {
       const outcome = await window.api.undoSourceRelocation(undo.id)
       if (outcome.status !== 'undone') {
         deps.toastError('message' in outcome ? outcome.message : '撤销移动未完成，请刷新后重试。')
@@ -397,14 +393,8 @@ export function useSourceRelocationFlow(
       }
       deps.success(`已撤销「${undo.skillName}」的 Source 移动`)
       setUndo(null)
-      const library = await refreshLibrary()
-      setRelocations(library.sourceRelocations ?? [])
-      await deps.onRefresh()
-    } catch (e) {
-      deps.toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      deps.setActionBusy(false)
-    }
+      await Promise.all([refreshLibrary(), deps.onRefresh()])
+    })
   }, [undo, deps, refreshLibrary])
 
   const applyLibrary = useCallback((library: SkillLibraryView) => {
