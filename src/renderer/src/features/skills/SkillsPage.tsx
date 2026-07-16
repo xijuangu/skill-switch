@@ -93,14 +93,14 @@ export function SkillsPage({
 
   const { success, error: toastError, info } = useToast()
 
-  const refreshConsolidationBatches = async () => {
+  const refreshSkillLibrary = async () => {
     const library = await window.api.getSkillLibrary()
     setConsolidationBatches(library.consolidationBatches ?? [])
     setConsolidationPlan(library.consolidationPlan ?? [])
   }
 
   useEffect(() => {
-    refreshConsolidationBatches().catch((e) => {
+    refreshSkillLibrary().catch((e) => {
       toastError(e instanceof Error ? e.message : String(e))
     })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -371,7 +371,7 @@ export function SkillsPage({
       setConsolidationTarget(null)
       setCanonicalRelativeParent('')
       setConsolidationPreview(null)
-      await Promise.all([onRefresh(), refreshConsolidationBatches()])
+      await Promise.all([onRefresh(), refreshSkillLibrary()])
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -390,7 +390,7 @@ export function SkillsPage({
       }
       success(`已撤销「${undoBatch.item.skillName}」的整理`)
       setUndoBatch(null)
-      await Promise.all([onRefresh(), refreshConsolidationBatches()])
+      await Promise.all([onRefresh(), refreshSkillLibrary()])
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -448,7 +448,7 @@ export function SkillsPage({
       success(`已整理 ${batchConsolidationPreview.items.length} 个 Skill；请按需手动部署`)
       setConsolidationDrafts(null)
       setBatchConsolidationPreview(null)
-      await Promise.all([onRefresh(), refreshConsolidationBatches()])
+      await Promise.all([onRefresh(), refreshSkillLibrary()])
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
     } finally {
