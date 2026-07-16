@@ -17,6 +17,7 @@ import {
   UndeployDialog,
   RemoveRegistryDialog,
   sourceOriginLabel,
+  sourceRoleLabel,
   type SkillView,
   type SkillSourceView,
   type DeployResultView,
@@ -734,7 +735,6 @@ function SourcePanel({ skill }: { skill: SkillView }) {
 
 function SourceItem({ source }: { source: SkillSourceView }) {
   const [expanded, setExpanded] = useState(false)
-  const roleLabel = source.source_role === 'canonical' ? '权威来源' : '候选来源'
 
   return (
     <div className="border border-border rounded-md">
@@ -748,7 +748,7 @@ function SourceItem({ source }: { source: SkillSourceView }) {
               ? 'bg-primary-subtle text-primary border-primary/20'
               : 'bg-warning-subtle text-warning border-warning/20'
           }`}>
-            {roleLabel}
+            {sourceRoleLabel(source.source_role)}
           </span>
           <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface-secondary text-foreground-secondary border border-border-subtle">
             {sourceOriginLabel(source.source_origin)}

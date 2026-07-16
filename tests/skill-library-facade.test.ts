@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'vitest'
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { upsertSkill } from '../src/main/db/dao/skills'
-import { upsertSource } from '../src/main/db/dao/skill-sources'
+import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { createDatabase } from '../src/main/db/database'
 import { createSkillLibraryFacade } from '../src/main/services/skill-library-facade'
 import { createTempDb, createTempDir } from './helpers/temp'
@@ -129,6 +129,69 @@ describe('SkillLibraryFacade', () => {
       },
       candidates: []
     })
+
+    db.close()
+    root.cleanup()
+  })
+
+  test('classifies every newly discovered Source inside the fixed repository as canonical', () => {
+    const root = createTempDir('skill-library-boundary-')
+    const canonicalRepository = join(root.dir, 'canonical')
+    const canonicalPath = join(canonicalRepository, 'team', 'demo')
+    mkdirSync(canonicalPath, { recursive: true })
+    const db = createDatabase(join(root.dir, 'registry.db'), canonicalRepository)
+    const skillId = upsertSkill(db, 'demo', canonicalPath)
+
+    upsertSource(db, skillId, canonicalPath, 'hash', 1, 'indexed', { origin: 'scan' })
+
+    expect(getSourceByPath(db, canonicalPath)?.source_role).toBe('canonical')
+    db.close()
+    root.cleanup()
+  })
+
+  test('rejects a second canonical Source for the same Skill', () => {
+    const root = createTempDir('skill-library-unique-')
+    const canonicalRepository = join(root.dir, 'canonical')
+    const first = join(canonicalRepository, 'demo')
+    const second = join(canonicalRepository, 'nested', 'demo')
+    mkdirSync(first, { recursive: true })
+    mkdirSync(second, { recursive: true })
+    const db = createDatabase(join(root.dir, 'registry.db'), canonicalRepository)
+    const skillId = upsertSkill(db, 'demo', first)
+    upsertSource(db, skillId, first, 'first', 1, 'central-repo')
+
+    expect(() => upsertSource(db, skillId, second, 'second', 2, 'central-repo')).toThrow()
+    db.close()
+    root.cleanup()
+  })
+
+  test('restores the previous filesystem entry when canonical persistence fails', () => {
+    const root = createTempDir('skill-library-compensation-')
+    const canonicalRepository = join(root.dir, 'canonical')
+    const existingCanonical = join(canonicalRepository, 'legacy', 'demo')
+    const destination = join(canonicalRepository, 'demo')
+    const incoming = join(root.dir, 'incoming')
+    const backups = join(root.dir, 'backups')
+    mkdirSync(existingCanonical, { recursive: true })
+    mkdirSync(destination, { recursive: true })
+    mkdirSync(incoming, { recursive: true })
+    writeFileSync(join(destination, 'SKILL.md'), 'OLD')
+    writeFileSync(join(incoming, 'SKILL.md'), 'NEW')
+    const db = createDatabase(join(root.dir, 'registry.db'), canonicalRepository)
+    const skillId = upsertSkill(db, 'demo', existingCanonical)
+    upsertSource(db, skillId, existingCanonical, 'existing', 1, 'central-repo')
+
+    const facade = createSkillLibraryFacade({
+      db,
+      canonicalRepositoryPath: canonicalRepository,
+      backupsDir: backups
+    })
+    expect(() => facade.replaceCanonicalSource({
+      sourceDirectory: incoming,
+      skillName: 'demo',
+      origin: 'zip'
+    })).toThrow()
+    expect(readFileSync(join(destination, 'SKILL.md'), 'utf-8')).toBe('OLD')
 
     db.close()
     root.cleanup()

@@ -87,6 +87,8 @@ export type DeploymentMutationOutcome =
 export interface BulkAdoptionPreviewItem {
   deploymentId: number
   skillName: string
+  targetId: string
+  targetPath: string
 }
 
 export interface BulkAdoptionPreviewFacts {
@@ -170,6 +172,7 @@ export interface DeploymentFacade {
   redeploy(deploymentId: number): Promise<DeploymentRedeployOutcome>
   undeploy(deploymentId: number): Promise<DeploymentMutationOutcome>
   adopt(deploymentId: number): Promise<DeploymentMutationOutcome>
+  getBulkAdoptionFacts(): BulkAdoptionPreviewFacts
   previewBulkAdoption(): BulkAdoptionPreviewOutcome
   confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome>
   inspect(deploymentId: number): DriftStatus | null
@@ -315,7 +318,9 @@ export function createDeploymentFacade(options: {
     const skill = getSkillById(options.db, deployment.skill_id)
     const target = options.getRuntime().tools
       .flatMap((tool) => tool.targets.map((candidate) => ({ tool, target: candidate })))
-      .find(({ target: candidate }) => candidate.id === deployment.target_id)
+      .find(({ tool, target: candidate }) =>
+        tool.key === deployment.target_tool && candidate.id === deployment.target_id
+      )
     if (!source || source.skill_id !== deployment.skill_id || !skill || !target) {
       return { rejection: { status: 'rejected', reason: 'unresolved', message: '部署关联的 Source 或 Discovery Target 不可解析。' } as const }
     }
@@ -476,26 +481,40 @@ export function createDeploymentFacade(options: {
     }
   }
 
-  function previewBulkAdoption(): BulkAdoptionPreviewOutcome {
+  function getBulkAdoptionFacts(): BulkAdoptionPreviewFacts {
     const runtime = options.getRuntime()
     const groups = new Map<string, BulkAdoptionPreviewFacts['tools'][number]>()
     for (const deployment of getAllDeployments(options.db)) {
       if (deployment.management !== 'observed') continue
+      if (deployment.target_id == null || deployment.target_path == null) continue
       const skill = getSkillById(options.db, deployment.skill_id)
       if (!skill) continue
-      const tool = runtime.tools.find((candidate) => candidate.key === deployment.target_tool)
+      const tool = runtime.tools.find((candidate) =>
+        candidate.key === deployment.target_tool &&
+        candidate.targets.some((target) => target.id === deployment.target_id)
+      )
+      if (!tool) continue
       const group = groups.get(deployment.target_tool) ?? {
         targetTool: deployment.target_tool,
-        targetDisplayName: tool?.displayName ?? deployment.target_tool,
+        targetDisplayName: tool.displayName,
         items: []
       }
-      group.items.push({ deploymentId: deployment.id, skillName: skill.name })
+      group.items.push({
+        deploymentId: deployment.id,
+        skillName: skill.name,
+        targetId: deployment.target_id,
+        targetPath: deployment.target_path
+      })
       groups.set(deployment.target_tool, group)
     }
-    const facts = {
+    return {
       total: [...groups.values()].reduce((total, group) => total + group.items.length, 0),
       tools: [...groups.values()]
     }
+  }
+
+  function previewBulkAdoption(): BulkAdoptionPreviewOutcome {
+    const facts = getBulkAdoptionFacts()
     if (facts.total === 0) return { status: 'empty', facts }
     const confirmationId = createId()
     const expiresAt = now() + ttl
@@ -509,15 +528,10 @@ export function createDeploymentFacade(options: {
     return { status: 'confirmation-required', confirmationId, expiresAt, facts }
   }
 
-  function adoptOne(deploymentId: number, requireObserved = false): Promise<DeploymentMutationOutcome> {
-    const resolved = resolveExisting(deploymentId)
-    if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+  type ResolvedExisting = Exclude<ReturnType<typeof resolveExisting>, { rejection: unknown }>
+
+  function executeObservedAdoption(resolved: ResolvedExisting): Promise<DeploymentMutationOutcome> {
     const { deployment, source, skill, target } = resolved
-    if (deployment.management === 'managed') {
-      return Promise.resolve(requireObserved
-        ? { status: 'rejected', reason: 'observation-stale', message: '外部订阅状态已变化，请刷新后重试。' } as const
-        : { status: 'completed', deploymentId: deployment.id } as const)
-    }
     return withTargetLock(deployment.target_id!, () => {
       const expectedTargetPath = resolveWithin(target.target.path, validateSkillName(skill.name))
       try {
@@ -539,6 +553,24 @@ export function createDeploymentFacade(options: {
     }) as Promise<DeploymentMutationOutcome>
   }
 
+  function adopt(deploymentId: number): Promise<DeploymentMutationOutcome> {
+    const resolved = resolveExisting(deploymentId)
+    if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+    if (resolved.deployment.management === 'managed') {
+      return Promise.resolve({ status: 'completed', deploymentId: resolved.deployment.id })
+    }
+    return executeObservedAdoption(resolved)
+  }
+
+  function adoptPreviewedObserved(deploymentId: number): Promise<DeploymentMutationOutcome> {
+    const resolved = resolveExisting(deploymentId)
+    if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+    if (resolved.deployment.management === 'managed') {
+      return Promise.resolve({ status: 'rejected', reason: 'observation-stale', message: '外部订阅状态已变化，请刷新后重试。' })
+    }
+    return executeObservedAdoption(resolved)
+  }
+
   async function confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome> {
     if (consumedBulkAdoptionConfirmations.has(confirmationId)) {
       return { status: 'rejected', reason: 'confirmation-used', message: '批量接管确认已使用，请重新预览。' }
@@ -555,7 +587,7 @@ export function createDeploymentFacade(options: {
     const adopted: BulkAdoptionResultItem[] = []
     const failed: BulkAdoptionFailure[] = []
     for (const item of confirmation.items) {
-      const outcome = await adoptOne(item.deploymentId, true)
+      const outcome = await adoptPreviewedObserved(item.deploymentId)
       if (outcome.status === 'completed') {
         adopted.push(item)
       } else {
@@ -619,6 +651,7 @@ export function createDeploymentFacade(options: {
       })
     },
     inspect,
+    getBulkAdoptionFacts,
     previewBulkAdoption,
     confirmBulkAdoption,
     redeploy(deploymentId) {
@@ -664,6 +697,6 @@ export function createDeploymentFacade(options: {
         }
       }) as Promise<DeploymentMutationOutcome>
     },
-    adopt: adoptOne
+    adopt
   }
 }

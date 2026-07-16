@@ -407,6 +407,10 @@ export function registerIpcHandlers(db: DB): void {
     deploymentFacade.previewBulkAdoption()
   )
 
+  ipcMain.handle('getBulkAdoptionFacts', async () =>
+    deploymentFacade.getBulkAdoptionFacts()
+  )
+
   ipcMain.handle('confirmBulkAdoption', async (_e, confirmationId: unknown) =>
     deploymentFacade.confirmBulkAdoption(assertNonEmptyString(confirmationId, 'confirmationId'))
   )

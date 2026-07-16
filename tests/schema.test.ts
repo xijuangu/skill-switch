@@ -38,6 +38,35 @@ describe('database migrations', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  test('legacy classification keeps at most one canonical Source per Skill', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'skill-switch-source-role-unique-'))
+    const canonicalRepository = join(dir, 'canonical')
+    const db = new Database(':memory:')
+    db.exec(`
+      CREATE TABLE skills (id INTEGER PRIMARY KEY, primary_source_path TEXT NOT NULL);
+      CREATE TABLE skill_sources (
+        id INTEGER PRIMARY KEY,
+        skill_id INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        repo_url TEXT,
+        commit_sha TEXT
+      );
+      CREATE TABLE deployments (id INTEGER PRIMARY KEY);
+    `)
+    const preferred = join(canonicalRepository, 'demo')
+    db.prepare('INSERT INTO skills VALUES (?, ?)').run(1, preferred)
+    db.prepare('INSERT INTO skill_sources VALUES (?, ?, ?, ?, NULL, NULL)').run(11, 1, join(canonicalRepository, 'old', 'demo'), 'central-repo')
+    db.prepare('INSERT INTO skill_sources VALUES (?, ?, ?, ?, NULL, NULL)').run(12, 1, preferred, 'central-repo')
+
+    runMigrations(db, canonicalRepository)
+
+    expect(db.prepare("SELECT id FROM skill_sources WHERE source_role = 'canonical'").all()).toEqual([{ id: 12 }])
+    expect(() => db.prepare("UPDATE skill_sources SET source_role = 'canonical' WHERE id = 11").run()).toThrow()
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   test('createDatabase upgrades the pre-identity schema before installing identity constraints', () => {
     const dir = mkdtempSync(join(tmpdir(), 'skill-switch-schema-'))
     const path = join(dir, 'registry.db')

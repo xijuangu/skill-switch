@@ -40,6 +40,7 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     redeploy: vi.fn(),
     undeploy: vi.fn(),
     adoptDeployment: vi.fn(),
+    getBulkAdoptionFacts: vi.fn().mockResolvedValue({ total: 0, tools: [] }),
     previewBulkAdoption: vi.fn().mockResolvedValue({ status: 'empty', facts: { total: 0, tools: [] } }),
     confirmBulkAdoption: vi.fn(),
     getTools: vi.fn().mockResolvedValue([]),
@@ -113,6 +114,9 @@ describe('App (integration)', () => {
   it('shows observed subscriptions as read-only with an explicit adopt action', async () => {
     const api = mockWindowApi({
       adoptDeployment: vi.fn().mockResolvedValue({ status: 'completed', deploymentId: 9 }),
+      getBulkAdoptionFacts: vi.fn()
+        .mockResolvedValueOnce({ total: 1, tools: [] })
+        .mockResolvedValue({ total: 0, tools: [] }),
       getTools: vi.fn().mockResolvedValue([{
         config: {
           key: 'agents', displayName: 'Agents', enabled: true,
@@ -148,6 +152,8 @@ describe('App (integration)', () => {
     expect(dialog).toHaveTextContent('接管 agents 的外部订阅「to-tickets」?')
     await userEvent.click(screen.getAllByRole('button', { name: '接管' }).at(-1)!)
     await waitFor(() => expect(api.adoptDeployment).toHaveBeenCalledWith(9))
+    await waitFor(() => expect(screen.queryByRole('button', { name: '一键接管 1 个外部订阅' })).not.toBeInTheDocument())
+    expect(api.getBulkAdoptionFacts).toHaveBeenCalledTimes(2)
   })
 
   it('previews and confirms every observed subscription globally, then retries only failures', async () => {
@@ -178,8 +184,8 @@ describe('App (integration)', () => {
       facts: {
         total: 2,
         tools: [
-          { targetTool: 'agents', targetDisplayName: 'Agents', items: [{ deploymentId: 9, skillName: 'to-tickets' }] },
-          { targetTool: 'codex', targetDisplayName: 'Codex', items: [{ deploymentId: 10, skillName: 'research' }] }
+          { targetTool: 'agents', targetDisplayName: 'Agents', items: [{ deploymentId: 9, skillName: 'to-tickets', targetId: 'agents-team', targetPath: '/agents/team/to-tickets' }] },
+          { targetTool: 'codex', targetDisplayName: 'Codex', items: [{ deploymentId: 10, skillName: 'research', targetId: 'codex-user', targetPath: '/codex/user/research' }] }
         ]
       }
     }
@@ -189,7 +195,7 @@ describe('App (integration)', () => {
       expiresAt: 99_999,
       facts: {
         total: 1,
-        tools: [{ targetTool: 'codex', targetDisplayName: 'Codex', items: [{ deploymentId: 10, skillName: 'research' }] }]
+        tools: [{ targetTool: 'codex', targetDisplayName: 'Codex', items: [{ deploymentId: 10, skillName: 'research', targetId: 'codex-user', targetPath: '/codex/user/research' }] }]
       }
     }
     const api = mockWindowApi({
@@ -197,15 +203,17 @@ describe('App (integration)', () => {
         observedTool('agents', 'Agents', 'to-tickets', 9),
         observedTool('codex', 'Codex', 'research', 10)
       ]) as Window['api']['getTools'],
+      getBulkAdoptionFacts: vi.fn().mockResolvedValue({ total: 2, tools: previewAll.facts.tools }),
       previewBulkAdoption: vi.fn()
         .mockResolvedValueOnce(previewAll)
         .mockResolvedValueOnce(previewRemaining),
       confirmBulkAdoption: vi.fn().mockResolvedValue({
         status: 'completed',
         total: 2,
-        adopted: [{ deploymentId: 9, skillName: 'to-tickets', targetTool: 'agents' }],
+        adopted: [{ deploymentId: 9, skillName: 'to-tickets', targetTool: 'agents', targetId: 'agents-team', targetPath: '/agents/team/to-tickets' }],
         failed: [{
           deploymentId: 10, skillName: 'research', targetTool: 'codex',
+          targetId: 'codex-user', targetPath: '/codex/user/research',
           reason: 'observation-stale', message: '外部订阅已变化，拒绝接管。'
         }]
       })
@@ -220,8 +228,10 @@ describe('App (integration)', () => {
     const previewDialog = screen.getByRole('dialog')
     expect(previewDialog).toHaveTextContent('Agents')
     expect(previewDialog).toHaveTextContent('to-tickets')
+    expect(previewDialog).toHaveTextContent('agents-team · /agents/team/to-tickets')
     expect(previewDialog).toHaveTextContent('Codex')
     expect(previewDialog).toHaveTextContent('research')
+    expect(previewDialog).toHaveTextContent('codex-user · /codex/user/research')
 
     await userEvent.click(screen.getByRole('button', { name: '确认接管全部' }))
     await waitFor(() => expect(api.confirmBulkAdoption).toHaveBeenCalledWith('bulk-1'))
@@ -233,6 +243,19 @@ describe('App (integration)', () => {
     await waitFor(() => expect(api.previewBulkAdoption).toHaveBeenCalledTimes(2))
     expect(screen.getByRole('dialog')).toHaveTextContent('共 1 个外部订阅')
     expect(screen.getByRole('dialog')).toHaveTextContent('research')
+  })
+
+  it('uses the global bulk-adoption facts count instead of the enabled-tools read model', async () => {
+    mockWindowApi({
+      getTools: vi.fn().mockResolvedValue([]),
+      getBulkAdoptionFacts: vi.fn().mockResolvedValue({
+        total: 3,
+        tools: [{ targetTool: 'codex', targetDisplayName: 'Codex', items: [] }]
+      })
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    expect(await screen.findByRole('button', { name: '一键接管 3 个外部订阅' })).toBeInTheDocument()
   })
 
   it('renders empty state on Skills page when no skills', async () => {

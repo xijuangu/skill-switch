@@ -1,5 +1,7 @@
 // skill_sources 表 DAO
 import type { DB } from '../database'
+import { getCanonicalRepositoryPath } from '../database'
+import { isAbsolute, relative, resolve, sep } from 'path'
 import type { SkillSource, SourceOrigin, SourceRole, SourceType } from '../../types'
 
 /**
@@ -24,7 +26,11 @@ export function upsertSource(
   } = {}
 ): void {
   const sourceOrigin = metadata.origin ?? 'legacy'
-  const sourceRole = metadata.role ?? 'candidate'
+  const repository = getCanonicalRepositoryPath(db)
+  const relativeToRepository = repository ? relative(resolve(repository), resolve(path)) : null
+  const isInsideCanonicalRepository = relativeToRepository !== null && relativeToRepository.length > 0 &&
+    relativeToRepository !== '..' && !relativeToRepository.startsWith(`..${sep}`) && !isAbsolute(relativeToRepository)
+  const sourceRole = isInsideCanonicalRepository ? 'canonical' : (metadata.role ?? 'candidate')
   const sourceTool = metadata.tool ?? null
   const sourceRootId = metadata.rootId ?? null
   db.prepare(
@@ -34,41 +40,41 @@ export function upsertSource(
        hash = excluded.hash,
        mtime = excluded.mtime,
        source_type = CASE
-         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+         WHEN skill_sources.source_role = 'canonical' AND (excluded.source_role = 'candidate' OR excluded.source_type = 'indexed')
            THEN skill_sources.source_type
          ELSE excluded.source_type
        END,
        source_role = CASE
-         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+         WHEN skill_sources.source_role = 'canonical' AND (excluded.source_role = 'candidate' OR excluded.source_type = 'indexed')
            THEN skill_sources.source_role
          ELSE excluded.source_role
        END,
        source_origin = CASE
-         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+         WHEN skill_sources.source_role = 'canonical' AND (excluded.source_role = 'candidate' OR excluded.source_type = 'indexed')
            THEN skill_sources.source_origin
          WHEN skill_sources.source_root_id IS NOT NULL AND excluded.source_root_id IS NULL
            THEN skill_sources.source_origin
          ELSE excluded.source_origin
        END,
        source_tool = CASE
-         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+         WHEN skill_sources.source_role = 'canonical' AND (excluded.source_role = 'candidate' OR excluded.source_type = 'indexed')
            THEN skill_sources.source_tool
          WHEN skill_sources.source_root_id IS NOT NULL AND excluded.source_root_id IS NULL
            THEN skill_sources.source_tool
          ELSE excluded.source_tool
        END,
        source_root_id = CASE
-         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+         WHEN skill_sources.source_role = 'canonical' AND (excluded.source_role = 'candidate' OR excluded.source_type = 'indexed')
            THEN skill_sources.source_root_id
          ELSE COALESCE(excluded.source_root_id, skill_sources.source_root_id)
        END,
        repo_url = CASE
-         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+         WHEN skill_sources.source_role = 'canonical' AND (excluded.source_role = 'candidate' OR excluded.source_type = 'indexed')
            THEN skill_sources.repo_url
          ELSE excluded.repo_url
        END,
        commit_sha = CASE
-         WHEN skill_sources.source_role = 'canonical' AND excluded.source_role = 'candidate'
+         WHEN skill_sources.source_role = 'canonical' AND (excluded.source_role = 'candidate' OR excluded.source_type = 'indexed')
            THEN skill_sources.commit_sha
          ELSE excluded.commit_sha
        END`

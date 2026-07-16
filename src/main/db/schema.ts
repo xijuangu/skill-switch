@@ -99,18 +99,59 @@ export function runMigrations(
     )
     if (canonicalRepositoryPath && names.has('path')) {
       const repository = resolve(canonicalRepositoryPath)
-      const rows = db.prepare('SELECT id, path FROM skill_sources').all() as Array<{
+      const hasSkillId = names.has('skill_id')
+      const rows = db.prepare(`SELECT id, path${hasSkillId ? ', skill_id' : ''} FROM skill_sources ORDER BY id`).all() as Array<{
         id: number
         path: string
+        skill_id?: number
       }>
       const update = db.prepare("UPDATE skill_sources SET source_role = 'canonical' WHERE id = ?")
-      for (const row of rows) {
+      const inside = rows.filter((row) => {
         const rel = relative(repository, resolve(row.path))
-        if (rel.length > 0 && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
-          update.run(row.id)
+        return rel.length > 0 && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+      })
+      if (!hasSkillId) {
+        for (const row of inside) update.run(row.id)
+      } else {
+        const primaryPaths = new Map<number, string>()
+        try {
+          for (const skill of db.prepare('SELECT id, primary_source_path FROM skills').all() as Array<{ id: number; primary_source_path: string }>) {
+            primaryPaths.set(skill.id, resolve(skill.primary_source_path))
+          }
+        } catch {
+          // A partially migrated legacy database may not expose the skills read model yet.
         }
+        const selected = new Map<number, typeof inside[number]>()
+        for (const row of inside) {
+          const skillId = row.skill_id!
+          const current = selected.get(skillId)
+          if (!current || resolve(row.path) === primaryPaths.get(skillId)) selected.set(skillId, row)
+        }
+        for (const row of selected.values()) update.run(row.id)
       }
     }
+  }
+  const migratedColumns = new Set((db.prepare('PRAGMA table_info(skill_sources)').all() as { name: string }[]).map((column) => column.name))
+  if (migratedColumns.has('skill_id') && migratedColumns.has('source_role')) {
+    const duplicateSkills = db.prepare(`
+      SELECT skill_id FROM skill_sources
+      WHERE source_role = 'canonical'
+      GROUP BY skill_id HAVING COUNT(*) > 1
+    `).all() as Array<{ skill_id: number }>
+    const demote = db.prepare("UPDATE skill_sources SET source_role = 'candidate' WHERE skill_id = ? AND source_role = 'canonical' AND id <> ?")
+    for (const duplicate of duplicateSkills) {
+      const candidates = db.prepare("SELECT id, path FROM skill_sources WHERE skill_id = ? AND source_role = 'canonical' ORDER BY id ASC").all(duplicate.skill_id) as Array<{ id: number; path: string }>
+      let primaryPath: string | undefined
+      try {
+        primaryPath = (db.prepare('SELECT primary_source_path FROM skills WHERE id = ?').get(duplicate.skill_id) as { primary_source_path?: string } | undefined)?.primary_source_path
+      } catch {
+        // A partially migrated database can still be repaired deterministically by oldest Source ID.
+      }
+      const selected = candidates.find((candidate) => candidate.path === primaryPath) ?? candidates[0]
+      demote.run(duplicate.skill_id, selected.id)
+    }
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_sources_one_canonical_per_skill
+      ON skill_sources(skill_id) WHERE source_role = 'canonical'`)
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS source_roots (

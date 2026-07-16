@@ -11,9 +11,7 @@
 
 import { execFileSync } from 'child_process'
 import {
-  cpSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -29,8 +27,8 @@ import { runInTransaction } from '../db/database'
 import { upsertSkill } from '../db/dao/skills'
 import { upsertSource } from '../db/dao/skill-sources'
 import { hashDir } from './hash'
-import { createBackup } from './backup'
 import { resolveWithin, validateSkillName } from './path-safety'
+import { createSkillLibraryFacade } from './skill-library-facade'
 import type {
   InstallOptions,
   InstallResult,
@@ -149,32 +147,6 @@ function resolveSkillName(skillDir: string): string {
 }
 
 /**
- * 把 sourceDir 拷到 destPath,处理同名覆盖(备份+删除)。
- * 返回是否走了覆盖。centralSkillsDir 不存在时先创建。
- */
-function copyWithBackup(
-  sourceDir: string,
-  destPath: string,
-  skillName: string,
-  opts: InstallOptions
-): boolean {
-  mkdirSync(opts.centralSkillsDir, { recursive: true })
-  let overwritten = false
-  if (existsSync(destPath)) {
-    createBackup({
-      skillName,
-      targetTool: 'central-repo',
-      sourcePath: destPath,
-      backupsDir: opts.backupsDir
-    })
-    rmSync(destPath, { recursive: true, force: true })
-    overwritten = true
-  }
-  cpSync(sourceDir, destPath, { recursive: true, force: true })
-  return overwritten
-}
-
-/**
  * 从 GitHub 安装 skill 到中央仓库。
  * gitRunner 可注入(测试用),默认用 execFileSync 跑真实 git。
  */
@@ -195,39 +167,26 @@ export function installFromGitHub(
       ? resolveWithin(tmpDir, ...parsed.subPath.split('/'))
       : tmpDir
     const skillName = resolveSkillName(sourceDir)
-    const destPath = resolveWithin(opts.centralSkillsDir, skillName)
-
-    const overwritten = copyWithBackup(sourceDir, destPath, skillName, opts)
-    const hash = hashDir(destPath)
-    const mtime = Math.floor(statSync(destPath).mtimeMs)
-
-    const skillId = runInTransaction(db, () => {
-      const id = upsertSkill(db, skillName, destPath)
-      upsertSource(
-        db,
-        id,
-        destPath,
-        hash,
-        mtime,
-        'central-repo',
-        {
-          repoUrl: parsed.repoWebUrl,
-          commitSha,
-          origin: 'github',
-          role: 'canonical'
-        }
-      )
-      return id
+    const replacement = createSkillLibraryFacade({
+      db,
+      canonicalRepositoryPath: opts.centralSkillsDir,
+      backupsDir: opts.backupsDir
+    }).replaceCanonicalSource({
+      sourceDirectory: sourceDir,
+      skillName,
+      origin: 'github',
+      repoUrl: parsed.repoWebUrl,
+      commitSha
     })
 
     return {
       skillName,
-      skillId,
-      sourcePath: destPath,
+      skillId: replacement.skillId,
+      sourcePath: replacement.sourcePath,
       sourceType: 'central-repo',
       repoUrl: parsed.repoWebUrl,
       commitSha,
-      overwritten
+      overwritten: replacement.overwritten
     }
   } finally {
     // 无论成功失败都清理临时目录
@@ -258,34 +217,20 @@ export function installFromZip(
         : tmpDir
 
     const skillName = resolveSkillName(sourceDir)
-    const destPath = resolveWithin(opts.centralSkillsDir, skillName)
-
-    const overwritten = copyWithBackup(sourceDir, destPath, skillName, opts)
-    const hash = hashDir(destPath)
-    const mtime = Math.floor(statSync(destPath).mtimeMs)
-
-    const skillId = runInTransaction(db, () => {
-      const id = upsertSkill(db, skillName, destPath)
-      upsertSource(
-        db,
-        id,
-        destPath,
-        hash,
-        mtime,
-        'central-repo',
-        { origin: 'zip', role: 'canonical' }
-      )
-      return id
-    })
+    const replacement = createSkillLibraryFacade({
+      db,
+      canonicalRepositoryPath: opts.centralSkillsDir,
+      backupsDir: opts.backupsDir
+    }).replaceCanonicalSource({ sourceDirectory: sourceDir, skillName, origin: 'zip' })
 
     return {
       skillName,
-      skillId,
-      sourcePath: destPath,
+      skillId: replacement.skillId,
+      sourcePath: replacement.sourcePath,
       sourceType: 'central-repo',
       repoUrl: null,
       commitSha: null,
-      overwritten
+      overwritten: replacement.overwritten
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

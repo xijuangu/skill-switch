@@ -10,6 +10,16 @@ import { SKILLS_DIR } from '../paths'
 
 export type DB = Database.Database
 
+const canonicalRepositories = new WeakMap<DB, string>()
+
+export function getCanonicalRepositoryPath(db: DB): string | undefined {
+  return canonicalRepositories.get(db)
+}
+
+export function setCanonicalRepositoryPath(db: DB, path: string): void {
+  canonicalRepositories.set(db, path)
+}
+
 let mutexLocked = false
 
 /** 在 mutex 保护下执行同步操作(防止重入) */
@@ -31,6 +41,7 @@ function withMutex<T>(fn: () => T): T {
  */
 export function createDatabase(dbPath: string, canonicalRepositoryPath: string = SKILLS_DIR): DB {
   const db = new Database(dbPath)
+  canonicalRepositories.set(db, canonicalRepositoryPath)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   db.exec(SCHEMA)

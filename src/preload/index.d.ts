@@ -207,7 +207,7 @@ export interface BulkAdoptionPreviewFactsView {
   tools: Array<{
     targetTool: string
     targetDisplayName: string
-    items: Array<{ deploymentId: number; skillName: string }>
+    items: Array<{ deploymentId: number; skillName: string; targetId: string; targetPath: string }>
   }>
 }
 
@@ -224,6 +224,8 @@ export interface BulkAdoptionResultItemView {
   deploymentId: number
   skillName: string
   targetTool: string
+  targetId: string
+  targetPath: string
 }
 
 export type BulkAdoptionConfirmationOutcomeView =
@@ -324,6 +326,7 @@ declare global {
       redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
       undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
+      getBulkAdoptionFacts: () => Promise<BulkAdoptionPreviewFactsView>
       previewBulkAdoption: () => Promise<BulkAdoptionPreviewOutcomeView>
       confirmBulkAdoption: (confirmationId: string) => Promise<BulkAdoptionConfirmationOutcomeView>
       getTools: () => Promise<ToolWithDriftsView[]>

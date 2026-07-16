@@ -101,7 +101,23 @@ describe('Deployment Facade', () => {
       isCustom: false, exists: true
     }
 
-    expect(env.create({ tools: [env.tool, agentsTool] }).previewBulkAdoption()).toMatchObject({
+    const facade = env.create({ tools: [env.tool, agentsTool] })
+    expect(facade.getBulkAdoptionFacts()).toEqual({
+      total: 2,
+      tools: expect.arrayContaining([
+        {
+          targetTool: 'codex',
+          targetDisplayName: 'Codex',
+          items: [{ deploymentId: observed.id, skillName: 'demo', targetId: env.targetId, targetPath }]
+        },
+        {
+          targetTool: 'agents',
+          targetDisplayName: 'Agents',
+          items: [{ deploymentId: agentsObserved.id, skillName: 'demo', targetId: agentsTargetId, targetPath: join(agentsRoot, 'demo') }]
+        }
+      ])
+    })
+    expect(facade.previewBulkAdoption()).toMatchObject({
       status: 'confirmation-required',
       confirmationId: 'confirmation-1',
       facts: {
@@ -110,12 +126,12 @@ describe('Deployment Facade', () => {
           {
             targetTool: 'codex',
             targetDisplayName: 'Codex',
-            items: [{ deploymentId: observed.id, skillName: 'demo' }]
+            items: [{ deploymentId: observed.id, skillName: 'demo', targetId: env.targetId, targetPath }]
           },
           {
             targetTool: 'agents',
             targetDisplayName: 'Agents',
-            items: [{ deploymentId: agentsObserved.id, skillName: 'demo' }]
+            items: [{ deploymentId: agentsObserved.id, skillName: 'demo', targetId: agentsTargetId, targetPath: join(agentsRoot, 'demo') }]
           }
         ])
       }
@@ -126,6 +142,40 @@ describe('Deployment Facade', () => {
     })
     expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, agentsTargetId)).toMatchObject({
       management: 'observed'
+    })
+  })
+
+  test('bulk adoption facts only include observed rows whose tool key and configured target id match the runtime', () => {
+    const env = setup()
+    const addObserved = (name: string, targetTool: string, targetId: string) => {
+      const sourcePath = join(dirname(env.sourcePath), name)
+      mkdirSync(sourcePath)
+      writeFileSync(join(sourcePath, 'SKILL.md'), `# ${name}`)
+      const skillId = upsertSkill(env.db, name, sourcePath)
+      upsertSource(env.db, skillId, sourcePath, hashDir(sourcePath), 0, 'indexed', { origin: 'scan' })
+      const sourceId = getSourceByPath(env.db, sourcePath)!.id
+      upsertDeployment(
+        env.db, skillId, targetTool, join(env.targetRoot, name), 'symlink', sourcePath,
+        hashDir(sourcePath), { sourceId, targetId }, 'observed'
+      )
+    }
+
+    addObserved('valid', 'codex', env.targetId)
+    addObserved('wrong-tool', 'agents', env.targetId)
+    addObserved('unknown-target', 'codex', 'missing-target')
+
+    const facade = env.create()
+    expect(facade.getBulkAdoptionFacts()).toMatchObject({
+      total: 1,
+      tools: [{
+        targetTool: 'codex',
+        items: [{ skillName: 'valid', targetId: env.targetId, targetPath: join(env.targetRoot, 'valid') }]
+      }]
+    })
+    expect(facade.previewBulkAdoption()).toMatchObject({
+      status: 'confirmation-required',
+      confirmationId: 'confirmation-1',
+      facts: { total: 1 }
     })
   })
 
@@ -164,11 +214,13 @@ describe('Deployment Facade', () => {
     expect(await facade.confirmBulkAdoption(preview.confirmationId)).toEqual({
       status: 'completed',
       total: 2,
-      adopted: [{ deploymentId: first.id, skillName: 'demo', targetTool: 'codex' }],
+      adopted: [{ deploymentId: first.id, skillName: 'demo', targetTool: 'codex', targetId: env.targetId, targetPath: firstTarget }],
       failed: [{
         deploymentId: second.id,
         skillName: 'second',
         targetTool: 'codex',
+        targetId: env.targetId,
+        targetPath: secondTarget,
         reason: 'observation-stale',
         message: '外部订阅已变化，拒绝接管。'
       }]
@@ -183,7 +235,7 @@ describe('Deployment Facade', () => {
         total: 1,
         tools: [{
           targetTool: 'codex',
-          items: [{ deploymentId: second.id, skillName: 'second' }]
+          items: [{ deploymentId: second.id, skillName: 'second', targetId: env.targetId, targetPath: secondTarget }]
         }]
       }
     })

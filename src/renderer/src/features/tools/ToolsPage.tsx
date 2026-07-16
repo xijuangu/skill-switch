@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { RotateCcw, Trash2, RefreshCw, ChevronRight, ChevronDown, Wrench, AlertCircle } from 'lucide-react'
 import { Button, StatusDot, EmptyState, Skeleton, Dialog, getDriftStatus } from '../../shared'
 import { useToast } from '../../app/Toast'
@@ -29,12 +29,23 @@ export function ToolsPage({
   const [bulkPreview, setBulkPreview] = useState<BulkAdoptionPreviewView | null>(null)
   const [bulkResult, setBulkResult] = useState<BulkAdoptionResultView | null>(null)
   const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkFacts, setBulkFacts] = useState<Awaited<ReturnType<typeof window.api.getBulkAdoptionFacts>>>({ total: 0, tools: [] })
 
   const { success, error: toastError, info } = useToast()
-  const observedCount = tools.reduce(
-    (count, tool) => count + tool.drifts.filter((drift) => drift.deployment?.management === 'observed').length,
-    0
-  )
+  const observedCount = bulkFacts.total
+
+  const refreshBulkFacts = async () => {
+    setBulkFacts(await window.api.getBulkAdoptionFacts())
+  }
+
+  useEffect(() => {
+    void refreshBulkFacts().catch((error) => toastError(error instanceof Error ? error.message : String(error)))
+  }, [])
+
+  const refreshPage = async () => {
+    await onRefresh()
+    await refreshBulkFacts()
+  }
 
   const toggleExpand = (key: string) => {
     setExpanded((prev) => {
@@ -52,12 +63,12 @@ export function ToolsPage({
     try {
       const outcome = await window.api.undeploy(deploymentId)
       if (outcome.status !== 'completed') throw new Error(outcome.message)
-      await onRefresh()
+      await refreshPage()
       success(`已从 ${targetTool} 取消部署`)
       setConfirmUndeploy(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
-      await onRefresh()
+      await refreshPage()
     } finally {
       setBusyKey(null)
     }
@@ -69,12 +80,12 @@ export function ToolsPage({
     setBusyKey({ skillId, targetTool })
     try {
       await window.api.removeFromManifest(deploymentId)
-      await onRefresh()
+      await refreshPage()
       success('已从清单移除')
       setConfirmRemoveManifest(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
-      await onRefresh()
+      await refreshPage()
     } finally {
       setBusyKey(null)
     }
@@ -109,12 +120,12 @@ export function ToolsPage({
     try {
       const outcome = await window.api.adoptDeployment(deploymentId)
       if (outcome.status !== 'completed') throw new Error(outcome.message)
-      await onRefresh()
+      await refreshPage()
       success('已接管外部订阅')
       setConfirmAdopt(null)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
-      await onRefresh()
+      await refreshPage()
     } finally {
       setBusyKey(null)
     }
@@ -124,6 +135,7 @@ export function ToolsPage({
     setBulkBusy(true)
     try {
       const outcome = await window.api.previewBulkAdoption()
+      setBulkFacts(outcome.facts)
       setBulkResult(null)
       if (outcome.status === 'empty') {
         setBulkPreview(null)
@@ -146,7 +158,7 @@ export function ToolsPage({
       if (outcome.status !== 'completed') throw new Error(outcome.message)
       setBulkPreview(null)
       setBulkResult(outcome)
-      await onRefresh()
+      await refreshPage()
       if (outcome.failed.length === 0) success(`已接管 ${outcome.adopted.length} 个外部订阅`)
     } catch (e) {
       toastError(e instanceof Error ? e.message : String(e))
@@ -210,7 +222,7 @@ export function ToolsPage({
               一键接管 {observedCount} 个外部订阅
             </Button>
           )}
-          <Button variant="secondary" size="sm" onClick={onRefresh} icon={<RefreshCw className="h-3 w-3" />}>
+          <Button variant="secondary" size="sm" onClick={refreshPage} icon={<RefreshCw className="h-3 w-3" />}>
             刷新
           </Button>
         </div>
@@ -259,7 +271,8 @@ export function ToolsPage({
               <ul className="mt-1 space-y-1">
                 {tool.items.map((item) => (
                   <li key={item.deploymentId} className="text-xs text-foreground-secondary">
-                    {item.skillName}
+                    <div>{item.skillName}</div>
+                    <div className="text-2xs text-foreground-muted">{item.targetId} · {item.targetPath}</div>
                   </li>
                 ))}
               </ul>
