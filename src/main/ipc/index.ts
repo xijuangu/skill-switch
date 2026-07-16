@@ -251,6 +251,7 @@ export function registerIpcHandlers(db: DB): void {
   const deploymentFacade = createDeploymentFacade({
     db,
     backupsDir: BACKUPS_DIR,
+    canonicalRepositoryPath: SKILLS_DIR,
     getRuntime: () => {
       const settings = readSettings(SETTINGS_PATH)
       return {
@@ -490,6 +491,10 @@ export function registerIpcHandlers(db: DB): void {
 
   ipcMain.handle('adoptDeployment', async (_e, deploymentId: number) =>
     deploymentFacade.adopt(assertInteger(deploymentId, 'deploymentId'))
+  )
+
+  ipcMain.handle('adoptTargetAsCandidate', async (_e, deploymentId: number) =>
+    deploymentFacade.adoptTargetAsCandidate(assertInteger(deploymentId, 'deploymentId'))
   )
 
   ipcMain.handle('previewBulkAdoption', async () =>

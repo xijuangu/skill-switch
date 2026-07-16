@@ -20,7 +20,7 @@ import {
 } from 'fs'
 import type { DB } from '../db/database'
 import { runInTransaction, setCanonicalRepositoryPath } from '../db/database'
-import { getSourceById, getSourceByPath, upsertSource } from '../db/dao/skill-sources'
+import { getSourceById, getSourceByPath, getCanonicalSourceBySkillId, upsertSource } from '../db/dao/skill-sources'
 import { deleteSkill, getAllSkills, getSkillById, getSkillByName, updatePrimarySourcePath, upsertSkill } from '../db/dao/skills'
 import { markConsolidationItemRegistryCommitted } from '../db/dao/consolidations'
 import { getDeploymentsBySkillId } from '../db/dao/deployments'
@@ -261,6 +261,8 @@ interface CandidateSourcePlanSnapshot {
   originalSkillId?: number
   outputSkillName?: string
   rewriteIdentity?: boolean
+  archiveOnly?: boolean
+  replacingCanonical?: boolean
 }
 
 type CandidateSourceSnapshot = SkillSource | CandidateSourcePlanSnapshot
@@ -271,7 +273,7 @@ function snapshotSources(snapshot: string): SkillSource[] {
 }
 
 function snapshotPlan(item: ItemRow): Required<Pick<CandidateSourcePlanSnapshot,
-  'sources' | 'canonicalSourceId' | 'originalSkillId' | 'outputSkillName' | 'rewriteIdentity'>> {
+  'sources' | 'canonicalSourceId' | 'originalSkillId' | 'outputSkillName' | 'rewriteIdentity' | 'archiveOnly' | 'replacingCanonical'>> {
   const parsed = JSON.parse(item.candidate_source_snapshot) as CandidateSourceSnapshot
   const sources = 'sources' in parsed ? parsed.sources : [parsed]
   return {
@@ -279,7 +281,9 @@ function snapshotPlan(item: ItemRow): Required<Pick<CandidateSourcePlanSnapshot,
     canonicalSourceId: 'sources' in parsed && parsed.canonicalSourceId !== undefined ? parsed.canonicalSourceId : sources[0].id,
     originalSkillId: 'sources' in parsed && parsed.originalSkillId !== undefined ? parsed.originalSkillId : sources[0].skill_id,
     outputSkillName: 'sources' in parsed && parsed.outputSkillName !== undefined ? parsed.outputSkillName : item.skill_name,
-    rewriteIdentity: 'sources' in parsed && parsed.rewriteIdentity === true
+    rewriteIdentity: 'sources' in parsed && parsed.rewriteIdentity === true,
+    archiveOnly: 'sources' in parsed && parsed.archiveOnly === true,
+    replacingCanonical: 'sources' in parsed && parsed.replacingCanonical === true
   }
 }
 
@@ -499,6 +503,18 @@ export function createSkillLibraryFacade(options: {
       .sort((a, b) => a.id - b.id)
   }
 
+  /**
+   * #91: 当 skill 的 canonical Source 缺失或不可读时抛出冻结异常。
+   * skill 没有 canonical Source 时不抛出(尚未整理)。
+   */
+  function assertCanonicalSourceAvailable(skillId: number): void {
+    const canonical = getCanonicalSourceBySkillId(options.db, skillId)
+    if (!canonical) return
+    if (!pathEntryExists(canonical.path) || !statSync(canonical.path).isDirectory()) {
+      throw new Error('权威 Source 缺失或不可读,相关变更已被冻结,请通过 Source Recovery 恢复。')
+    }
+  }
+
   function allKnownRelationsForSource(source: SkillSource): Deployment[] {
     return getDeploymentsBySkillId(options.db, source.skill_id)
       .filter((deployment) => deployment.source_id === source.id ||
@@ -557,7 +573,11 @@ export function createSkillLibraryFacade(options: {
     if (!source || source.source_role !== 'canonical') throw new Error('Source Relocation requires a canonical Source ID')
     const skill = getSkillById(options.db, source.skill_id)
     if (!skill) throw new Error('Canonical Source Skill does not exist')
-    if (!pathEntryExists(source.path) || !statSync(source.path).isDirectory() || hashDir(source.path) !== source.hash) {
+    // #91: canonical Source 缺失或不可读时冻结移动
+    if (!pathEntryExists(source.path) || !statSync(source.path).isDirectory()) {
+      throw new Error('权威 Source 缺失或不可读,相关变更已被冻结,请通过 Source Recovery 恢复。')
+    }
+    if (hashDir(source.path) !== source.hash) {
       throw new Error('Canonical Source content changed or is unavailable')
     }
     const newPath = canonicalPlacement(validateSkillName(skill.name), request.canonicalRelativeParent)
@@ -619,9 +639,18 @@ export function createSkillLibraryFacade(options: {
     if (!Number.isInteger(skillId)) throw new Error('skillId must be an integer')
     const skill = getSkillById(options.db, skillId)
     if (!skill) throw new Error('Skill does not exist')
-    const candidates = getAllSkills(options.db).find((item) => item.id === skillId)?.sources
-      .filter((source) => source.source_role === 'candidate') ?? []
+    // #91: canonical Source 异常时冻结冲突解决
+    assertCanonicalSourceAvailable(skillId)
+    const allSources = getAllSkills(options.db).find((item) => item.id === skillId)?.sources ?? []
+    const canonical = allSources.find((source) => source.source_role === 'canonical') ?? null
+    const candidates = allSources.filter((source) => source.source_role === 'candidate')
     const groups = new Map<string, SkillSource[]>()
+    if (canonical) {
+      if (!pathEntryExists(canonical.path) || !statSync(canonical.path).isDirectory() || hashDir(canonical.path) !== canonical.hash) {
+        throw new Error('Canonical Source changed; rescan before conflict resolution')
+      }
+      groups.set(canonical.hash, [canonical])
+    }
     for (const source of candidates) {
       if (!pathEntryExists(source.path) || !statSync(source.path).isDirectory() || hashDir(source.path) !== source.hash) {
         throw new Error('Candidate Source changed; rescan before conflict resolution')
@@ -666,14 +695,14 @@ export function createSkillLibraryFacade(options: {
     if (!source || source.source_role !== 'candidate') throw new Error('Consolidation requires a Candidate Source ID')
     const skill = getSkillById(options.db, source.skill_id)
     if (!skill) throw new Error('Candidate Source Skill does not exist')
+    // #91: canonical Source 异常时冻结整理
+    assertCanonicalSourceAvailable(skill.id)
     if (!existsSync(source.path) || !statSync(source.path).isDirectory()) throw new Error('Candidate Source is unavailable')
     const currentHash = hashDir(source.path)
     if (currentHash !== source.hash) throw new Error('Candidate Source changed; rescan before consolidation')
-    if (getAllSkills(options.db).find((item) => item.id === skill.id)?.sources.some((candidate) => candidate.source_role === 'canonical')) {
-      throw new Error('Skill already has a canonical Source')
-    }
-    const candidates = getAllSkills(options.db).find((item) => item.id === skill.id)?.sources
-      .filter((candidate) => candidate.source_role === 'candidate') ?? []
+    const allSources = getAllSkills(options.db).find((item) => item.id === skill.id)?.sources ?? []
+    const existingCanonical = allSources.find((candidate) => candidate.source_role === 'canonical') ?? null
+    const candidates = allSources.filter((candidate) => candidate.source_role === 'candidate')
     const distinctHashes = new Set(candidates.map((candidate) => candidate.hash))
     const outputs: Array<{
       canonicalSource: SkillSource
@@ -681,8 +710,61 @@ export function createSkillLibraryFacade(options: {
       skillName: string
       canonicalRelativeParent: string
       rewriteIdentity: boolean
+      archiveOnly: boolean
+      replacingCanonical: boolean
     }> = []
-    if (distinctHashes.size > 1) {
+    if (existingCanonical && source.hash === existingCanonical.hash) {
+      if (!existsSync(existingCanonical.path) || !statSync(existingCanonical.path).isDirectory() || hashDir(existingCanonical.path) !== existingCanonical.hash) {
+        throw new Error('Canonical Source changed; rescan before consolidation')
+      }
+      const dedupeCandidates = candidates.filter((candidate) => candidate.hash === existingCanonical.hash)
+      if (dedupeCandidates.some((candidate) => candidate.hash !== existingCanonical.hash)) {
+        throw new Error('Skill has a canonical Source with different content; use canonical replacement')
+      }
+      outputs.push({
+        canonicalSource: source,
+        sources: dedupeCandidates,
+        skillName: skill.name,
+        canonicalRelativeParent: request.canonicalRelativeParent,
+        rewriteIdentity: false,
+        archiveOnly: true,
+        replacingCanonical: false
+      })
+    } else if (existingCanonical) {
+      if (!existsSync(existingCanonical.path) || !statSync(existingCanonical.path).isDirectory() || hashDir(existingCanonical.path) !== existingCanonical.hash) {
+        throw new Error('Canonical Source changed; rescan before consolidation')
+      }
+      const decision = request.conflictResolution
+      if (!decision) throw new Error('Canonical replacement requires an explicit conflict resolution decision')
+      if (decision.authoritativeSourceId === existingCanonical.id) {
+        outputs.push({
+          canonicalSource: existingCanonical,
+          sources: candidates,
+          skillName: skill.name,
+          canonicalRelativeParent: request.canonicalRelativeParent,
+          rewriteIdentity: false,
+          archiveOnly: true,
+          replacingCanonical: false
+        })
+      } else if (decision.authoritativeSourceId === source.id) {
+        const canonicalDisposition = decision.otherVersions.find((version) => version.sourceId === existingCanonical.id)
+        if (!canonicalDisposition || canonicalDisposition.action !== 'archive') {
+          throw new Error('Old canonical Source must be archived when replacing it with a candidate')
+        }
+        const archiveSources = [existingCanonical, ...candidates]
+        outputs.push({
+          canonicalSource: source,
+          sources: archiveSources,
+          skillName: skill.name,
+          canonicalRelativeParent: '',
+          rewriteIdentity: false,
+          archiveOnly: false,
+          replacingCanonical: true
+        })
+      } else {
+        throw new Error('Authoritative Source must be the selected candidate or the existing canonical Source')
+      }
+    } else if (distinctHashes.size > 1) {
       const decision = request.conflictResolution
       if (!decision) throw new Error('Consolidation requires an explicit decision for conflicting Candidate versions')
       if (decision.authoritativeSourceId !== source.id) throw new Error('Authoritative Candidate Source must match the selected consolidation version')
@@ -707,7 +789,9 @@ export function createSkillLibraryFacade(options: {
             sources: versionSources,
             skillName: newSkillName,
             canonicalRelativeParent: other.canonicalRelativeParent ?? '',
-            rewriteIdentity: true
+            rewriteIdentity: true,
+            archiveOnly: false,
+            replacingCanonical: false
           })
         }
         decidedHashes.add(candidate.hash)
@@ -720,7 +804,9 @@ export function createSkillLibraryFacade(options: {
         sources: originalSources,
         skillName: skill.name,
         canonicalRelativeParent: request.canonicalRelativeParent,
-        rewriteIdentity: false
+        rewriteIdentity: false,
+        archiveOnly: false,
+        replacingCanonical: false
       })
     } else {
       outputs.push({
@@ -728,7 +814,9 @@ export function createSkillLibraryFacade(options: {
         sources: candidates,
         skillName: skill.name,
         canonicalRelativeParent: request.canonicalRelativeParent,
-        rewriteIdentity: false
+        rewriteIdentity: false,
+        archiveOnly: false,
+        replacingCanonical: false
       })
     }
     for (const candidate of candidates) {
@@ -737,17 +825,20 @@ export function createSkillLibraryFacade(options: {
       }
     }
     return outputs.map((output) => {
-      const canonicalPath = canonicalPlacement(output.skillName, output.canonicalRelativeParent)
-      if (pathEntryExists(canonicalPath)) throw new Error('Canonical Placement is occupied')
+      const canonicalPath = output.replacingCanonical ? existingCanonical!.path : canonicalPlacement(output.skillName, output.canonicalRelativeParent)
+      if (!output.archiveOnly && !output.replacingCanonical && pathEntryExists(canonicalPath)) throw new Error('Canonical Placement is occupied')
       const archivePath = resolveWithin(sourceArchivePath, batchId, 'source', output.skillName)
-      const allRelations = output.sources.flatMap(allKnownRelationsForSource)
+      const relationSources = output.replacingCanonical
+        ? output.sources.filter((source) => source.source_role === 'candidate')
+        : output.sources
+      const allRelations = relationSources.flatMap(allKnownRelationsForSource)
       if (allRelations.some((deployment) => deployment.source_id == null)) {
         throw new Error('Candidate Source has an unresolved legacy Deployment; reconcile it before consolidation')
       }
       if (allRelations.some((deployment) => deployment.management !== 'observed')) {
         throw new Error('Candidate Source has a Managed Deployment and cannot be consolidated')
       }
-      const observed = output.sources.flatMap(observedForSource).sort((a, b) => a.id - b.id)
+      const observed = relationSources.flatMap(observedForSource).sort((a, b) => a.id - b.id)
       for (const deployment of observed) {
         const candidate = output.sources.find((item) => item.id === deployment.source_id)!
         assertObservedLink(deployment, candidate.path)
@@ -758,6 +849,8 @@ export function createSkillLibraryFacade(options: {
         skill,
         outputSkillName: output.skillName,
         rewriteIdentity: output.rewriteIdentity,
+        archiveOnly: output.archiveOnly,
+        replacingCanonical: output.replacingCanonical,
         canonicalPath,
         archivePath,
         observed,
@@ -773,7 +866,11 @@ export function createSkillLibraryFacade(options: {
     if (new Set(prepared.map((item) => item.source.id)).size !== prepared.length) throw new Error('Consolidation Batch contains a duplicate Candidate Source')
     if (new Set(prepared.map((item) => item.outputSkillName)).size !== prepared.length) throw new Error('Consolidation Batch contains duplicate output Skill identities')
     if (new Set(prepared.map((item) => resolve(item.canonicalPath))).size !== prepared.length) throw new Error('Consolidation Batch contains duplicate Canonical Placements')
-    const claimedPaths = prepared.flatMap((item) => [...item.sources.map((source) => source.path), item.canonicalPath, ...item.observed.map((entry) => entry.target_path!)].map((path) => resolve(path)))
+    const claimedPaths = prepared.flatMap((item) => {
+      const paths = [...item.sources.map((source) => source.path), ...item.observed.map((entry) => entry.target_path!)]
+      if (!item.replacingCanonical) paths.push(item.canonicalPath)
+      return paths.map((path) => resolve(path))
+    })
     const overlaps = claimedPaths.some((path, index) => claimedPaths.some((other, otherIndex) => {
       if (index >= otherIndex) return false
       const rel = relative(path, other)
@@ -794,14 +891,16 @@ export function createSkillLibraryFacade(options: {
         canonicalSourceId: item.source.id,
         originalSkillId: item.skill.id,
         outputSkillName: item.outputSkillName,
-        rewriteIdentity: item.rewriteIdentity
+        rewriteIdentity: item.rewriteIdentity,
+        archiveOnly: item.archiveOnly,
+        replacingCanonical: item.replacingCanonical
       }), JSON.stringify(item.observedSnapshots), item.canonicalPath, item.archivePath)
     })
     return {
       status: 'confirmation-required', confirmationId: batchId, batchId,
       items: prepared.map((item) => ({ skillId: item.skill.id, skillName: item.outputSkillName, canonicalPath: item.canonicalPath })),
       operations: prepared.flatMap((item) => [
-        { kind: 'write-canonical' as const, path: item.canonicalPath },
+        ...(item.archiveOnly ? [] : [{ kind: 'write-canonical' as const, path: item.canonicalPath }]),
         ...item.sources.map((source) => ({ kind: 'archive-candidate' as const, path: archivePathForSource(item.archivePath, source, item.sources) })),
         ...item.observed.map((deployment) => ({ kind: 'remove-observed-entry' as const, path: deployment.target_path! }))
       ])
@@ -829,19 +928,27 @@ export function createSkillLibraryFacade(options: {
     }
     const observedSnapshot = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
     const currentSources = sources.map((snapshot) => getSourceById(options.db, snapshot.id))
-    if (currentSources.some((source, index) => !source || source.source_role !== 'candidate' || JSON.stringify(source) !== JSON.stringify(sources[index]))) {
+    if (currentSources.some((source, index) => {
+      if (!source) return true
+      if (JSON.stringify(source) !== JSON.stringify(sources[index])) return true
+      if (snapshot.replacingCanonical && source.source_role === 'canonical') return false
+      return source.source_role !== 'candidate'
+    })) {
       throw new Error('Candidate Source registration changed')
     }
     const source = currentSources.find((candidate) => candidate!.id === snapshot.canonicalSourceId)!
     if (!source) throw new Error('Selected authoritative Candidate version changed')
     if (sources.some((candidate) => !existsSync(candidate.path) || hashDir(candidate.path) !== candidate.hash)) throw new Error('Candidate Source content changed')
     assertCanonicalParentConfined(item.canonical_path)
-    if (pathEntryExists(item.canonical_path) || pathEntryExists(item.archive_path)) throw new Error('Destination or Source Archive is occupied')
+    if ((!snapshot.archiveOnly && !snapshot.replacingCanonical && pathEntryExists(item.canonical_path)) || pathEntryExists(item.archive_path)) throw new Error('Destination or Source Archive is occupied')
     for (const candidate of sources) {
       const sourceRollback = resolveWithin(dirname(candidate.path), `.${basename(candidate.path)}.skill-switch-${batch.id}`)
       if (pathEntryExists(sourceRollback)) throw new Error('Candidate Source rollback path is occupied')
     }
-    const currentRelations = sources.flatMap(allKnownRelationsForSource).sort((a, b) => a.id - b.id)
+    const relationSources = snapshot.replacingCanonical
+      ? sources.filter((source) => source.source_role === 'candidate')
+      : sources
+    const currentRelations = relationSources.flatMap(allKnownRelationsForSource).sort((a, b) => a.id - b.id)
     if (currentRelations.some((deployment) => deployment.source_id == null || deployment.management !== 'observed')) {
       throw new Error('Candidate Source Deployment set became unresolved or managed')
     }
@@ -979,7 +1086,7 @@ export function createSkillLibraryFacade(options: {
         const plannedBySkill = new Map<number, number[]>()
         for (const plan of plans) {
           const originalSkillId = snapshotPlan(plan.item).originalSkillId
-          plannedBySkill.set(originalSkillId, [...(plannedBySkill.get(originalSkillId) ?? []), ...plan.sources.map((source) => source.id)])
+          plannedBySkill.set(originalSkillId, [...(plannedBySkill.get(originalSkillId) ?? []), ...plan.sources.filter((source) => source.source_role === 'candidate').map((source) => source.id)])
         }
         for (const [skillId, plannedIds] of plannedBySkill) {
           const currentIds = (getAllSkills(options.db).find((skill) => skill.id === skillId)?.sources ?? [])
@@ -1034,16 +1141,18 @@ export function createSkillLibraryFacade(options: {
           markItem(plan.item, persisted.batch.id, itemIndex, 'staging', state.evidence, 'prepared')
           mkdirSync(dirname(plan.item.canonical_path), { recursive: true })
           mkdirSync(dirname(plan.item.archive_path), { recursive: true })
-          cpSync(plan.source.path, stage, { recursive: true, force: false })
-          if (hashDir(stage) !== plan.source.hash) throw new Error('Staged canonical content failed hash verification')
           const output = snapshotPlan(plan.item)
-          if (output.rewriteIdentity) {
-            const skillMdPath = resolveWithin(stage, 'SKILL.md')
-            if (!pathEntryExists(skillMdPath)) throw new Error('Save-as requires a SKILL.md file')
-            const parsed = matter(readFileSync(skillMdPath, 'utf8'))
-            writeFileSync(skillMdPath, matter.stringify(parsed.content, { ...parsed.data, name: output.outputSkillName }))
+          if (!output.archiveOnly) {
+            cpSync(plan.source.path, stage, { recursive: true, force: false })
+            if (hashDir(stage) !== plan.source.hash) throw new Error('Staged canonical content failed hash verification')
+            if (output.rewriteIdentity) {
+              const skillMdPath = resolveWithin(stage, 'SKILL.md')
+              if (!pathEntryExists(skillMdPath)) throw new Error('Save-as requires a SKILL.md file')
+              const parsed = matter(readFileSync(skillMdPath, 'utf8'))
+              writeFileSync(skillMdPath, matter.stringify(parsed.content, { ...parsed.data, name: output.outputSkillName }))
+            }
+            state.canonicalHash = hashDir(stage)
           }
-          state.canonicalHash = hashDir(stage)
           for (const source of plan.sources) {
             const archivePath = archivePathForSource(plan.item.archive_path, source, plan.sources)
             mkdirSync(dirname(archivePath), { recursive: true })
@@ -1068,10 +1177,12 @@ export function createSkillLibraryFacade(options: {
             state.displacedLinks.push({ ...snapshot, rollbackPath, archivePath })
           }
           markItem(plan.item, persisted.batch.id, itemIndex, 'entries-displaced', state.evidence, 'applied')
-          markItem(plan.item, persisted.batch.id, itemIndex, 'canonical-installed', state.evidence, 'prepared')
-          renameSync(stage, plan.item.canonical_path)
-          state.canonicalInstalled = true
-          markItem(plan.item, persisted.batch.id, itemIndex, 'canonical-installed', state.evidence, 'applied')
+          if (!output.archiveOnly) {
+            markItem(plan.item, persisted.batch.id, itemIndex, 'canonical-installed', state.evidence, 'prepared')
+            renameSync(stage, plan.item.canonical_path)
+            state.canonicalInstalled = true
+            markItem(plan.item, persisted.batch.id, itemIndex, 'canonical-installed', state.evidence, 'applied')
+          }
         }
         options.consolidationHooks?.onFaultPoint?.({ batchId: persisted.batch.id, itemIndex: -1, point: 'before-registry-commit' })
         runInTransaction(options.db, () => {
@@ -1079,7 +1190,23 @@ export function createSkillLibraryFacade(options: {
             const { plan } = state
             const output = snapshotPlan(plan.item)
             for (const snapshot of plan.observed) options.db.prepare('DELETE FROM deployments WHERE id = ?').run(snapshot.deployment.id)
-            for (const source of plan.sources) options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(source.id)
+            const sourcesToDelete = output.replacingCanonical
+              ? plan.sources.filter((source) => source.source_role === 'candidate')
+              : plan.sources
+            for (const source of sourcesToDelete) options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(source.id)
+            if (output.archiveOnly) {
+              markConsolidationItemRegistryCommitted(options.db, plan.item.id, output.originalSkillId, output.sources[0]?.hash ?? null)
+              plan.item.skill_id = output.originalSkillId
+              continue
+            }
+            if (output.replacingCanonical) {
+              const oldCanonicalSource = plan.sources.find((source) => source.source_role === 'canonical')!
+              options.db.prepare('UPDATE skill_sources SET hash = ?, mtime = ? WHERE id = ?')
+                .run(state.canonicalHash!, Math.floor(statSync(plan.item.canonical_path).mtimeMs), oldCanonicalSource.id)
+              markConsolidationItemRegistryCommitted(options.db, plan.item.id, output.originalSkillId, state.canonicalHash!)
+              plan.item.skill_id = output.originalSkillId
+              continue
+            }
             const outputSkillId = output.outputSkillName === getSkillById(options.db, output.originalSkillId)?.name
               ? output.originalSkillId
               : upsertSkill(options.db, output.outputSkillName, plan.item.canonical_path)
@@ -1167,11 +1294,15 @@ export function createSkillLibraryFacade(options: {
 
   function buildRestorePlans(persisted: { batch: BatchRow; items: ItemRow[] }): RestorePlan[] {
     return persisted.items.map((item, index) => {
-      const sources = snapshotSources(item.candidate_source_snapshot)
+      const snapshot = snapshotPlan(item)
+      const sources = snapshot.sources
       if (sources.length === 0) throw new Error('归档批次没有可恢复的原候选来源。')
       const source = sources[0]
       const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
-      if (sources.some((candidate) => pathEntryExists(candidate.path)) || observed.some((entry) => pathEntryExists(entry.deployment.target_path!))) {
+      const checkSources = snapshot.replacingCanonical
+        ? sources.filter((candidate) => candidate.source_role === 'candidate')
+        : sources
+      if (checkSources.some((candidate) => pathEntryExists(candidate.path)) || observed.some((entry) => pathEntryExists(entry.deployment.target_path!))) {
         throw new Error('原候选来源或旧工具入口位置已被占用。')
       }
       const canonical = getSourceByPath(options.db, item.canonical_path)
@@ -1697,6 +1828,9 @@ export function createSkillLibraryFacade(options: {
     const sourceDirectory = resolve(assertAbsolutePath(request.sourceDirectory, 'Canonical Source input'))
     const skillName = validateSkillName(request.skillName)
     const destination = resolveWithin(canonicalRepositoryPath, skillName)
+    // #91: 替换前若同名 skill 的 canonical Source 缺失或不可读,冻结替换
+    const existingSkill = getSkillByName(options.db, skillName)
+    if (existingSkill) assertCanonicalSourceAvailable(existingSkill.id)
     assertSkillUnlocked(skillName)
     assertPathsUnlocked([sourceDirectory, destination])
     const stage = resolveWithin(canonicalRepositoryPath, `.stage-${skillName}-${randomUUID()}`)

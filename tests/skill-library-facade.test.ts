@@ -6,6 +6,7 @@ import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { getAllDeployments, upsertDeployment } from '../src/main/db/dao/deployments'
 import { createDatabase } from '../src/main/db/database'
 import { createSkillLibraryFacade } from '../src/main/services/skill-library-facade'
+import { createSourceRecoveryFacade } from '../src/main/services/source-recovery-facade'
 import { hashDir } from '../src/main/services/hash'
 import { createTempDb, createTempDir } from './helpers/temp'
 
@@ -1312,5 +1313,497 @@ describe('SkillLibraryFacade', () => {
 
     db.close()
     root.cleanup()
+  })
+
+  // ===== Issue #89: 权威版本替换与 copy 漂移处置 =====
+
+  /**
+   * 已有 canonical 的 skill 上,出现与 canonical hash 相同的新 candidate。
+   * 整理时只做去重归档:candidate 被归档移除,canonical 内容与路径不变。
+   */
+  function canonicalReplacementFixture(prefix: string) {
+    const root = createTempDir(prefix)
+    const canonicalRepository = join(root.dir, 'canonical')
+    const sourceArchive = join(root.dir, 'source-archive')
+    const backups = join(root.dir, 'backups')
+    const canonicalPath = join(canonicalRepository, 'demo')
+    mkdirSync(canonicalPath, { recursive: true })
+    writeFileSync(join(canonicalPath, 'SKILL.md'), '# canonical demo')
+    const db = createDatabase(join(root.dir, 'registry.db'), canonicalRepository)
+    const skillId = upsertSkill(db, 'demo', canonicalPath)
+    const canonicalHash = hashDir(canonicalPath)
+    upsertSource(db, skillId, canonicalPath, canonicalHash, 1, 'central-repo', {
+      role: 'canonical', origin: 'local'
+    })
+    const canonicalSource = getSourceByPath(db, canonicalPath)!
+    const facade = createSkillLibraryFacade({
+      db,
+      canonicalRepositoryPath: canonicalRepository,
+      sourceArchivePath: sourceArchive,
+      backupsDir: backups
+    })
+    return { root, db, facade, skillId, canonicalSource, canonicalPath, canonicalHash, canonicalRepository, sourceArchive }
+  }
+
+  test('#89 same-hash candidate alongside canonical only archives the duplicate', () => {
+    const fixture = canonicalReplacementFixture('skill-library-89-same-hash-')
+    const duplicatePath = join(fixture.root.dir, 'candidates', 'demo')
+    mkdirSync(duplicatePath, { recursive: true })
+    writeFileSync(join(duplicatePath, 'SKILL.md'), '# canonical demo')
+    upsertSource(fixture.db, fixture.skillId, duplicatePath, fixture.canonicalHash, 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    const duplicateSource = getSourceByPath(fixture.db, duplicatePath)!
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: duplicateSource.id,
+      canonicalRelativeParent: ''
+    }] })
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+
+    // canonical 路径与内容未变
+    expect(readFileSync(join(fixture.canonicalPath, 'SKILL.md'), 'utf8')).toBe('# canonical demo')
+    // candidate 已被移除
+    expect(existsSync(duplicatePath)).toBe(false)
+    // 归档区有 candidate 副本
+    const archived = preview.operations.filter((operation) => operation.kind === 'archive-candidate')
+    expect(archived).toHaveLength(1)
+    expect(readFileSync(join(archived[0].path, 'SKILL.md'), 'utf8')).toBe('# canonical demo')
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#89 previewConflictResolution includes the canonical Source as a version when a candidate has different content', () => {
+    const fixture = canonicalReplacementFixture('skill-library-89-conflict-preview-')
+    const candidatePath = join(fixture.root.dir, 'candidates', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '---\nname: demo\n---\n# new version\n')
+    upsertSource(fixture.db, fixture.skillId, candidatePath, hashDir(candidatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+
+    const preview = fixture.facade.previewConflictResolution(fixture.skillId)
+    expect(preview.versions).toHaveLength(2)
+    const canonicalVersion = preview.versions.find((version) => version.hash === fixture.canonicalHash)
+    const candidateVersion = preview.versions.find((version) => version.hash !== fixture.canonicalHash)
+    expect(canonicalVersion).toBeDefined()
+    expect(candidateVersion).toBeDefined()
+    expect(canonicalVersion!.sources[0].path).toBe(fixture.canonicalPath)
+    expect(candidateVersion!.sources[0].path).toBe(candidatePath)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#89 replaces canonical content keeping placement, archives old canonical, and restores on undo', () => {
+    const fixture = canonicalReplacementFixture('skill-library-89-replace-')
+    const candidatePath = join(fixture.root.dir, 'candidates', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '---\nname: demo\n---\n# new version\n')
+    upsertSource(fixture.db, fixture.skillId, candidatePath, hashDir(candidatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    const candidateSource = getSourceByPath(fixture.db, candidatePath)!
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: candidateSource.id,
+      canonicalRelativeParent: '',
+      conflictResolution: {
+        authoritativeSourceId: candidateSource.id,
+        otherVersions: [{ sourceId: fixture.canonicalSource.id, action: 'archive' }]
+      }
+    }] })
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+
+    // canonical 路径不变,内容已更新
+    expect(readFileSync(join(fixture.canonicalPath, 'SKILL.md'), 'utf8')).toBe('---\nname: demo\n---\n# new version\n')
+    // candidate 已被移除
+    expect(existsSync(candidatePath)).toBe(false)
+    // 旧 canonical 内容已归档
+    const archived = preview.operations.filter((operation) => operation.kind === 'archive-candidate')
+    expect(archived.some((operation) => readFileSync(join(operation.path, 'SKILL.md'), 'utf8') === '# canonical demo')).toBe(true)
+    // canonical source 的 hash 已更新
+    const updatedCanonical = getSourceByPath(fixture.db, fixture.canonicalPath)!
+    expect(updatedCanonical.hash).toBe(candidateSource.hash)
+
+    // undo 恢复旧 canonical 内容
+    expect(fixture.facade.undoConsolidation(preview.batchId)).toEqual({ status: 'undone', batchId: preview.batchId })
+    expect(readFileSync(join(fixture.canonicalPath, 'SKILL.md'), 'utf8')).toBe('# canonical demo')
+    expect(readFileSync(join(candidatePath, 'SKILL.md'), 'utf8')).toBe('---\nname: demo\n---\n# new version\n')
+    const restoredCanonical = getSourceByPath(fixture.db, fixture.canonicalPath)!
+    expect(restoredCanonical.hash).toBe(fixture.canonicalHash)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#89 symlink and junction deployments see new canonical content without redeploy', () => {
+    const fixture = canonicalReplacementFixture('skill-library-89-symlink-follow-')
+    // 在 canonical 上挂一个 symlink 部署
+    const linkedTarget = join(fixture.root.dir, 'codex', 'demo')
+    mkdirSync(dirname(linkedTarget), { recursive: true })
+    symlinkSync(fixture.canonicalPath, linkedTarget, 'dir')
+    upsertDeployment(fixture.db, fixture.skillId, 'codex', linkedTarget, 'symlink', fixture.canonicalPath, fixture.canonicalHash, {
+      sourceId: fixture.canonicalSource.id, targetId: 'codex:demo'
+    })
+
+    // 新 candidate 与 canonical hash 不同,选择替换 canonical
+    const candidatePath = join(fixture.root.dir, 'candidates', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '---\nname: demo\n---\n# new version\n')
+    upsertSource(fixture.db, fixture.skillId, candidatePath, hashDir(candidatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    const candidateSource = getSourceByPath(fixture.db, candidatePath)!
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: candidateSource.id,
+      canonicalRelativeParent: '',
+      conflictResolution: {
+        authoritativeSourceId: candidateSource.id,
+        otherVersions: [{ sourceId: fixture.canonicalSource.id, action: 'archive' }]
+      }
+    }] })
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+
+    // symlink 仍指向 canonical 路径 (无需重写)
+    expect(resolve(dirname(linkedTarget), readlinkSync(linkedTarget))).toBe(fixture.canonicalPath)
+    // 通过 symlink 读到的是新内容,无需重新部署
+    expect(readFileSync(join(linkedTarget, 'SKILL.md'), 'utf8')).toBe('---\nname: demo\n---\n# new version\n')
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 freezes consolidation when canonical Source is missing', () => {
+    const fixture = canonicalReplacementFixture('skill-library-91-freeze-consolidation-')
+    // 加入候选源,准备整理
+    const candidatePath = join(fixture.root.dir, 'candidates', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '# candidate demo')
+    upsertSource(fixture.db, fixture.skillId, candidatePath, hashDir(candidatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    const candidateSource = getSourceByPath(fixture.db, candidatePath)!
+    // 删除 canonical source 目录,触发冻结
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    expect(() => fixture.facade.previewConsolidation({
+      candidateSourceId: candidateSource.id,
+      canonicalRelativeParent: 'engineering'
+    })).toThrow(/权威 Source 缺失或不可读/)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 freezes conflict resolution preview when canonical Source is missing', () => {
+    const fixture = canonicalReplacementFixture('skill-library-91-freeze-conflict-')
+    const candidatePath = join(fixture.root.dir, 'candidates', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '# candidate demo')
+    upsertSource(fixture.db, fixture.skillId, candidatePath, hashDir(candidatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    expect(() => fixture.facade.previewConflictResolution(fixture.skillId)).toThrow(/权威 Source 缺失或不可读/)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 freezes Source Relocation when canonical Source is missing', () => {
+    const fixture = canonicalReplacementFixture('skill-library-91-freeze-relocation-')
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    expect(() => fixture.facade.previewSourceRelocation({
+      sourceId: fixture.canonicalSource.id,
+      canonicalRelativeParent: 'team'
+    })).toThrow(/权威 Source 缺失或不可读/)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 freezes replaceCanonicalSource when existing canonical is missing', () => {
+    const fixture = canonicalReplacementFixture('skill-library-91-freeze-replace-')
+    const replacementDir = join(fixture.root.dir, 'replacement', 'demo')
+    mkdirSync(replacementDir, { recursive: true })
+    writeFileSync(join(replacementDir, 'SKILL.md'), '# replacement')
+    // 删除原有 canonical,触发冻结
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    expect(() => fixture.facade.replaceCanonicalSource({
+      sourceDirectory: replacementDir,
+      skillName: 'demo',
+      origin: 'github',
+      repoUrl: 'https://example.com/demo.git'
+    })).toThrow(/权威 Source 缺失或不可读/)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 does not freeze consolidation when skill has no canonical Source', () => {
+    // 使用候选源 fixture,无 canonical,不触发冻结
+    const fixture = consolidationFixture('skill-library-91-no-freeze-')
+    expect(() => fixture.facade.previewConsolidation({
+      candidateSourceId: fixture.source.id,
+      canonicalRelativeParent: 'engineering'
+    })).not.toThrow()
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+})
+
+describe('SourceRecoveryFacade (#91)', () => {
+  /**
+   * 构造一个 canonical Source 已缺失的场景:
+   * - skill 有一个 canonical source(path 已被删除)
+   * - 有一个 copy deployment 指向另一份内容
+   * - 有一个已完成的 consolidation batch,archive 中保留了历史权威版本
+   */
+  function recoveryFixture(prefix: string) {
+    const root = createTempDir(prefix)
+    const canonicalRepository = join(root.dir, 'canonical')
+    const sourceArchive = join(root.dir, 'source-archive')
+    const backups = join(root.dir, 'backups')
+    const canonicalPath = join(canonicalRepository, 'demo')
+    mkdirSync(canonicalPath, { recursive: true })
+    writeFileSync(join(canonicalPath, 'SKILL.md'), '# canonical demo')
+    const db = createDatabase(join(root.dir, 'registry.db'), canonicalRepository)
+    const skillId = upsertSkill(db, 'demo', canonicalPath)
+    const canonicalHash = hashDir(canonicalPath)
+    upsertSource(db, skillId, canonicalPath, canonicalHash, 1, 'central-repo', {
+      role: 'canonical', origin: 'local'
+    })
+    const canonicalSource = getSourceByPath(db, canonicalPath)!
+
+    // 一个 copy deployment 内容与 canonical 相同(可作为恢复证据)
+    const copyTarget = join(root.dir, 'tool', 'demo')
+    mkdirSync(dirname(copyTarget), { recursive: true })
+    // 复制 canonical 内容到 copy target
+    mkdirSync(copyTarget, { recursive: true })
+    writeFileSync(join(copyTarget, 'SKILL.md'), '# canonical demo')
+    upsertDeployment(db, skillId, 'codex', copyTarget, 'copy', canonicalPath, canonicalHash, {
+      sourceId: canonicalSource.id, targetId: 'codex:demo'
+    })
+
+    const skillLibraryFacade = createSkillLibraryFacade({
+      db,
+      canonicalRepositoryPath: canonicalRepository,
+      sourceArchivePath: sourceArchive,
+      backupsDir: backups
+    })
+    const recoveryFacade = createSourceRecoveryFacade({
+      db,
+      canonicalRepositoryPath: canonicalRepository,
+      sourceArchivePath: sourceArchive,
+      skillLibraryFacade
+    })
+
+    return {
+      root, db, skillLibraryFacade, recoveryFacade,
+      skillId, canonicalSource, canonicalPath, canonicalHash, copyTarget,
+      canonicalRepository, sourceArchive
+    }
+  }
+
+  test('#91 previewSourceRecovery collects archive, historical canonical, copy and user directory candidates', () => {
+    const fixture = recoveryFixture('source-recovery-preview-')
+    // 删除 canonical 触发恢复场景
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    const preview = fixture.recoveryFacade.previewSourceRecovery({
+      skillId: fixture.skillId,
+      userDirectories: []
+    })
+
+    expect(preview.status).toBe('confirmation-required')
+    expect(preview.skillId).toBe(fixture.skillId)
+    expect(preview.lastKnownHash).toBe(fixture.canonicalHash)
+    // copy deployment 内容与 canonical 相同,应作为候选(类型 copy-deployment)
+    expect(preview.candidateGroups.some((group) =>
+      group.hash === fixture.canonicalHash &&
+      group.candidates.some((c) => c.kind === 'copy-deployment')
+    )).toBe(true)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 groups candidates by hash and marks which group matches the last known canonical hash', () => {
+    const fixture = recoveryFixture('source-recovery-group-')
+    // 让 copy target 内容与原 canonical 不同
+    writeFileSync(join(fixture.copyTarget, 'SKILL.md'), '# modified copy')
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    const preview = fixture.recoveryFacade.previewSourceRecovery({
+      skillId: fixture.skillId,
+      userDirectories: []
+    })
+
+    expect(preview.status).toBe('confirmation-required')
+    // copy 内容与 last known hash 不同,应单独成组且不匹配
+    const copyGroup = preview.candidateGroups.find((group) =>
+      group.candidates.some((c) => c.kind === 'copy-deployment')
+    )
+    expect(copyGroup).toBeDefined()
+    expect(copyGroup!.matchesLastKnownHash).toBe(false)
+    // lastKnownHash 组即使没有候选也应记录
+    expect(preview.lastKnownHash).toBe(fixture.canonicalHash)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 matching copy candidate is only a recommendation, never auto-promoted even if unique', () => {
+    const fixture = recoveryFixture('source-recovery-no-auto-')
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    const preview = fixture.recoveryFacade.previewSourceRecovery({
+      skillId: fixture.skillId,
+      userDirectories: []
+    })
+
+    // 即使 copy 是唯一匹配 last known hash 的候选,preview 仍要求显式确认
+    expect(preview.status).toBe('confirmation-required')
+    expect(preview.requiresExplicitChoice).toBe(true)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 confirmSourceRecovery restores the selected candidate to the original Canonical Placement via staging', () => {
+    const fixture = recoveryFixture('source-recovery-confirm-')
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    const preview = fixture.recoveryFacade.previewSourceRecovery({
+      skillId: fixture.skillId,
+      userDirectories: []
+    })
+    // 选择 copy-deployment 候选(内容与原 canonical 相同)
+    const copyGroup = preview.candidateGroups.find((group) =>
+      group.candidates.some((c) => c.kind === 'copy-deployment')
+    )!
+    const copyCandidate = copyGroup.candidates.find((c) => c.kind === 'copy-deployment')!
+
+    const result = fixture.recoveryFacade.confirmSourceRecovery({
+      confirmationId: preview.confirmationId,
+      selectedCandidatePath: copyCandidate.path
+    })
+
+    expect(result.status).toBe('completed')
+    expect(result.canonicalPath).toBe(fixture.canonicalPath)
+    // canonical 恢复并可读
+    expect(existsSync(fixture.canonicalPath)).toBe(true)
+    expect(readFileSync(join(fixture.canonicalPath, 'SKILL.md'), 'utf8')).toBe('# canonical demo')
+    // canonical source 的 hash 已更新
+    const restored = getSourceByPath(fixture.db, fixture.canonicalPath)!
+    expect(restored.source_role).toBe('canonical')
+    expect(restored.hash).toBe(fixture.canonicalHash)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 confirmSourceRecovery does not overwrite when original placement is occupied', () => {
+    const fixture = recoveryFixture('source-recovery-occupied-')
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+    // 有人在恢复前重新写入了 canonical placement
+    mkdirSync(fixture.canonicalPath, { recursive: true })
+    writeFileSync(join(fixture.canonicalPath, 'SKILL.md'), '# external re-created')
+
+    const preview = fixture.recoveryFacade.previewSourceRecovery({
+      skillId: fixture.skillId,
+      userDirectories: []
+    })
+    const copyGroup = preview.candidateGroups.find((group) =>
+      group.candidates.some((c) => c.kind === 'copy-deployment')
+    )!
+    const copyCandidate = copyGroup.candidates.find((c) => c.kind === 'copy-deployment')!
+
+    const result = fixture.recoveryFacade.confirmSourceRecovery({
+      confirmationId: preview.confirmationId,
+      selectedCandidatePath: copyCandidate.path
+    })
+
+    expect(result.status).toBe('rejected')
+    if (result.status === 'rejected') {
+      expect(result.reason).toBe('placement-occupied')
+    }
+    // 原位置仍为外部内容
+    expect(readFileSync(join(fixture.canonicalPath, 'SKILL.md'), 'utf8')).toBe('# external re-created')
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 after recovery, deployments with different copy content remain drifted', () => {
+    const fixture = recoveryFixture('source-recovery-drift-')
+    // copy target 内容与 canonical 不同
+    writeFileSync(join(fixture.copyTarget, 'SKILL.md'), '# modified copy')
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    const preview = fixture.recoveryFacade.previewSourceRecovery({
+      skillId: fixture.skillId,
+      userDirectories: []
+    })
+    // 选择 copy-deployment 候选(修改后的内容)
+    const copyGroup = preview.candidateGroups.find((group) =>
+      group.candidates.some((c) => c.kind === 'copy-deployment')
+    )!
+    const copyCandidate = copyGroup.candidates.find((c) => c.kind === 'copy-deployment')!
+
+    const result = fixture.recoveryFacade.confirmSourceRecovery({
+      confirmationId: preview.confirmationId,
+      selectedCandidatePath: copyCandidate.path
+    })
+    expect(result.status).toBe('completed')
+
+    // canonical 已恢复为 copy 的内容
+    expect(readFileSync(join(fixture.canonicalPath, 'SKILL.md'), 'utf8')).toBe('# modified copy')
+    // copy target 与 canonical 一致,漂移已消除
+    expect(hashDir(fixture.copyTarget)).toBe(hashDir(fixture.canonicalPath))
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('#91 recovery operation is persisted with structured journal and can be diagnosed on failure', () => {
+    const fixture = recoveryFixture('source-recovery-journal-')
+    rmSync(fixture.canonicalPath, { recursive: true, force: true })
+
+    const preview = fixture.recoveryFacade.previewSourceRecovery({
+      skillId: fixture.skillId,
+      userDirectories: []
+    })
+    const copyGroup = preview.candidateGroups.find((group) =>
+      group.candidates.some((c) => c.kind === 'copy-deployment')
+    )!
+    const copyCandidate = copyGroup.candidates.find((c) => c.kind === 'copy-deployment')!
+
+    const result = fixture.recoveryFacade.confirmSourceRecovery({
+      confirmationId: preview.confirmationId,
+      selectedCandidatePath: copyCandidate.path
+    })
+    expect(result.status).toBe('completed')
+
+    // 恢复记录已持久化
+    const row = fixture.db.prepare('SELECT status, phase, journal_json, completed_at FROM source_recoveries WHERE id = ?')
+      .get(preview.confirmationId) as { status: string; phase: string | null; journal_json: string | null; completed_at: string | null }
+    expect(row.status).toBe('completed')
+    expect(row.phase).toBeNull()
+    expect(row.completed_at).not.toBeNull()
+    expect(row.journal_json).not.toBeNull()
+    const journal = JSON.parse(row.journal_json!) as Array<{ phase: string; intent: string }>
+    expect(journal.some((entry) => entry.phase === 'staging' && entry.intent === 'applied')).toBe(true)
+    expect(journal.some((entry) => entry.phase === 'registry-committed' && entry.intent === 'applied')).toBe(true)
+
+    fixture.db.close()
+    fixture.root.cleanup()
   })
 })

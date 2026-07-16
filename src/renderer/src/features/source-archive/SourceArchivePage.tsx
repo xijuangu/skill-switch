@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArchiveRestore, Trash2 } from 'lucide-react'
+import { ArchiveRestore, ArchiveX } from 'lucide-react'
 import { Button, Dialog, EmptyState, Skeleton } from '../../shared'
 import { useToast } from '../../app/Toast'
 
@@ -117,7 +117,7 @@ export function SourceArchivePage() {
                     恢复批次
                   </Button>
                   <Button size="sm" variant="danger" disabled={!batch.archive.purgeable} onClick={() => { setPurgeTarget(batch); setPurgePreview(null) }}>
-                    <Trash2 className="h-3 w-3" />永久清理
+                    <ArchiveX className="h-3 w-3" />永久清理
                   </Button>
                 </div>
               </div>
@@ -150,7 +150,7 @@ export function SourceArchivePage() {
         <Dialog open title="恢复来源归档批次" description="将整批恢复原候选来源与旧工具入口，并移除本批次建立的权威来源。任何原位置被占用时都会整批拒绝。" confirmLabel="确认恢复" busy={busy} onConfirm={restore} onClose={() => { if (!busy) setRestoreTarget(null) }} />
       )}
       {purgeTarget && (
-        <Dialog open title="永久清理来源归档" description={purgePreview ? `将永久删除 ${purgePreview.itemCount} 个归档项（${formatBytes(purgePreview.sizeBytes)}）。审计记录会保留，但本批次之后无法恢复。` : '先生成清理预览，再单独确认永久删除归档载荷。'} confirmLabel={purgePreview ? '确认永久清理' : '预览清理'} busy={busy} onConfirm={purge} onClose={() => { if (!busy) { setPurgeTarget(null); setPurgePreview(null) } }} closeOnOverlay={false} />
+        <Dialog open title="永久清理来源归档" description={purgePreview ? `将永久清理 ${purgePreview.itemCount} 个归档项（${formatBytes(purgePreview.sizeBytes)}）。审计记录会保留，但本批次之后无法恢复。` : '先生成清理预览，再单独确认永久清理归档载荷。'} confirmLabel={purgePreview ? '确认永久清理' : '预览清理'} busy={busy} onConfirm={purge} onClose={() => { if (!busy) { setPurgeTarget(null); setPurgePreview(null) } }} closeOnOverlay={false} />
       )}
     </div>
   )

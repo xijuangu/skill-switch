@@ -69,6 +69,7 @@ const api = {
   redeploy: (deploymentId: number) => ipcRenderer.invoke('redeploy', deploymentId),
   undeploy: (deploymentId: number) => ipcRenderer.invoke('undeploy', deploymentId),
   adoptDeployment: (deploymentId: number) => ipcRenderer.invoke('adoptDeployment', deploymentId),
+  adoptTargetAsCandidate: (deploymentId: number) => ipcRenderer.invoke('adoptTargetAsCandidate', deploymentId),
   getBulkAdoptionFacts: () => ipcRenderer.invoke('getBulkAdoptionFacts'),
   previewBulkAdoption: () => ipcRenderer.invoke('previewBulkAdoption'),
   confirmBulkAdoption: (confirmationId: string) => ipcRenderer.invoke('confirmBulkAdoption', confirmationId),

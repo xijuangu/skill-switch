@@ -1,8 +1,9 @@
-import { existsSync, lstatSync, readlinkSync, realpathSync } from 'fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'fs'
+import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import type { DB } from '../db/database'
 import { adoptObservedDeployment, getAllDeployments, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
-import { getSourceById } from '../db/dao/skill-sources'
+import { getSourceById, getSourceByPath, getCanonicalSourceBySkillId, upsertSource } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
 import type { DeployMode, DeployResult, Deployment, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
 import {
@@ -46,6 +47,8 @@ export type DeploymentConfirmationReason =
   | 'external-overwrite'
   | 'target-modified'
   | 'mode-degraded'
+  | 'source-updated'
+  | 'bidirectional'
 
 export interface DeploymentConfirmationFacts {
   skillName: string
@@ -70,7 +73,7 @@ export type DeploymentOutcome =
     }
   | {
       status: 'rejected'
-      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy' | 'observed-read-only'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy' | 'observed-read-only' | 'canonical-source-unavailable' | 'source-not-canonical'
       message: string
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
@@ -79,7 +82,16 @@ export type DeploymentMutationOutcome =
   | { status: 'completed'; deploymentId: number }
   | {
       status: 'rejected'
-      reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'observation-stale'
+      reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'observation-stale' | 'canonical-source-unavailable' | 'source-not-canonical'
+      message: string
+    }
+  | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
+
+export type TargetAdoptionOutcome =
+  | { status: 'adopted'; deploymentId: number; candidateSourceId: number; candidateSourcePath: string }
+  | {
+      status: 'rejected'
+      reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'not-target-modified' | 'canonical-repository-unavailable' | 'canonical-source-unavailable'
       message: string
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
@@ -172,6 +184,7 @@ export interface DeploymentFacade {
   redeploy(deploymentId: number): Promise<DeploymentRedeployOutcome>
   undeploy(deploymentId: number): Promise<DeploymentMutationOutcome>
   adopt(deploymentId: number): Promise<DeploymentMutationOutcome>
+  adoptTargetAsCandidate(deploymentId: number): Promise<TargetAdoptionOutcome>
   getBulkAdoptionFacts(): BulkAdoptionPreviewFacts
   previewBulkAdoption(): BulkAdoptionPreviewOutcome
   confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome>
@@ -182,6 +195,7 @@ export function createDeploymentFacade(options: {
   db: DB
   getRuntime: () => Runtime
   backupsDir: string
+  canonicalRepositoryPath?: string
   now?: () => number
   createId?: () => string
   confirmationTtlMs?: number
@@ -212,6 +226,39 @@ export function createDeploymentFacade(options: {
     actualMode: DeployMode
     degradationReason?: string
     fingerprint: string
+  }
+
+  /**
+   * #91: 检查 skill 的 canonical Source 是否缺失或不可读。
+   * skill 没有 canonical Source 时不冻结(尚未整理)。
+   * 只读 inspect 不调用此函数,仍可诊断 source-missing。
+   */
+  function canonicalSourceFrozen(skillId: number): boolean {
+    const canonical = getCanonicalSourceBySkillId(options.db, skillId)
+    if (!canonical) return false
+    try {
+      if (!existsSync(canonical.path)) return true
+      if (!lstatSync(canonical.path).isDirectory()) return true
+      return false
+    } catch {
+      return true
+    }
+  }
+
+  const CANONICAL_SOURCE_UNAVAILABLE = {
+    status: 'rejected' as const,
+    reason: 'canonical-source-unavailable' as const,
+    message: '权威 Source 缺失或不可读,相关变更已被冻结,请通过 Source Recovery 恢复。'
+  }
+
+  /**
+   * #92: 只有 Canonical Source 可以创建 Deployment。
+   * Candidate Source 必须先整理(Consolidation)为 Canonical 才能部署。
+   */
+  const SOURCE_NOT_CANONICAL = {
+    status: 'rejected' as const,
+    reason: 'source-not-canonical' as const,
+    message: '只有权威 Source 可以创建部署,请先整理为 Canonical Source。'
   }
 
   async function withTargetLock<T extends DeploymentOutcome | DeploymentMutationOutcome>(
@@ -290,11 +337,16 @@ export function createDeploymentFacade(options: {
       }
     }
     const currentTargetHash = hashDir(targetPath)
-    const kind = currentTargetHash !== deployment.source_hash_at_deploy
-      ? 'target-modified'
-      : currentSourceHash !== deployment.source_hash_at_deploy
-        ? 'source-updated'
-        : 'normal'
+    // 双向变化优先判定为 bidirectional,不自动选择方向 (#89)
+    const sourceChanged = currentSourceHash !== deployment.source_hash_at_deploy
+    const targetChanged = currentTargetHash !== deployment.source_hash_at_deploy
+    const kind = sourceChanged && targetChanged
+      ? 'bidirectional'
+      : targetChanged
+        ? 'target-modified'
+        : sourceChanged
+          ? 'source-updated'
+          : 'normal'
     return {
       skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
       targetPath, deployment, targetExists: true, currentSourceHash, currentTargetHash, kind
@@ -377,7 +429,10 @@ export function createDeploymentFacade(options: {
         resolved.source.path,
         existing.source_hash_at_deploy
       )
-    ) reasons.push('target-modified')
+    ) {
+      // 双向变化进入 bidirectional 冲突,不自动选择方向 (#89)
+      reasons.push(sourceHash !== existing.source_hash_at_deploy ? 'bidirectional' : 'target-modified')
+    }
     if (actualMode === 'copy' && request.requestedMode !== 'copy') reasons.push('mode-degraded')
     const targetHash = targetExists ? fingerprintTarget(resolved.targetPath) : null
     const fingerprint = JSON.stringify({
@@ -556,6 +611,9 @@ export function createDeploymentFacade(options: {
   function adopt(deploymentId: number): Promise<DeploymentMutationOutcome> {
     const resolved = resolveExisting(deploymentId)
     if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+    if (canonicalSourceFrozen(resolved.deployment.skill_id)) {
+      return Promise.resolve(CANONICAL_SOURCE_UNAVAILABLE)
+    }
     if (resolved.deployment.management === 'managed') {
       return Promise.resolve({ status: 'completed', deploymentId: resolved.deployment.id })
     }
@@ -565,10 +623,47 @@ export function createDeploymentFacade(options: {
   function adoptPreviewedObserved(deploymentId: number): Promise<DeploymentMutationOutcome> {
     const resolved = resolveExisting(deploymentId)
     if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+    if (canonicalSourceFrozen(resolved.deployment.skill_id)) {
+      return Promise.resolve(CANONICAL_SOURCE_UNAVAILABLE)
+    }
     if (resolved.deployment.management === 'managed') {
       return Promise.resolve({ status: 'rejected', reason: 'observation-stale', message: '外部订阅状态已变化，请刷新后重试。' })
     }
     return executeObservedAdoption(resolved)
+  }
+
+  function adoptTargetAsCandidate(deploymentId: number): Promise<TargetAdoptionOutcome> {
+    const resolved = resolveExisting(deploymentId)
+    if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+    if (canonicalSourceFrozen(resolved.deployment.skill_id)) {
+      return Promise.resolve(CANONICAL_SOURCE_UNAVAILABLE)
+    }
+    const { deployment, skill } = resolved
+    if (deployment.management === 'observed') {
+      return Promise.resolve({ status: 'rejected', reason: 'observed-read-only', message: '外部订阅尚未接管，拒绝操作。' } as const)
+    }
+    if (!options.canonicalRepositoryPath) {
+      return Promise.resolve({ status: 'rejected', reason: 'canonical-repository-unavailable', message: 'Canonical Repository 路径未配置，无法归档 Candidate Source。' } as const)
+    }
+    return withTargetLock(deployment.target_id!, () => {
+      const recovery = inspectRecoveryEvidence(deployment.target_path!)
+      if (recovery) return { status: 'recovery-required', message: '检测到未完成的部署操作，请保留现场并人工选择恢复方向。', evidence: recovery }
+      const drift = inspect(deploymentId)
+      if (!drift || drift.kind !== 'target-modified') {
+        return { status: 'rejected', reason: 'not-target-modified', message: '仅目标侧修改可保留为 Candidate Source；当前漂移类型不适用。' } as const
+      }
+      // 将修改后的目标内容复制到 canonical repository 同级的 adopted-candidates 目录
+      const adoptedDir = join(dirname(options.canonicalRepositoryPath), 'adopted-candidates', `${skill.name}-${deployment.id}`)
+      mkdirSync(dirname(adoptedDir), { recursive: true })
+      rmSync(adoptedDir, { recursive: true, force: true })
+      cpSync(deployment.target_path!, adoptedDir, { recursive: true })
+      const candidateHash = hashDir(adoptedDir)
+      upsertSource(options.db, skill.id, adoptedDir, candidateHash, Math.floor(statSync(adoptedDir).mtimeMs), 'indexed', {
+        role: 'candidate', origin: 'local', tool: deployment.target_tool
+      })
+      const candidateSource = getSourceByPath(options.db, adoptedDir)!
+      return { status: 'adopted', deploymentId: deployment.id, candidateSourceId: candidateSource.id, candidateSourcePath: adoptedDir }
+    }) as Promise<TargetAdoptionOutcome>
   }
 
   async function confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome> {
@@ -606,6 +701,12 @@ export function createDeploymentFacade(options: {
   return {
     deploy(request) {
       const requestedSource = getSourceById(options.db, request.sourceId)
+      if (requestedSource && requestedSource.source_role !== 'canonical') {
+        return Promise.resolve(SOURCE_NOT_CANONICAL)
+      }
+      if (requestedSource && canonicalSourceFrozen(requestedSource.skill_id)) {
+        return Promise.resolve(CANONICAL_SOURCE_UNAVAILABLE)
+      }
       const existing = requestedSource == null
         ? undefined
         : getDeploymentBySkillAndTargetId(options.db, requestedSource.skill_id, request.targetId)
@@ -630,6 +731,13 @@ export function createDeploymentFacade(options: {
       const stored = confirmations.get(confirmationId)
       if (!stored) {
         return Promise.resolve({ status: 'rejected', reason: 'confirmation-invalid', message: '确认无效或应用已重启，请重新发起部署。' })
+      }
+      const requestedSource = getSourceById(options.db, stored.sourceId)
+      if (requestedSource && requestedSource.source_role !== 'canonical') {
+        return Promise.resolve(SOURCE_NOT_CANONICAL)
+      }
+      if (requestedSource && canonicalSourceFrozen(requestedSource.skill_id)) {
+        return Promise.resolve(CANONICAL_SOURCE_UNAVAILABLE)
       }
       return withTargetLock(stored.targetId, () => {
         // Consume only after this confirmation owns the target lock.
@@ -657,6 +765,12 @@ export function createDeploymentFacade(options: {
     redeploy(deploymentId) {
       const resolved = resolveExisting(deploymentId)
       if ('rejection' in resolved) return Promise.resolve(resolved.rejection)
+      if (resolved.source.source_role !== 'canonical') {
+        return Promise.resolve(SOURCE_NOT_CANONICAL)
+      }
+      if (canonicalSourceFrozen(resolved.deployment.skill_id)) {
+        return Promise.resolve(CANONICAL_SOURCE_UNAVAILABLE)
+      }
       const { deployment, source, target } = resolved
       if (deployment.management === 'observed') {
         return Promise.resolve({ status: 'rejected', reason: 'observed-read-only', message: '外部订阅尚未接管，拒绝重新部署。' } as const)
@@ -683,6 +797,9 @@ export function createDeploymentFacade(options: {
       if (deployment.target_id == null || deployment.target_path == null) {
         return Promise.resolve({ status: 'rejected', reason: 'unresolved', message: '部署目标身份尚未解析，拒绝执行文件系统操作。' } as const)
       }
+      if (canonicalSourceFrozen(deployment.skill_id)) {
+        return Promise.resolve(CANONICAL_SOURCE_UNAVAILABLE)
+      }
       return withTargetLock(deployment.target_id!, () => {
         const recovery = inspectRecoveryEvidence(deployment.target_path!)
         if (recovery) return { status: 'recovery-required', message: '检测到未完成的部署操作，请保留现场并人工选择恢复方向。', evidence: recovery }
@@ -697,6 +814,7 @@ export function createDeploymentFacade(options: {
         }
       }) as Promise<DeploymentMutationOutcome>
     },
-    adopt
+    adopt,
+    adoptTargetAsCandidate
   }
 }

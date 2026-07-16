@@ -131,6 +131,17 @@ export function getSourceByPath(db: DB, path: string): SkillSource | undefined {
     .get(path) as SkillSource | undefined
 }
 
+/**
+ * #91: 按 skill_id 查 canonical Source。
+ * 一个 skill 最多只有一个 canonical Source(由 SkillLibraryFacade.read 保证)。
+ * 没有 canonical Source 时返回 undefined(skill 尚未整理,不触发冻结)。
+ */
+export function getCanonicalSourceBySkillId(db: DB, skillId: number): SkillSource | undefined {
+  return db
+    .prepare("SELECT * FROM skill_sources WHERE skill_id = ? AND source_role = 'canonical' LIMIT 1")
+    .get(skillId) as SkillSource | undefined
+}
+
 export function getSourceById(db: DB, id: number): SkillSource | undefined {
   return db.prepare('SELECT * FROM skill_sources WHERE id = ?').get(id) as SkillSource | undefined
 }

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { deleteDeploymentById } from '../src/main/db/dao/deployments'
 import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { upsertSkill } from '../src/main/db/dao/skills'
+import { setCanonicalRepositoryPath } from '../src/main/db/database'
 import { readToolsView } from '../src/main/ipc/index'
 import { createDeploymentFacade } from '../src/main/services/deployment-facade'
 import { hashDir } from '../src/main/services/hash'
@@ -16,15 +17,18 @@ function setup() {
   const fs = createTempDir('deployment-read-')
   const database = createTempDb()
   cleanups.push(fs.cleanup, database.cleanup)
-  const sourcePath = join(fs.dir, 'source', 'demo')
+  const canonicalRepositoryPath = join(fs.dir, 'canonical')
+  const sourcePath = join(canonicalRepositoryPath, 'demo')
   const firstRoot = join(fs.dir, 'target-a')
   const secondRoot = join(fs.dir, 'target-b')
+  mkdirSync(canonicalRepositoryPath, { recursive: true })
   mkdirSync(sourcePath, { recursive: true })
   mkdirSync(firstRoot)
   mkdirSync(secondRoot)
   writeFileSync(join(sourcePath, 'SKILL.md'), '# demo')
+  setCanonicalRepositoryPath(database.db, canonicalRepositoryPath)
   const skillId = upsertSkill(database.db, 'demo', sourcePath)
-  upsertSource(database.db, skillId, sourcePath, hashDir(sourcePath), 0, 'indexed')
+  upsertSource(database.db, skillId, sourcePath, hashDir(sourcePath), 0, 'central-repo', { role: 'canonical', origin: 'local' })
   const sourceId = getSourceByPath(database.db, sourcePath)!.id
   const tool: ToolConfig = {
     key: 'codex', displayName: 'Codex', enabled: true,

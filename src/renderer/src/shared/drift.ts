@@ -18,6 +18,7 @@ export const DRIFT_STATUS_MAP: Record<string, DriftStatusMeta> = {
   drift: { variant: 'danger', label: '漂移' },
   external: { variant: 'neutral', label: '外部' },
   'recovery-required': { variant: 'danger', label: '需要人工恢复' },
+  'bidirectional': { variant: 'danger', label: '双向漂移' },
 }
 
 const FALLBACK_VARIANT: StatusVariant = 'neutral'

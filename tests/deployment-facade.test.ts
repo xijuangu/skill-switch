@@ -19,14 +19,16 @@ function setup() {
   const fs = createTempDir('deployment-facade-')
   const database = createTempDb()
   cleanups.push(fs.cleanup, database.cleanup)
-  const sourcePath = join(fs.dir, 'source', 'demo')
+  const canonicalRepositoryPath = join(fs.dir, 'canonical')
+  const sourcePath = join(canonicalRepositoryPath, 'demo')
   const targetRoot = join(fs.dir, 'target')
   const backupsDir = join(fs.dir, 'backups')
   mkdirSync(sourcePath, { recursive: true })
   mkdirSync(targetRoot, { recursive: true })
+  mkdirSync(canonicalRepositoryPath, { recursive: true })
   writeFileSync(join(sourcePath, 'SKILL.md'), '# demo')
   const skillId = upsertSkill(database.db, 'demo', sourcePath)
-  upsertSource(database.db, skillId, sourcePath, hashDir(sourcePath), 0, 'indexed', { origin: 'scan' })
+  upsertSource(database.db, skillId, sourcePath, hashDir(sourcePath), 0, 'central-repo', { role: 'canonical', origin: 'local' })
   const sourceId = getSourceByPath(database.db, sourcePath)!.id
   const targetId = 'target-codex'
   const tool: ToolConfig = {
@@ -42,6 +44,7 @@ function setup() {
     platform?: { platform: string; canSymlink: boolean; canJunction: boolean }
     runMutation?: <T>(mutation: () => T) => Promise<T>
     mutationHooks?: DeploymentMutationHooks
+    canonicalRepositoryPath?: string
   } = {}) => createDeploymentFacade({
     db: options.db ?? database.db,
     getRuntime: () => ({
@@ -49,13 +52,14 @@ function setup() {
       platform: options.platform ?? { platform: 'test', canSymlink: true, canJunction: false }
     }),
     backupsDir,
+    canonicalRepositoryPath: options.canonicalRepositoryPath ?? canonicalRepositoryPath,
     now: () => now,
     createId: () => `confirmation-${++confirmationSequence}`,
     confirmationTtlMs: 100,
     runMutation: options.runMutation,
     mutationHooks: options.mutationHooks
   })
-  return { ...database, skillId, sourceId, targetId, targetRoot, sourcePath, tool, create, advance: (ms: number) => { now += ms } }
+  return { ...database, skillId, sourceId, targetId, targetRoot, sourcePath, canonicalRepositoryPath, tool, create, advance: (ms: number) => { now += ms } }
 }
 
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
@@ -148,8 +152,8 @@ describe('Deployment Facade', () => {
   test('bulk adoption facts only include observed rows whose tool key and configured target id match the runtime', () => {
     const env = setup()
     const addObserved = (name: string, targetTool: string, targetId: string) => {
-      const sourcePath = join(dirname(env.sourcePath), name)
-      mkdirSync(sourcePath)
+      const sourcePath = join(dirname(env.canonicalRepositoryPath), 'sources', name)
+      mkdirSync(sourcePath, { recursive: true })
       writeFileSync(join(sourcePath, 'SKILL.md'), `# ${name}`)
       const skillId = upsertSkill(env.db, name, sourcePath)
       upsertSource(env.db, skillId, sourcePath, hashDir(sourcePath), 0, 'indexed', { origin: 'scan' })
@@ -188,11 +192,11 @@ describe('Deployment Facade', () => {
       hashDir(env.sourcePath), { sourceId: env.sourceId, targetId: env.targetId }, 'observed'
     )
 
-    const secondSource = join(dirname(env.sourcePath), 'second')
+    const secondSource = join(dirname(env.canonicalRepositoryPath), 'sources', 'second')
     const secondTarget = join(env.targetRoot, 'second')
-    const replacement = join(dirname(env.sourcePath), 'replacement')
-    mkdirSync(secondSource)
-    mkdirSync(replacement)
+    const replacement = join(dirname(env.canonicalRepositoryPath), 'sources', 'replacement')
+    mkdirSync(secondSource, { recursive: true })
+    mkdirSync(replacement, { recursive: true })
     writeFileSync(join(secondSource, 'SKILL.md'), '# second')
     const secondSkillId = upsertSkill(env.db, 'second', secondSource)
     upsertSource(env.db, secondSkillId, secondSource, hashDir(secondSource), 0, 'indexed', { origin: 'scan' })
@@ -353,14 +357,16 @@ describe('Deployment Facade', () => {
     expect(facade.inspect(deployed.deploymentId)).toBeNull()
   })
 
-  test('undeploy remains available when the Source content is missing', async () => {
+  test('undeploy is frozen when the canonical Source content is missing (#91)', async () => {
     const env = setup()
     const facade = env.create()
     const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
     if (deployed.status !== 'completed') throw new Error('expected deployment')
     rmSync(env.sourcePath, { recursive: true })
     expect(facade.inspect(deployed.deploymentId)).toMatchObject({ kind: 'source-missing' })
-    expect(await facade.undeploy(deployed.deploymentId)).toMatchObject({ status: 'completed' })
+    // #91: canonical source 缺失时,undeploy 被冻结
+    expect(await facade.undeploy(deployed.deploymentId))
+      .toMatchObject({ status: 'rejected', reason: 'canonical-source-unavailable' })
   })
 
   test('inspect and mutations report recovery evidence for the deployment target', async () => {
@@ -751,5 +757,151 @@ describe('Deployment Facade', () => {
     await expect(planner.confirm(confirmation.confirmationId)).rejects.toThrow('backup stage failed')
     expect(readFileSync(join(targetPath, 'SKILL.md'), 'utf-8')).toBe('# external')
     expect(readdirSync(env.targetRoot).filter((name) => name.startsWith('.skill-switch-'))).toEqual([])
+  })
+
+  test('#89 inspect reports bidirectional drift when both source and copy target have changed', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+
+    // 双向变化:source 和 target 都改了,且内容不同
+    writeFileSync(join(env.sourcePath, 'SKILL.md'), '# source changed')
+    writeFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), '# target changed')
+
+    expect(facade.inspect(deployed.deploymentId)).toMatchObject({ kind: 'bidirectional' })
+  })
+
+  test('#89 bidirectional drift requires confirmation without choosing a direction', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+
+    writeFileSync(join(env.sourcePath, 'SKILL.md'), '# source changed')
+    writeFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), '# target changed')
+
+    const planned = await facade.redeploy(deployed.deploymentId)
+    expect(planned).toMatchObject({
+      status: 'confirmation-required',
+      facts: { reasons: ['bidirectional'] }
+    })
+  })
+
+  test('#89 adopts a modified copy target as a Candidate Source without overwriting it', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+    writeFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), '# target modified')
+
+    const result = await facade.adoptTargetAsCandidate(deployed.deploymentId)
+
+    expect(result).toMatchObject({ status: 'adopted', deploymentId: deployed.deploymentId })
+    if (result.status !== 'adopted') throw new Error('expected adopted')
+    // 新 Candidate Source 已注册
+    const candidate = getSourceByPath(env.db, result.candidateSourcePath)!
+    expect(candidate).toBeDefined()
+    expect(candidate.source_role).toBe('candidate')
+    expect(candidate.skill_id).toBe(env.skillId)
+    expect(readFileSync(join(result.candidateSourcePath, 'SKILL.md'), 'utf8')).toBe('# target modified')
+    // 原目标未被覆盖,仍保留修改后内容
+    expect(readFileSync(join(env.targetRoot, 'demo', 'SKILL.md'), 'utf8')).toBe('# target modified')
+  })
+
+  test('#91 freezes deployment mutations when canonical Source is missing', async () => {
+    const env = setup()
+    const facade = env.create()
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+    // 在 canonical repository 内创建 canonical source,随后删除触发冻结
+    const canonicalPath = join(env.canonicalRepositoryPath, 'demo')
+    mkdirSync(canonicalPath, { recursive: true })
+    writeFileSync(join(canonicalPath, 'SKILL.md'), '# canonical')
+    upsertSource(env.db, env.skillId, canonicalPath, hashDir(canonicalPath), 0, 'central-repo', { role: 'canonical', origin: 'local' })
+    rmSync(canonicalPath, { recursive: true, force: true })
+
+    // deploy / redeploy / undeploy / adoptTargetAsCandidate 均被冻结
+    expect(await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' }))
+      .toMatchObject({ status: 'rejected', reason: 'canonical-source-unavailable' })
+    expect(await facade.redeploy(deployed.deploymentId))
+      .toMatchObject({ status: 'rejected', reason: 'canonical-source-unavailable' })
+    expect(await facade.undeploy(deployed.deploymentId))
+      .toMatchObject({ status: 'rejected', reason: 'canonical-source-unavailable' })
+    expect(await facade.adoptTargetAsCandidate(deployed.deploymentId))
+      .toMatchObject({ status: 'rejected', reason: 'canonical-source-unavailable' })
+    // 只读 inspect 不受 freeze 影响,仍可正常返回 drift 状态
+    expect(facade.inspect(deployed.deploymentId)).not.toBeNull()
+  })
+
+  test('#91 freezes confirm when canonical Source becomes unavailable after preview', async () => {
+    const env = setup()
+    const facade = env.create()
+    const targetPath = join(env.targetRoot, 'demo')
+    mkdirSync(targetPath)
+    writeFileSync(join(targetPath, 'SKILL.md'), '# external')
+    const confirmation = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (confirmation.status !== 'confirmation-required') throw new Error('expected confirmation')
+
+    // 创建 canonical source 后删除,触发冻结
+    const canonicalPath = join(env.canonicalRepositoryPath, 'demo')
+    mkdirSync(canonicalPath, { recursive: true })
+    writeFileSync(join(canonicalPath, 'SKILL.md'), '# canonical')
+    upsertSource(env.db, env.skillId, canonicalPath, hashDir(canonicalPath), 0, 'central-repo', { role: 'canonical', origin: 'local' })
+    rmSync(canonicalPath, { recursive: true, force: true })
+
+    expect(await facade.confirm(confirmation.confirmationId))
+      .toMatchObject({ status: 'rejected', reason: 'canonical-source-unavailable' })
+  })
+
+  test('#91 does not freeze mutations when skill has no canonical Source', async () => {
+    const env = setup()
+    const facade = env.create()
+    // 创建一个没有 canonical source 的 candidate-only skill
+    const candidatePath = join(dirname(env.canonicalRepositoryPath), 'candidate-only', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '# candidate only')
+    const candidateSkillId = upsertSkill(env.db, 'candidate-only', candidatePath)
+    upsertSource(env.db, candidateSkillId, candidatePath, hashDir(candidatePath), 0, 'indexed', { origin: 'scan' })
+    const candidateSourceId = getSourceByPath(env.db, candidatePath)!.id
+    // #92: candidate source 无法部署,但拒绝原因是 source-not-canonical 而非 canonical-source-unavailable
+    // 这证明 #91 freeze 未触发(没有 canonical source 时不冻结)
+    expect(await facade.deploy({ sourceId: candidateSourceId, targetId: env.targetId, requestedMode: 'copy' }))
+      .toMatchObject({ status: 'rejected', reason: 'source-not-canonical' })
+  })
+
+  test('#92 rejects deploy from a Candidate Source', async () => {
+    const env = setup()
+    const facade = env.create()
+    // 创建一个 candidate source(在 canonical repository 之外)
+    const candidatePath = join(dirname(env.canonicalRepositoryPath), 'candidates', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '# candidate')
+    upsertSource(env.db, env.skillId, candidatePath, hashDir(candidatePath), 0, 'indexed', { origin: 'scan' })
+    const candidateSourceId = getSourceByPath(env.db, candidatePath)!.id
+
+    expect(await facade.deploy({ sourceId: candidateSourceId, targetId: env.targetId, requestedMode: 'copy' }))
+      .toMatchObject({ status: 'rejected', reason: 'source-not-canonical' })
+  })
+
+  test('#92 rejects redeploy of a deployment whose Source is Candidate', async () => {
+    const env = setup()
+    const facade = env.create()
+    // 先用 canonical source 创建部署
+    const deployed = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    if (deployed.status !== 'completed') throw new Error('expected deployment')
+    // 将 source 的 role 降级为 candidate(模拟 legacy 部署)
+    env.db.prepare("UPDATE skill_sources SET source_role = 'candidate' WHERE id = ?").run(env.sourceId)
+
+    expect(await facade.redeploy(deployed.deploymentId))
+      .toMatchObject({ status: 'rejected', reason: 'source-not-canonical' })
+  })
+
+  test('#92 allows deploy from a Canonical Source', async () => {
+    const env = setup()
+    const facade = env.create()
+    // setup() 已将 source 创建在 canonical repository 内,role 自动为 canonical
+    const result = await facade.deploy({ sourceId: env.sourceId, targetId: env.targetId, requestedMode: 'copy' })
+    expect(result.status).toBe('completed')
   })
 })

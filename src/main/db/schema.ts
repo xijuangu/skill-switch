@@ -122,6 +122,33 @@ CREATE TABLE IF NOT EXISTS source_relocation_locks (
   relocation_id TEXT NOT NULL,
   FOREIGN KEY (relocation_id) REFERENCES source_relocations(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS source_recoveries (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('previewed', 'completed', 'failed', 'recovery-required')),
+  skill_id INTEGER NOT NULL,
+  skill_name TEXT NOT NULL,
+  canonical_source_id INTEGER,
+  canonical_path TEXT NOT NULL,
+  last_known_hash TEXT NOT NULL,
+  selected_candidate_path TEXT,
+  selected_candidate_hash TEXT,
+  selected_candidate_kind TEXT CHECK (selected_candidate_kind IS NULL OR selected_candidate_kind IN ('archive', 'historical-canonical', 'copy-deployment', 'user-directory')),
+  candidates_snapshot TEXT NOT NULL,
+  phase TEXT,
+  journal_json TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  failure_message TEXT,
+  FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+  FOREIGN KEY (canonical_source_id) REFERENCES skill_sources(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS source_recovery_locks (
+  resource TEXT PRIMARY KEY,
+  recovery_id TEXT NOT NULL,
+  FOREIGN KEY (recovery_id) REFERENCES source_recoveries(id) ON DELETE CASCADE
+);
 `
 
 /**
@@ -409,6 +436,31 @@ export function runMigrations(
       resource TEXT PRIMARY KEY,
       relocation_id TEXT NOT NULL,
       FOREIGN KEY (relocation_id) REFERENCES source_relocations(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS source_recoveries (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('previewed', 'completed', 'failed', 'recovery-required')),
+      skill_id INTEGER NOT NULL,
+      skill_name TEXT NOT NULL,
+      canonical_source_id INTEGER,
+      canonical_path TEXT NOT NULL,
+      last_known_hash TEXT NOT NULL,
+      selected_candidate_path TEXT,
+      selected_candidate_hash TEXT,
+      selected_candidate_kind TEXT CHECK (selected_candidate_kind IS NULL OR selected_candidate_kind IN ('archive', 'historical-canonical', 'copy-deployment', 'user-directory')),
+      candidates_snapshot TEXT NOT NULL,
+      phase TEXT,
+      journal_json TEXT,
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      failure_message TEXT,
+      FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+      FOREIGN KEY (canonical_source_id) REFERENCES skill_sources(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS source_recovery_locks (
+      resource TEXT PRIMARY KEY,
+      recovery_id TEXT NOT NULL,
+      FOREIGN KEY (recovery_id) REFERENCES source_recoveries(id) ON DELETE CASCADE
     );
   `)
 }

@@ -92,6 +92,9 @@ describe('Source Root selective subscriptions', () => {
           })
         })
 
+        // #92: 只有 Canonical Source 可以创建部署,将发现的 candidate source 提升为 canonical
+        database.db.prepare("UPDATE skill_sources SET source_role = 'canonical' WHERE id = ?").run(subscribedSources[0].id)
+
         const codexDeployment = await facade.deploy({
           sourceId: subscribedSources[0].id,
           targetId: 'codex-target',

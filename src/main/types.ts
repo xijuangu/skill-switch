@@ -270,6 +270,7 @@ export type DriftKind =
   | 'drift'
   | 'external'
   | 'recovery-required'
+  | 'bidirectional'
 
 /** 单个部署点的漂移检测结果 */
 export interface DriftStatus {

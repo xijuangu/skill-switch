@@ -319,7 +319,7 @@ export type DeploymentOutcomeView =
     }
   | {
       status: 'rejected'
-      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy' | 'observed-read-only'
+      reason: 'confirmation-expired' | 'confirmation-used' | 'confirmation-invalid' | 'plan-changed' | 'target-busy' | 'observed-read-only' | 'canonical-source-unavailable' | 'source-not-canonical'
       message: string
     }
   | {
@@ -337,7 +337,12 @@ export type DeploymentOutcomeView =
 
 export type DeploymentMutationOutcomeView =
   | { status: 'completed'; deploymentId: number }
-  | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'observation-stale'; message: string }
+  | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'observation-stale' | 'canonical-source-unavailable' | 'source-not-canonical'; message: string }
+  | Extract<DeploymentOutcomeView, { status: 'recovery-required' }>
+
+export type TargetAdoptionOutcomeView =
+  | { status: 'adopted'; deploymentId: number; candidateSourceId: number; candidateSourcePath: string }
+  | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'not-target-modified' | 'canonical-repository-unavailable' | 'canonical-source-unavailable'; message: string }
   | Extract<DeploymentOutcomeView, { status: 'recovery-required' }>
 
 export type DeploymentRedeployOutcomeView =
@@ -479,6 +484,7 @@ declare global {
       redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
       undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
+      adoptTargetAsCandidate: (deploymentId: number) => Promise<TargetAdoptionOutcomeView>
       getBulkAdoptionFacts: () => Promise<BulkAdoptionPreviewFactsView>
       previewBulkAdoption: () => Promise<BulkAdoptionPreviewOutcomeView>
       confirmBulkAdoption: (confirmationId: string) => Promise<BulkAdoptionConfirmationOutcomeView>
