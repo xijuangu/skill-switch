@@ -306,6 +306,15 @@ export function registerIpcHandlers(db: DB): void {
   ipcMain.handle('skillLibrary:undoConsolidation', async (_e, batchId: unknown) =>
     skillLibraryFacade.undoConsolidation(assertNonEmptyString(batchId, 'batchId'))
   )
+  ipcMain.handle('skillLibrary:restoreConsolidation', async (_e, batchId: unknown) =>
+    skillLibraryFacade.restoreConsolidation(assertNonEmptyString(batchId, 'batchId'))
+  )
+  ipcMain.handle('skillLibrary:previewSourceArchivePurge', async (_e, batchId: unknown) =>
+    skillLibraryFacade.previewSourceArchivePurge(assertNonEmptyString(batchId, 'batchId'))
+  )
+  ipcMain.handle('skillLibrary:confirmSourceArchivePurge', async (_e, confirmationId: unknown) =>
+    skillLibraryFacade.confirmSourceArchivePurge(assertNonEmptyString(confirmationId, 'confirmationId'))
+  )
 
   ipcMain.handle('getSettings', async () => {
     const settings = readSettings(SETTINGS_PATH)

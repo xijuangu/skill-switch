@@ -42,7 +42,10 @@ describe('database migrations', () => {
     runMigrations(db)
 
     const columns = (db.prepare('PRAGMA table_info(consolidation_batches)').all() as Array<{ name: string }>).map((column) => column.name)
-    expect(columns).toEqual(expect.arrayContaining(['phase', 'evidence_json']))
+    expect(columns).toEqual(expect.arrayContaining([
+      'phase', 'evidence_json', 'archive_size_bytes', 'archive_purged_at',
+      'purge_confirmation_id', 'purge_previewed_at', 'purge_archive_hash'
+    ]))
     db.close()
   })
 

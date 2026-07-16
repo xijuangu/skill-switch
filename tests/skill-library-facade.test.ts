@@ -530,7 +530,125 @@ describe('SkillLibraryFacade', () => {
       status: 'rejected', reason: 'restore-path-occupied'
     })
     expect(existsSync(join(fixture.canonicalRepository, 'demo'))).toBe(true)
-    expect(fixture.facade.read().consolidationBatches[0].status).toBe('completed')
+    expect(fixture.facade.read().consolidationBatches[0]).toMatchObject({ status: 'completed', phase: null })
+    const reopened = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups')
+    })
+    expect(reopened.read().consolidationBatches[0].status).toBe('completed')
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('exposes permanent Source Archive history and restores a completed batch as a whole', () => {
+    const fixture = consolidationFixture('skill-library-archive-history-')
+    const second = addCandidate(fixture, 'review', 'claude')
+    const preview = fixture.facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: 'engineering' },
+      { candidateSourceId: second.source.id, canonicalRelativeParent: 'product' }
+    ] })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+
+    const history = fixture.facade.read().consolidationBatches[0]
+    expect(history.archive).toMatchObject({ recoverable: true, purgedAt: null })
+    expect(history.archive.sizeBytes).toBeGreaterThan(0)
+    expect(history.items).toEqual([
+      expect.objectContaining({
+        skillName: 'demo', originalPath: fixture.candidatePath,
+        originalHash: fixture.source.hash, archivedToolPaths: [fixture.targetPath]
+      }),
+      expect.objectContaining({
+        skillName: 'review', originalPath: second.candidatePath,
+        originalHash: second.source.hash, archivedToolPaths: [second.targetPath]
+      })
+    ])
+
+    expect(fixture.facade.restoreConsolidation(preview.batchId)).toEqual({
+      status: 'undone', batchId: preview.batchId
+    })
+    expect(readFileSync(join(fixture.candidatePath, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+    expect(readFileSync(join(second.candidatePath, 'SKILL.md'), 'utf8')).toBe('# candidate review')
+    expect(readlinkSync(fixture.targetPath)).toBe(fixture.candidatePath)
+    expect(readlinkSync(second.targetPath)).toBe(second.candidatePath)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('permanently purges archive payload only after a separate preview and keeps audit history', () => {
+    const fixture = consolidationFixture('skill-library-archive-purge-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+
+    const purge = fixture.facade.previewSourceArchivePurge(preview.batchId)
+    expect(purge).toMatchObject({
+      status: 'confirmation-required', batchId: preview.batchId,
+      itemCount: 1
+    })
+    if (purge.status !== 'confirmation-required') throw new Error(purge.message)
+    expect(purge.sizeBytes).toBeGreaterThan(0)
+    expect(existsSync(join(fixture.sourceArchive, preview.batchId))).toBe(true)
+
+    const reopened = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups')
+    })
+    expect(reopened.confirmSourceArchivePurge(purge.confirmationId)).toMatchObject({
+      status: 'purged', batchId: preview.batchId
+    })
+    expect(existsSync(join(fixture.sourceArchive, preview.batchId))).toBe(false)
+    const history = reopened.read().consolidationBatches[0]
+    expect(history).toMatchObject({ status: 'completed', archive: { recoverable: false } })
+    expect(history.archive.purgedAt).not.toBeNull()
+    expect(history.archive.sizeBytes).toBe(purge.sizeBytes)
+    expect(history.items[0].originalPath).toBe(fixture.candidatePath)
+    expect(reopened.restoreConsolidation(preview.batchId)).toMatchObject({
+      status: 'rejected', reason: 'archive-purged'
+    })
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('keeps an undone batch archived until the user explicitly purges it', () => {
+    const fixture = consolidationFixture('skill-library-undone-archive-purge-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+    fixture.facade.restoreConsolidation(preview.batchId)
+
+    expect(fixture.facade.read().consolidationBatches[0].archive).toMatchObject({
+      recoverable: false, purgeable: true, purgedAt: null
+    })
+    const purge = fixture.facade.previewSourceArchivePurge(preview.batchId)
+    expect(purge.status).toBe('confirmation-required')
+    if (purge.status !== 'confirmation-required') throw new Error(purge.message)
+    expect(fixture.facade.confirmSourceArchivePurge(purge.confirmationId)).toMatchObject({ status: 'purged' })
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('marks an interrupted purge of an undone batch as recovery-required on restart', () => {
+    const fixture = consolidationFixture('skill-library-undone-purge-restart-')
+    const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+    fixture.facade.restoreConsolidation(preview.batchId)
+    fixture.db.prepare("UPDATE consolidation_batches SET phase = 'archive-purge' WHERE id = ?").run(preview.batchId)
+
+    const reopened = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups')
+    })
+    expect(reopened.read().consolidationBatches[0]).toMatchObject({
+      status: 'recovery-required', recoveryDirection: 'inspect'
+    })
 
     fixture.db.close()
     fixture.root.cleanup()

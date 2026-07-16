@@ -66,7 +66,12 @@ CREATE TABLE IF NOT EXISTS consolidation_batches (
   created_at TEXT NOT NULL,
   completed_at TEXT,
   undone_at TEXT,
-  failure_message TEXT
+  failure_message TEXT,
+  archive_size_bytes INTEGER,
+  archive_purged_at TEXT,
+  purge_confirmation_id TEXT,
+  purge_previewed_at TEXT,
+  purge_archive_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS consolidation_items (
@@ -350,6 +355,11 @@ export function runMigrations(
   const consolidationColumns = new Set((db.prepare('PRAGMA table_info(consolidation_batches)').all() as { name: string }[]).map((column) => column.name))
   if (!consolidationColumns.has('phase')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN phase TEXT')
   if (!consolidationColumns.has('evidence_json')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN evidence_json TEXT')
+  if (!consolidationColumns.has('archive_size_bytes')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN archive_size_bytes INTEGER')
+  if (!consolidationColumns.has('archive_purged_at')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN archive_purged_at TEXT')
+  if (!consolidationColumns.has('purge_confirmation_id')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN purge_confirmation_id TEXT')
+  if (!consolidationColumns.has('purge_previewed_at')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN purge_previewed_at TEXT')
+  if (!consolidationColumns.has('purge_archive_hash')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN purge_archive_hash TEXT')
   const consolidationItemColumns = new Set((db.prepare('PRAGMA table_info(consolidation_items)').all() as { name: string }[]).map((column) => column.name))
   if (!consolidationItemColumns.has('phase')) db.exec('ALTER TABLE consolidation_items ADD COLUMN phase TEXT')
   if (!consolidationItemColumns.has('evidence_json')) db.exec('ALTER TABLE consolidation_items ADD COLUMN evidence_json TEXT')

@@ -63,7 +63,16 @@ export interface SkillLibraryReadModelView {
   consolidationBatches: Array<{
     id: string
     status: 'previewed' | 'completed' | 'failed' | 'recovery-required' | 'undone'
-    items: Array<{ skillId: number; skillName: string; canonicalPath: string; archivePath: string }>
+    items: Array<{
+      skillId: number
+      skillName: string
+      canonicalPath: string
+      archivePath: string
+      originalPath: string
+      originalHash: string
+      archivedToolPaths: string[]
+    }>
+    archive: { sizeBytes: number; recoverable: boolean; purgeable: boolean; purgedAt: string | null }
     phase: string | null
     createdAt: string
     completedAt: string | null
@@ -92,7 +101,7 @@ export type ConsolidationBatchPreviewView = {
 }
 
 export type ConsolidationFailureView =
-  | { status: 'rejected'; batchId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'restore-path-occupied' | 'batch-not-undoable' | 'batch-busy'; message: string }
+  | { status: 'rejected'; batchId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'restore-path-occupied' | 'batch-not-undoable' | 'batch-not-purgeable' | 'archive-purged' | 'batch-busy'; message: string }
   | { status: 'recovery-required'; batchId: string; message: string }
 
 export type ConsolidationConfirmationOutcomeView =
@@ -101,6 +110,14 @@ export type ConsolidationConfirmationOutcomeView =
 
 export type ConsolidationUndoOutcomeView =
   | { status: 'undone'; batchId: string }
+  | ConsolidationFailureView
+
+export type SourceArchivePurgePreviewView =
+  | { status: 'confirmation-required'; confirmationId: string; batchId: string; itemCount: number; sizeBytes: number }
+  | Extract<ConsolidationFailureView, { status: 'rejected' }>
+
+export type SourceArchivePurgeOutcomeView =
+  | { status: 'purged'; batchId: string; purgedAt: string; sizeBytes: number }
   | ConsolidationFailureView
 
 /** issue #23:Skills 页展开视图用,DeploymentView + 当前状态描述 */
@@ -354,6 +371,9 @@ declare global {
       previewConsolidationBatch: (request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }) => Promise<ConsolidationBatchPreviewView>
       confirmConsolidation: (confirmationId: string) => Promise<ConsolidationConfirmationOutcomeView>
       undoConsolidation: (batchId: string) => Promise<ConsolidationUndoOutcomeView>
+      restoreConsolidation: (batchId: string) => Promise<ConsolidationUndoOutcomeView>
+      previewSourceArchivePurge: (batchId: string) => Promise<SourceArchivePurgePreviewView>
+      confirmSourceArchivePurge: (confirmationId: string) => Promise<SourceArchivePurgeOutcomeView>
       getSettings: () => Promise<SettingsView>
       getSourceRoots: () => Promise<SourceRootView[]>
       registerSourceRoot: (path: string) => Promise<SourceRootScanResultView>

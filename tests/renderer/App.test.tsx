@@ -22,6 +22,9 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     previewConsolidation: vi.fn(),
     confirmConsolidation: vi.fn(),
     undoConsolidation: vi.fn(),
+    restoreConsolidation: vi.fn(),
+    previewSourceArchivePurge: vi.fn(),
+    confirmSourceArchivePurge: vi.fn(),
     getSettings: vi.fn().mockResolvedValue({
       tools: [],
       backupRetention: 5,
@@ -87,9 +90,52 @@ describe('App (integration)', () => {
     render(<App />)
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(screen.getByRole('button', { name: '来源归档' }))
     await userEvent.click(screen.getByRole('button', { name: '技能' }))
     // 切回 skills 时不抛错即可
     expect(screen.getByRole('button', { name: '技能' })).toBeInTheDocument()
+  })
+
+  it('shows Source Archive history and requires separate confirmation before permanent purge', async () => {
+    const batch = {
+      id: 'batch-88', status: 'completed' as const, phase: null,
+      items: [{
+        skillId: 1, skillName: 'demo', canonicalPath: '/canonical/demo',
+        archivePath: '/archive/batch-88/source/demo', originalPath: '/imports/demo',
+        originalHash: 'abc123', archivedToolPaths: ['/tools/codex/demo']
+      }],
+      archive: { sizeBytes: 2048, recoverable: true, purgeable: true, purgedAt: null },
+      createdAt: '2026-07-16T00:00:00.000Z', completedAt: '2026-07-16T00:01:00.000Z',
+      undoneAt: null, failureMessage: null, recoveryDirection: null,
+      evidenceSummary: { itemCount: 1, phases: [] }
+    }
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [], consolidationBatches: [batch]
+      }),
+      previewSourceArchivePurge: vi.fn().mockResolvedValue({
+        status: 'confirmation-required', confirmationId: 'purge-88', batchId: 'batch-88',
+        itemCount: 1, sizeBytes: 2048
+      }),
+      confirmSourceArchivePurge: vi.fn().mockResolvedValue({
+        status: 'purged', batchId: 'batch-88', purgedAt: '2026-07-16T01:00:00.000Z', sizeBytes: 2048
+      })
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '来源归档' }))
+
+    expect(await screen.findByText('demo')).toBeInTheDocument()
+    expect(screen.getByText('/imports/demo')).toBeInTheDocument()
+    expect(screen.getByText('/tools/codex/demo')).toBeInTheDocument()
+    expect(screen.getByText('归档占用：2 KB')).toBeInTheDocument()
+    expect(screen.getByText('可恢复')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '永久清理' }))
+    await userEvent.click(screen.getByRole('button', { name: '预览清理' }))
+    expect(api.previewSourceArchivePurge).toHaveBeenCalledWith('batch-88')
+    expect(screen.getByText(/将永久删除 1 个归档项/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '确认永久清理' }))
+    expect(api.confirmSourceArchivePurge).toHaveBeenCalledWith('purge-88')
   })
 
   it('shows the fixed Canonical Repository separately from Candidate Source directories', async () => {

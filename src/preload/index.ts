@@ -13,6 +13,12 @@ const api = {
     ipcRenderer.invoke('skillLibrary:confirmConsolidation', confirmationId),
   undoConsolidation: (batchId: string) =>
     ipcRenderer.invoke('skillLibrary:undoConsolidation', batchId),
+  restoreConsolidation: (batchId: string) =>
+    ipcRenderer.invoke('skillLibrary:restoreConsolidation', batchId),
+  previewSourceArchivePurge: (batchId: string) =>
+    ipcRenderer.invoke('skillLibrary:previewSourceArchivePurge', batchId),
+  confirmSourceArchivePurge: (confirmationId: string) =>
+    ipcRenderer.invoke('skillLibrary:confirmSourceArchivePurge', confirmationId),
   getSettings: () => ipcRenderer.invoke('getSettings'),
   getSourceRoots: () => ipcRenderer.invoke('getSourceRoots'),
   registerSourceRoot: (path: string) => ipcRenderer.invoke('registerSourceRoot', path),

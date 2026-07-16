@@ -7,17 +7,19 @@ import { createLatestRequestGate, completeMutation } from '../async-state'
 import { SkillsPage } from '../features/skills/SkillsPage'
 import { ToolsPage } from '../features/tools/ToolsPage'
 import { BackupsPage } from '../features/backups/BackupsPage'
+import { SourceArchivePage } from '../features/source-archive/SourceArchivePage'
 import { SettingsPage } from '../features/settings/SettingsPage'
 
 type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 
-type Page = 'skills' | 'tools' | 'backups' | 'settings'
+type Page = 'skills' | 'tools' | 'source-archive' | 'backups' | 'settings'
 
 const NAV_ITEMS: { page: Page; label: string; icon: typeof Sparkles }[] = [
   { page: 'skills', label: '技能', icon: Sparkles },
   { page: 'tools', label: '工具', icon: Wrench },
+  { page: 'source-archive', label: '来源归档', icon: Archive },
   { page: 'backups', label: '备份', icon: Archive },
   { page: 'settings', label: '设置', icon: Settings },
 ]
@@ -125,6 +127,7 @@ function AppShell() {
             onRefresh={refresh}
           />
         )}
+        {page === 'source-archive' && <SourceArchivePage />}
         {page === 'backups' && <BackupsPage />}
         {page === 'settings' && <SettingsPage />}
       </main>
