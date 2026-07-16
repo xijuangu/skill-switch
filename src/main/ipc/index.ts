@@ -285,6 +285,21 @@ export function registerIpcHandlers(db: DB): void {
       canonicalRelativeParent: assertString(dto.canonicalRelativeParent, 'canonicalRelativeParent')
     })
   })
+  ipcMain.handle('skillLibrary:previewConsolidationBatch', async (_e, request: unknown) => {
+    if (typeof request !== 'object' || request === null || !Array.isArray((request as { items?: unknown }).items)) {
+      throw new Error('consolidation batch request must contain items')
+    }
+    return skillLibraryFacade.previewConsolidationBatch({
+      items: (request as { items: unknown[] }).items.map((item) => {
+        if (typeof item !== 'object' || item === null) throw new Error('consolidation batch item must be an object')
+        const dto = item as Record<string, unknown>
+        return {
+          candidateSourceId: assertInteger(dto.candidateSourceId, 'candidateSourceId'),
+          canonicalRelativeParent: assertString(dto.canonicalRelativeParent, 'canonicalRelativeParent')
+        }
+      })
+    })
+  })
   ipcMain.handle('skillLibrary:confirmConsolidation', async (_e, confirmationId: unknown) =>
     skillLibraryFacade.confirmConsolidation(assertNonEmptyString(confirmationId, 'confirmationId'))
   )

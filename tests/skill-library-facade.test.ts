@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { getAllDeployments, upsertDeployment } from '../src/main/db/dao/deployments'
@@ -39,6 +39,204 @@ describe('SkillLibraryFacade', () => {
     })
     return { root, db, facade, source, candidatePath, targetPath, canonicalRepository, sourceArchive }
   }
+
+  function addCandidate(
+    fixture: ReturnType<typeof consolidationFixture>,
+    name: string,
+    tool: string
+  ) {
+    const candidatePath = join(fixture.root.dir, 'candidates', name)
+    const targetPath = join(fixture.root.dir, tool, name)
+    mkdirSync(candidatePath, { recursive: true })
+    mkdirSync(dirname(targetPath), { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), `# candidate ${name}`)
+    symlinkSync(candidatePath, targetPath, 'dir')
+    const skillId = upsertSkill(fixture.db, name, candidatePath)
+    upsertSource(fixture.db, skillId, candidatePath, hashDir(candidatePath), 1, 'indexed', { role: 'candidate', origin: 'scan' })
+    const source = getSourceByPath(fixture.db, candidatePath)!
+    upsertDeployment(fixture.db, skillId, tool, targetPath, 'symlink', candidatePath, source.hash, {
+      sourceId: source.id, targetId: `${tool}:${name}`
+    }, 'observed')
+    return { source, candidatePath, targetPath }
+  }
+
+  test('confirms and undoes multiple Candidate Sources as one atomic batch', () => {
+    const fixture = consolidationFixture('skill-library-batch-')
+    const second = addCandidate(fixture, 'review', 'claude')
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: 'engineering' },
+      { candidateSourceId: second.source.id, canonicalRelativeParent: 'product' }
+    ] })
+    expect(preview.items).toEqual([
+      { skillId: fixture.source.skill_id, skillName: 'demo', canonicalPath: join(fixture.canonicalRepository, 'engineering', 'demo') },
+      { skillId: second.source.skill_id, skillName: 'review', canonicalPath: join(fixture.canonicalRepository, 'product', 'review') }
+    ])
+
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({
+      status: 'completed', batchId: preview.batchId,
+      items: [
+        { skillId: fixture.source.skill_id, canonicalPath: join(fixture.canonicalRepository, 'engineering', 'demo') },
+        { skillId: second.source.skill_id, canonicalPath: join(fixture.canonicalRepository, 'product', 'review') }
+      ]
+    })
+    expect(getAllDeployments(fixture.db)).toEqual([])
+    expect(fixture.facade.undoConsolidation(preview.batchId)).toEqual({ status: 'undone', batchId: preview.batchId })
+    expect(readFileSync(join(fixture.candidatePath, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+    expect(readFileSync(join(second.candidatePath, 'SKILL.md'), 'utf8')).toBe('# candidate review')
+    expect(getAllDeployments(fixture.db)).toHaveLength(2)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('a later item phase failure compensates every earlier item in reverse order', () => {
+    const fixture = consolidationFixture('skill-library-batch-compensate-')
+    const second = addCandidate(fixture, 'review', 'claude')
+    const facade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups'),
+      consolidationHooks: {
+        onPhase: ({ itemIndex, phase }) => {
+          if (itemIndex === 1 && phase === 'canonical-installed') throw new Error('injected second item failure')
+        }
+      }
+    })
+    const preview = facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: 'team/backend' },
+      { candidateSourceId: second.source.id, canonicalRelativeParent: 'team/product' }
+    ] })
+
+    expect(facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'rejected' })
+    expect(readFileSync(join(fixture.candidatePath, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+    expect(readFileSync(join(second.candidatePath, 'SKILL.md'), 'utf8')).toBe('# candidate review')
+    expect(lstatSync(fixture.targetPath).isSymbolicLink()).toBe(true)
+    expect(lstatSync(second.targetPath).isSymbolicLink()).toBe(true)
+    expect(existsSync(join(fixture.canonicalRepository, 'team'))).toBe(false)
+    expect(getAllDeployments(fixture.db)).toHaveLength(2)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('deterministic resource locks reject a reentrant overlapping batch as busy', () => {
+    const fixture = consolidationFixture('skill-library-batch-busy-')
+    let reentrant: unknown
+    let facade!: ReturnType<typeof createSkillLibraryFacade>
+    facade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups'),
+      consolidationHooks: {
+        onPhase: ({ batchId, phase }) => {
+          if (phase === 'staging' && reentrant === undefined) reentrant = facade.confirmConsolidation(batchId)
+        }
+      }
+    })
+    const preview = facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: '' }
+    ] })
+
+    expect(facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+    expect(reentrant).toMatchObject({ status: 'rejected', reason: 'batch-busy' })
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('a failure after registry commit keeps physical results and durable locks for finish-cleanup recovery', () => {
+    const fixture = consolidationFixture('skill-library-batch-post-commit-')
+    const facade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups'),
+      consolidationHooks: { afterRegistryCommit: () => { throw new Error('injected post-commit failure') } }
+    })
+    const preview = facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: '' }
+    ] })
+
+    expect(facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'recovery-required' })
+    const canonicalPath = join(fixture.canonicalRepository, 'demo')
+    expect(existsSync(fixture.candidatePath)).toBe(false)
+    expect(readFileSync(join(canonicalPath, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+    expect(getSourceByPath(fixture.db, canonicalPath)).toMatchObject({ source_role: 'canonical' })
+    expect(facade.read().consolidationBatches[0]).toMatchObject({
+      status: 'recovery-required', recoveryDirection: 'finish-cleanup'
+    })
+    expect(() => facade.replaceCanonicalSource({
+      sourceDirectory: canonicalPath,
+      skillName: 'demo',
+      origin: 'zip'
+    })).toThrow(/busy/)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('a cleanup failure after one item keeps the whole committed batch in finish-cleanup recovery', () => {
+    const fixture = consolidationFixture('skill-library-batch-cleanup-failure-')
+    const second = addCandidate(fixture, 'review', 'claude')
+    const facade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups'),
+      consolidationHooks: {
+        onFaultPoint: ({ itemIndex, point }) => {
+          if (point === 'before-cleanup' && itemIndex === 1) throw new Error('injected cleanup failure')
+        }
+      }
+    })
+    const preview = facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: '' },
+      { candidateSourceId: second.source.id, canonicalRelativeParent: '' }
+    ] })
+
+    expect(facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'recovery-required' })
+    expect(existsSync(join(fixture.canonicalRepository, 'demo'))).toBe(true)
+    expect(existsSync(join(fixture.canonicalRepository, 'review'))).toBe(true)
+    expect(getAllDeployments(fixture.db)).toEqual([])
+    expect(facade.read().consolidationBatches[0]).toMatchObject({ recoveryDirection: 'finish-cleanup' })
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('a compensation failure preserves rollback evidence, locks, and rollback direction', () => {
+    const fixture = consolidationFixture('skill-library-batch-compensation-failure-')
+    const facade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups'),
+      consolidationHooks: {
+        onPhase: ({ phase }) => { if (phase === 'canonical-installed') throw new Error('injected operation failure') },
+        onFaultPoint: ({ point }) => { if (point === 'before-compensation') throw new Error('injected compensation failure') }
+      }
+    })
+    const preview = facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: '' }
+    ] })
+
+    expect(facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'recovery-required' })
+    expect(facade.read().consolidationBatches[0]).toMatchObject({
+      recoveryDirection: 'rollback-consolidation',
+      evidenceSummary: { itemCount: 1, phases: expect.any(Array) }
+    })
+    expect(() => facade.replaceCanonicalSource({
+      sourceDirectory: fixture.root.dir,
+      skillName: 'demo',
+      origin: 'zip'
+    })).toThrow(/busy/)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
 
   test('consolidates one Candidate Source without creating a Deployment and persists an undo entry', () => {
     const fixture = consolidationFixture('skill-library-consolidate-')
@@ -186,13 +384,19 @@ describe('SkillLibraryFacade', () => {
     const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
     fixture.db.prepare("UPDATE consolidation_batches SET status = 'previewed', phase = 'source-displaced', evidence_json = ? WHERE id = ?")
       .run(JSON.stringify({ sourcePath: fixture.candidatePath }), preview.batchId)
+    const recoveredFacade = createSkillLibraryFacade({
+      db: fixture.db,
+      canonicalRepositoryPath: fixture.canonicalRepository,
+      sourceArchivePath: fixture.sourceArchive,
+      backupsDir: join(fixture.root.dir, 'backups')
+    })
 
-    expect(fixture.facade.read().consolidationBatches[0]).toMatchObject({
+    expect(recoveredFacade.read().consolidationBatches[0]).toMatchObject({
       id: preview.batchId,
       status: 'recovery-required',
       phase: 'source-displaced'
     })
-    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({
+    expect(recoveredFacade.confirmConsolidation(preview.confirmationId)).toMatchObject({
       status: 'recovery-required', batchId: preview.batchId
     })
 

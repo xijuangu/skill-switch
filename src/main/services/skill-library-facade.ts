@@ -8,6 +8,7 @@ import {
   readlinkSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   symlinkSync
@@ -41,6 +42,8 @@ export interface ConsolidationBatchSummary {
   completedAt: string | null
   undoneAt: string | null
   failureMessage: string | null
+  recoveryDirection: 'rollback-consolidation' | 'finish-cleanup' | 'rollback-undo' | 'inspect' | null
+  evidenceSummary: { itemCount: number; phases: string[] }
 }
 
 export interface SkillLibraryReadModel {
@@ -61,14 +64,23 @@ export type ConsolidationPreview = {
   }>
 }
 
+export type ConsolidationBatchPreview = {
+  status: 'confirmation-required'
+  confirmationId: string
+  batchId: string
+  items: Array<{ skillId: number; skillName: string; canonicalPath: string }>
+  operations: ConsolidationPreview['operations']
+}
+
 export type ConsolidationOutcome =
-  | { status: 'completed'; batchId: string; skillId: number; canonicalPath: string }
-  | { status: 'rejected'; batchId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'restore-path-occupied' | 'batch-not-undoable'; message: string }
+  | { status: 'completed'; batchId: string; skillId: number; canonicalPath: string; items?: Array<{ skillId: number; canonicalPath: string }> }
+  | { status: 'rejected'; batchId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'restore-path-occupied' | 'batch-not-undoable' | 'batch-busy'; message: string }
   | { status: 'recovery-required'; batchId: string; message: string }
 
 export interface SkillLibraryFacade {
   read(): SkillLibraryReadModel
   previewConsolidation(request: { candidateSourceId: number; canonicalRelativeParent: string }): ConsolidationPreview
+  previewConsolidationBatch(request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }): ConsolidationBatchPreview
   confirmConsolidation(confirmationId: string): ConsolidationOutcome
   undoConsolidation(batchId: string): ConsolidationOutcome | { status: 'undone'; batchId: string }
   replaceCanonicalSource(request: {
@@ -92,6 +104,7 @@ interface BatchRow {
 }
 
 interface ItemRow {
+  id: number
   batch_id: string
   skill_id: number
   skill_name: string
@@ -100,6 +113,8 @@ interface ItemRow {
   canonical_path: string
   archive_path: string
   canonical_hash: string | null
+  phase: string | null
+  evidence_json: string | null
 }
 
 interface ObservedEntrySnapshot {
@@ -146,6 +161,11 @@ export function createSkillLibraryFacade(options: {
   canonicalRepositoryPath: string
   sourceArchivePath?: string
   backupsDir?: string
+  consolidationHooks?: {
+    onPhase?: (event: { batchId: string; itemIndex: number; phase: string }) => void
+    afterRegistryCommit?: (event: { batchId: string }) => void
+    onFaultPoint?: (event: { batchId: string; itemIndex: number; point: 'before-registry-commit' | 'before-cleanup' | 'before-compensation' }) => void
+  }
 }): SkillLibraryFacade {
   const canonicalRepositoryPath = resolve(assertAbsolutePath(options.canonicalRepositoryPath, 'Canonical Repository path'))
   const sourceArchivePath = resolve(assertAbsolutePath(
@@ -158,17 +178,22 @@ export function createSkillLibraryFacade(options: {
   ))
   setCanonicalRepositoryPath(options.db, canonicalRepositoryPath)
   mkdirSync(canonicalRepositoryPath, { recursive: true })
+  // A non-terminal persisted phase at process startup is interrupted work, not a normal preview.
+  options.db.prepare(`UPDATE consolidation_batches
+    SET status = 'recovery-required',
+        failure_message = COALESCE(failure_message, 'Consolidation was interrupted; inspect persisted recovery evidence.')
+    WHERE status IN ('previewed', 'completed') AND (
+      phase IS NOT NULL OR id IN (SELECT batch_id FROM consolidation_items WHERE phase IS NOT NULL)
+      OR id IN (SELECT batch_id FROM consolidation_operation_locks)
+    )`).run()
+  options.db.prepare(`DELETE FROM consolidation_operation_locks
+    WHERE batch_id IN (SELECT id FROM consolidation_batches WHERE phase IS NULL AND status IN ('failed', 'completed', 'undone'))`).run()
 
   function getPersistedBatch(id: string): { batch: BatchRow; items: ItemRow[] } | null {
     const batch = options.db.prepare('SELECT * FROM consolidation_batches WHERE id = ?').get(id) as BatchRow | undefined
     if (!batch) return null
     const items = options.db.prepare('SELECT * FROM consolidation_items WHERE batch_id = ? ORDER BY id ASC').all(id) as ItemRow[]
     return items.length > 0 ? { batch, items } : null
-  }
-
-  function requireSingleItem(items: ItemRow[]): ItemRow {
-    if (items.length !== 1) throw new Error('Single-source consolidation requires exactly one batch item')
-    return items[0]
   }
 
   function observedForSource(source: SkillSource): Deployment[] {
@@ -227,7 +252,7 @@ export function createSkillLibraryFacade(options: {
     }
   }
 
-  function previewConsolidation(request: { candidateSourceId: number; canonicalRelativeParent: string }): ConsolidationPreview {
+  function buildPreviewItem(request: { candidateSourceId: number; canonicalRelativeParent: string }, batchId: string) {
     if (!Number.isInteger(request.candidateSourceId)) throw new Error('candidateSourceId must be an integer')
     const source = getSourceById(options.db, request.candidateSourceId)
     if (!source || source.source_role !== 'candidate') throw new Error('Consolidation requires a Candidate Source ID')
@@ -244,7 +269,6 @@ export function createSkillLibraryFacade(options: {
     if (siblingCandidates.length > 0) throw new Error('Single-source consolidation requires exactly one Candidate Source')
     const canonicalPath = canonicalPlacement(validateSkillName(skill.name), request.canonicalRelativeParent)
     if (pathEntryExists(canonicalPath)) throw new Error('Canonical Placement is occupied')
-    const batchId = randomUUID()
     const archivePath = resolveWithin(sourceArchivePath, batchId, 'source', skill.name)
     const allRelations = allKnownRelationsForSource(source)
     if (allRelations.some((deployment) => deployment.source_id == null)) {
@@ -256,22 +280,49 @@ export function createSkillLibraryFacade(options: {
     const observed = observedForSource(source)
     for (const deployment of observed) assertObservedLink(deployment, source.path)
     const observedSnapshots = observed.map(snapshotObservedEntry)
+    return { source, skill, canonicalPath, archivePath, observed, observedSnapshots }
+  }
+
+  function previewConsolidationBatch(request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }): ConsolidationBatchPreview {
+    if (!Array.isArray(request.items) || request.items.length === 0) throw new Error('Consolidation Batch requires at least one item')
+    const batchId = randomUUID()
+    const prepared = request.items.map((item) => buildPreviewItem(item, batchId))
+    if (new Set(prepared.map((item) => item.source.id)).size !== prepared.length) throw new Error('Consolidation Batch contains a duplicate Candidate Source')
+    if (new Set(prepared.map((item) => item.skill.id)).size !== prepared.length) throw new Error('Consolidation Batch contains multiple items for one Skill')
+    if (new Set(prepared.map((item) => resolve(item.canonicalPath))).size !== prepared.length) throw new Error('Consolidation Batch contains duplicate Canonical Placements')
+    const claimedPaths = prepared.flatMap((item) => [item.source.path, item.canonicalPath, ...item.observed.map((entry) => entry.target_path!)].map((path) => resolve(path)))
+    const overlaps = claimedPaths.some((path, index) => claimedPaths.some((other, otherIndex) => {
+      if (index >= otherIndex) return false
+      const rel = relative(path, other)
+      const reverse = relative(other, path)
+      return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) ||
+        (reverse !== '..' && !reverse.startsWith(`..${sep}`) && !isAbsolute(reverse))
+    }))
+    if (overlaps) throw new Error('Consolidation Batch contains overlapping filesystem resources')
     const createdAt = new Date().toISOString()
     runInTransaction(options.db, () => {
       options.db.prepare("INSERT INTO consolidation_batches (id, status, created_at) VALUES (?, 'previewed', ?)").run(batchId, createdAt)
-      options.db.prepare(`INSERT INTO consolidation_items
+      const insert = options.db.prepare(`INSERT INTO consolidation_items
         (batch_id, skill_id, skill_name, candidate_source_snapshot, observed_deployments_snapshot, canonical_path, archive_path)
         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).run(batchId, skill.id, skill.name, JSON.stringify(source), JSON.stringify(observedSnapshots), canonicalPath, archivePath)
+      )
+      for (const item of prepared) insert.run(batchId, item.skill.id, item.skill.name, JSON.stringify(item.source), JSON.stringify(item.observedSnapshots), item.canonicalPath, item.archivePath)
     })
     return {
-      status: 'confirmation-required', confirmationId: batchId, batchId, skillId: skill.id, skillName: skill.name,
-      operations: [
-        { kind: 'write-canonical', path: canonicalPath },
-        { kind: 'archive-candidate', path: archivePath },
-        ...observed.map((deployment) => ({ kind: 'remove-observed-entry' as const, path: deployment.target_path! }))
-      ]
+      status: 'confirmation-required', confirmationId: batchId, batchId,
+      items: prepared.map((item) => ({ skillId: item.skill.id, skillName: item.skill.name, canonicalPath: item.canonicalPath })),
+      operations: prepared.flatMap((item) => [
+        { kind: 'write-canonical' as const, path: item.canonicalPath },
+        { kind: 'archive-candidate' as const, path: item.archivePath },
+        ...item.observed.map((deployment) => ({ kind: 'remove-observed-entry' as const, path: deployment.target_path! }))
+      ])
     }
+  }
+
+  function previewConsolidation(request: { candidateSourceId: number; canonicalRelativeParent: string }): ConsolidationPreview {
+    const preview = previewConsolidationBatch({ items: [request] })
+    const item = preview.items[0]
+    return { ...preview, skillId: item.skillId, skillName: item.skillName }
   }
 
   function validatePlan(batch: BatchRow, item: ItemRow): { source: SkillSource; observed: ObservedEntrySnapshot[] } {
@@ -310,116 +361,261 @@ export function createSkillLibraryFacade(options: {
       .run(status, phase ?? null, evidence === undefined ? null : JSON.stringify(evidence), completed, undone, failure ?? null, id)
   }
 
+  function markItem(item: ItemRow, batchId: string, itemIndex: number, phase: string, evidence: unknown, intent: 'prepared' | 'applied', batchStatus: ConsolidationBatchStatus = 'previewed'): void {
+    if (typeof evidence === 'object' && evidence !== null) {
+      const journal = ((evidence as { journal?: Array<{ phase: string; intent: string }> }).journal ??= [])
+      journal.push({ phase, intent })
+    }
+    runInTransaction(options.db, () => {
+      options.db.prepare('UPDATE consolidation_items SET phase = ?, evidence_json = ? WHERE id = ?')
+        .run(`${phase}:${intent}`, JSON.stringify(evidence), item.id)
+      markBatch(batchId, batchStatus, undefined, `consolidating:${itemIndex}:${phase}:${intent}`, { itemIndex, phase, intent })
+    })
+    if (intent === 'applied') options.consolidationHooks?.onPhase?.({ batchId, itemIndex, phase })
+  }
+
+  function resourcesForItems(items: ItemRow[]): string[] {
+    return items.flatMap((item) => {
+      const source = JSON.parse(item.candidate_source_snapshot) as SkillSource
+      const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
+      return [
+        `source:${source.id}`,
+        `skill:${item.skill_name}`,
+        `path:${resolve(source.path)}`,
+        `path:${resolve(item.canonical_path)}`,
+        ...observed.map((entry) => `path:${resolve(entry.deployment.target_path!)}`)
+      ]
+    })
+  }
+
+  function acquireDurableLocks(
+    batchId: string,
+    resources: string[],
+    phase: 'consolidation-lock-acquired' | 'undo-lock-acquired'
+  ): boolean {
+    const ordered = [...new Set(resources)].sort()
+    return runInTransaction(options.db, () => {
+      const existing = options.db.prepare('SELECT resource FROM consolidation_operation_locks ORDER BY resource').all() as Array<{ resource: string }>
+      const conflicts = (left: string, right: string) => {
+        if (left === right) return true
+        if (!left.startsWith('path:') || !right.startsWith('path:')) return false
+        const leftPath = left.slice(5)
+        const rightPath = right.slice(5)
+        const rel = relative(leftPath, rightPath)
+        const reverse = relative(rightPath, leftPath)
+        return (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) ||
+          (reverse !== '..' && !reverse.startsWith(`..${sep}`) && !isAbsolute(reverse))
+      }
+      if (ordered.some((resource) => existing.some((locked) => conflicts(resource, locked.resource)))) return false
+      const insert = options.db.prepare('INSERT INTO consolidation_operation_locks (resource, batch_id) VALUES (?, ?)')
+      for (const resource of ordered) insert.run(resource, batchId)
+      options.db.prepare('UPDATE consolidation_batches SET phase = ?, evidence_json = ? WHERE id = ?')
+        .run(phase, JSON.stringify({ resources: ordered }), batchId)
+      return true
+    })
+  }
+
+  function releaseDurableLocks(batchId: string): void {
+    options.db.prepare('DELETE FROM consolidation_operation_locks WHERE batch_id = ?').run(batchId)
+  }
+
+  function assertPathsUnlocked(paths: string[]): void {
+    const locked = (options.db.prepare("SELECT resource FROM consolidation_operation_locks WHERE resource LIKE 'path:%'").all() as Array<{ resource: string }>).map((row) => row.resource.slice(5))
+    for (const path of paths) {
+      const candidate = resolve(path)
+      const busy = locked.some((lockedPath) => {
+        const rel = relative(candidate, lockedPath)
+        const reverse = relative(lockedPath, candidate)
+        return (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) ||
+          (reverse !== '..' && !reverse.startsWith(`..${sep}`) && !isAbsolute(reverse))
+      })
+      if (busy) throw new Error(`Skill Library resource is busy: ${path}`)
+    }
+  }
+
+  function assertSkillUnlocked(skillName: string): void {
+    const locked = options.db.prepare('SELECT 1 FROM consolidation_operation_locks WHERE resource = ?').get(`skill:${skillName}`)
+    if (locked) throw new Error(`Skill Library identity is busy: ${skillName}`)
+  }
+
+  function missingParents(path: string): string[] {
+    const missing: string[] = []
+    let current = dirname(path)
+    while (!pathEntryExists(current)) {
+      missing.push(current)
+      const parent = dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+    return missing
+  }
+
+  function removeCreatedParents(paths: string[]): void {
+    const ordered = [...new Set(paths)].sort((left, right) => right.length - left.length)
+    for (const path of ordered) {
+      if (!pathEntryExists(path)) continue
+      try {
+        rmdirSync(path)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code !== 'ENOTEMPTY' && code !== 'EEXIST') throw error
+      }
+    }
+  }
+
   function confirmConsolidation(confirmationId: string): ConsolidationOutcome {
     const persisted = getPersistedBatch(confirmationId)
     if (!persisted) return { status: 'rejected', reason: 'confirmation-not-found', message: 'Consolidation confirmation does not exist.' }
-    if (persisted.batch.phase !== null || persisted.batch.status === 'recovery-required') {
-      return { status: 'recovery-required', batchId: persisted.batch.id, message: persisted.batch.failure_message ?? 'Consolidation was interrupted and requires recovery.' }
+    if (persisted.batch.status === 'recovery-required') {
+      return { status: 'recovery-required', batchId: persisted.batch.id, message: persisted.batch.failure_message ?? 'Consolidation requires recovery.' }
     }
-    let item: ItemRow
+    if (!acquireDurableLocks(persisted.batch.id, resourcesForItems(persisted.items), 'consolidation-lock-acquired')) {
+      return { status: 'rejected', batchId: persisted.batch.id, reason: 'batch-busy', message: 'Consolidation resources are busy.' }
+    }
     try {
-      item = requireSingleItem(persisted.items)
-    } catch (error) {
-      return { status: 'rejected', batchId: persisted.batch.id, reason: 'plan-stale', message: errorMessage(error) }
-    }
-    let plan: { source: SkillSource; observed: ObservedEntrySnapshot[] }
-    try {
-      plan = validatePlan(persisted.batch, item)
-    } catch (error) {
-      if (persisted.batch.status === 'previewed') markBatch(persisted.batch.id, 'failed', errorMessage(error))
-      return { status: 'rejected', batchId: persisted.batch.id, reason: 'plan-stale', message: errorMessage(error) }
-    }
-    const { batch } = persisted
-    const stage = resolveWithin(canonicalRepositoryPath, `.consolidation-stage-${batch.id}`)
-    const sourceRollback = resolveWithin(dirname(plan.source.path), `.${basename(plan.source.path)}.skill-switch-${batch.id}`)
-    const displacedLinks: Array<ObservedEntrySnapshot & { rollbackPath: string; archivePath: string }> = []
-    const evidence = {
-      sourcePath: plan.source.path,
-      sourceRollback,
-      canonicalPath: item.canonical_path,
-      canonicalStage: stage,
-      archivePath: item.archive_path,
-      toolEntries: plan.observed.map((snapshot) => ({
-        targetPath: snapshot.deployment.target_path!,
-        rollbackPath: resolveWithin(dirname(snapshot.deployment.target_path!), `.${basename(snapshot.deployment.target_path!)}.skill-switch-${batch.id}`),
-        archivePath: resolveWithin(sourceArchivePath, batch.id, 'links', String(snapshot.deployment.id))
-      }))
-    }
-    let sourceArchived = false
-    let canonicalInstalled = false
-    try {
-      markBatch(batch.id, 'previewed', undefined, 'staging', evidence)
-      mkdirSync(dirname(item.canonical_path), { recursive: true })
-      mkdirSync(dirname(item.archive_path), { recursive: true })
-      cpSync(plan.source.path, stage, { recursive: true, force: false })
-      const canonicalHash = hashDir(stage)
-      if (canonicalHash !== plan.source.hash) throw new Error('Staged canonical content failed hash verification')
-      cpSync(plan.source.path, item.archive_path, { recursive: true, force: false })
-      if (hashDir(item.archive_path) !== plan.source.hash) throw new Error('Source Archive failed hash verification')
-      renameSync(plan.source.path, sourceRollback)
-      sourceArchived = true
-      markBatch(batch.id, 'previewed', undefined, 'source-displaced', evidence)
-      for (const snapshot of plan.observed) {
-        const archivePath = resolveWithin(sourceArchivePath, batch.id, 'links', String(snapshot.deployment.id))
-        const rollbackPath = resolveWithin(dirname(snapshot.deployment.target_path!), `.${basename(snapshot.deployment.target_path!)}.skill-switch-${batch.id}`)
-        if (pathEntryExists(archivePath) || pathEntryExists(rollbackPath)) throw new Error('Observed Subscription archive or rollback path is occupied')
-        mkdirSync(dirname(archivePath), { recursive: true })
-        symlinkSync(snapshot.linkTarget, archivePath, snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
-        if (readlinkSync(archivePath) !== snapshot.linkTarget) throw new Error('Observed Subscription archive verification failed')
-        renameSync(snapshot.deployment.target_path!, rollbackPath)
-        displacedLinks.push({ ...snapshot, rollbackPath, archivePath })
-      }
-      markBatch(batch.id, 'previewed', undefined, 'entries-displaced', evidence)
-      renameSync(stage, item.canonical_path)
-      canonicalInstalled = true
-      markBatch(batch.id, 'previewed', undefined, 'canonical-installed', evidence)
-      runInTransaction(options.db, () => {
-        for (const snapshot of plan.observed) options.db.prepare('DELETE FROM deployments WHERE id = ?').run(snapshot.deployment.id)
-        options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(plan.source.id)
-        updatePrimarySourcePath(options.db, plan.source.skill_id, item.canonical_path)
-        upsertSource(options.db, plan.source.skill_id, item.canonical_path, canonicalHash,
-          Math.floor(statSync(item.canonical_path).mtimeMs), 'central-repo', { role: 'canonical', origin: 'local' })
-        options.db.prepare("UPDATE consolidation_items SET canonical_hash = ? WHERE batch_id = ?").run(canonicalHash, batch.id)
-      })
+      let plans: Array<{ item: ItemRow; source: SkillSource; observed: ObservedEntrySnapshot[] }>
       try {
-        rmSync(sourceRollback, { recursive: true, force: false })
-        for (const snapshot of displacedLinks) rmSync(snapshot.rollbackPath, { force: false })
-      } catch (cleanupError) {
-        const message = `Consolidation committed but rollback cleanup failed: ${errorMessage(cleanupError)}`
-        markBatch(batch.id, 'recovery-required', message, 'cleanup-failed', evidence)
-        return { status: 'recovery-required', batchId: batch.id, message }
+        plans = persisted.items.map((item) => ({ item, ...validatePlan(persisted.batch, item) }))
+      } catch (error) {
+        runInTransaction(options.db, () => {
+          if (persisted.batch.status === 'previewed') markBatch(persisted.batch.id, 'failed', errorMessage(error))
+          releaseDurableLocks(persisted.batch.id)
+        })
+        return { status: 'rejected', batchId: persisted.batch.id, reason: 'plan-stale', message: errorMessage(error) }
       }
+      const applied: Array<{
+        plan: typeof plans[number]
+        stage: string
+        sourceRollback: string
+        evidence: unknown
+        displacedLinks: Array<ObservedEntrySnapshot & { rollbackPath: string; archivePath: string }>
+        sourceDisplaced: boolean
+        canonicalInstalled: boolean
+        canonicalHash: string | null
+        createdCanonicalParents: string[]
+      }> = []
+      let registryCommitted = false
       try {
-        markBatch(batch.id, 'completed', undefined, null, evidence)
-      } catch (statusError) {
-        return { status: 'recovery-required', batchId: batch.id, message: `Consolidation committed but status persistence failed: ${errorMessage(statusError)}` }
-      }
-      return { status: 'completed', batchId: batch.id, skillId: item.skill_id, canonicalPath: item.canonical_path }
-    } catch (error) {
-      let compensationError: unknown
-      try {
-        if (canonicalInstalled && pathEntryExists(item.canonical_path)) renameSync(item.canonical_path, stage)
-        for (const snapshot of [...displacedLinks].reverse()) {
-          if (pathEntryExists(snapshot.rollbackPath) && !pathEntryExists(snapshot.deployment.target_path!)) {
-            renameSync(snapshot.rollbackPath, snapshot.deployment.target_path!)
+        for (const [itemIndex, plan] of plans.entries()) {
+          const stage = resolveWithin(canonicalRepositoryPath, `.consolidation-stage-${persisted.batch.id}-${itemIndex}`)
+          const sourceRollback = resolveWithin(dirname(plan.source.path), `.${basename(plan.source.path)}.skill-switch-${persisted.batch.id}`)
+          const state = {
+            plan, stage, sourceRollback,
+            evidence: {
+              sourcePath: plan.source.path, sourceRollback, canonicalPath: plan.item.canonical_path,
+              canonicalStage: stage, archivePath: plan.item.archive_path,
+              toolEntries: plan.observed.map((snapshot) => ({
+                targetPath: snapshot.deployment.target_path!,
+                rollbackPath: resolveWithin(dirname(snapshot.deployment.target_path!), `.${basename(snapshot.deployment.target_path!)}.skill-switch-${persisted.batch.id}`),
+                archivePath: resolveWithin(sourceArchivePath, persisted.batch.id, 'links', String(snapshot.deployment.id))
+              }))
+            },
+            displacedLinks: [] as Array<ObservedEntrySnapshot & { rollbackPath: string; archivePath: string }>,
+            sourceDisplaced: false, canonicalInstalled: false, canonicalHash: null as string | null,
+            createdCanonicalParents: missingParents(plan.item.canonical_path)
           }
-          rmSync(snapshot.archivePath, { force: true })
+          applied.push(state)
+          markItem(plan.item, persisted.batch.id, itemIndex, 'staging', state.evidence, 'prepared')
+          mkdirSync(dirname(plan.item.canonical_path), { recursive: true })
+          mkdirSync(dirname(plan.item.archive_path), { recursive: true })
+          cpSync(plan.source.path, stage, { recursive: true, force: false })
+          state.canonicalHash = hashDir(stage)
+          if (state.canonicalHash !== plan.source.hash) throw new Error('Staged canonical content failed hash verification')
+          cpSync(plan.source.path, plan.item.archive_path, { recursive: true, force: false })
+          if (hashDir(plan.item.archive_path) !== plan.source.hash) throw new Error('Source Archive failed hash verification')
+          markItem(plan.item, persisted.batch.id, itemIndex, 'staging', state.evidence, 'applied')
+          markItem(plan.item, persisted.batch.id, itemIndex, 'source-displaced', state.evidence, 'prepared')
+          renameSync(plan.source.path, sourceRollback)
+          state.sourceDisplaced = true
+          markItem(plan.item, persisted.batch.id, itemIndex, 'source-displaced', state.evidence, 'applied')
+          markItem(plan.item, persisted.batch.id, itemIndex, 'entries-displaced', state.evidence, 'prepared')
+          for (const snapshot of plan.observed) {
+            const archivePath = resolveWithin(sourceArchivePath, persisted.batch.id, 'links', String(snapshot.deployment.id))
+            const rollbackPath = resolveWithin(dirname(snapshot.deployment.target_path!), `.${basename(snapshot.deployment.target_path!)}.skill-switch-${persisted.batch.id}`)
+            mkdirSync(dirname(archivePath), { recursive: true })
+            symlinkSync(snapshot.linkTarget, archivePath, snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
+            if (readlinkSync(archivePath) !== snapshot.linkTarget) throw new Error('Observed Subscription archive verification failed')
+            renameSync(snapshot.deployment.target_path!, rollbackPath)
+            state.displacedLinks.push({ ...snapshot, rollbackPath, archivePath })
+          }
+          markItem(plan.item, persisted.batch.id, itemIndex, 'entries-displaced', state.evidence, 'applied')
+          markItem(plan.item, persisted.batch.id, itemIndex, 'canonical-installed', state.evidence, 'prepared')
+          renameSync(stage, plan.item.canonical_path)
+          state.canonicalInstalled = true
+          markItem(plan.item, persisted.batch.id, itemIndex, 'canonical-installed', state.evidence, 'applied')
         }
-        if (sourceArchived && pathEntryExists(sourceRollback) && !pathEntryExists(plan.source.path)) renameSync(sourceRollback, plan.source.path)
-        rmSync(item.archive_path, { recursive: true, force: true })
-        rmSync(stage, { recursive: true, force: true })
-        rmSync(resolveWithin(sourceArchivePath, batch.id), { recursive: true, force: true })
-      } catch (compensationFailure) {
-        compensationError = compensationFailure
+        options.consolidationHooks?.onFaultPoint?.({ batchId: persisted.batch.id, itemIndex: -1, point: 'before-registry-commit' })
+        runInTransaction(options.db, () => {
+          for (const state of applied) {
+            const { plan } = state
+            for (const snapshot of plan.observed) options.db.prepare('DELETE FROM deployments WHERE id = ?').run(snapshot.deployment.id)
+            options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(plan.source.id)
+            updatePrimarySourcePath(options.db, plan.source.skill_id, plan.item.canonical_path)
+            upsertSource(options.db, plan.source.skill_id, plan.item.canonical_path, state.canonicalHash!,
+              Math.floor(statSync(plan.item.canonical_path).mtimeMs), 'central-repo', { role: 'canonical', origin: 'local' })
+            options.db.prepare("UPDATE consolidation_items SET canonical_hash = ?, phase = 'db-committed' WHERE id = ?").run(state.canonicalHash, plan.item.id)
+          }
+          options.db.prepare("UPDATE consolidation_batches SET phase = 'registry-committed' WHERE id = ?").run(persisted.batch.id)
+        })
+        registryCommitted = true
+        try {
+          options.consolidationHooks?.afterRegistryCommit?.({ batchId: persisted.batch.id })
+          for (const [itemIndex, state] of applied.entries()) {
+            options.consolidationHooks?.onFaultPoint?.({ batchId: persisted.batch.id, itemIndex, point: 'before-cleanup' })
+            rmSync(state.sourceRollback, { recursive: true, force: false })
+            for (const snapshot of state.displacedLinks) rmSync(snapshot.rollbackPath, { force: false })
+          }
+        runInTransaction(options.db, () => {
+          options.db.prepare('UPDATE consolidation_items SET phase = NULL WHERE batch_id = ?').run(persisted.batch.id)
+          markBatch(persisted.batch.id, 'completed', undefined, null, { itemCount: applied.length })
+          releaseDurableLocks(persisted.batch.id)
+        })
+          const results = plans.map((plan) => ({ skillId: plan.item.skill_id, canonicalPath: plan.item.canonical_path }))
+          return {
+            status: 'completed' as const, batchId: persisted.batch.id,
+            skillId: results[0].skillId, canonicalPath: results[0].canonicalPath,
+            ...(results.length > 1 ? { items: results } : {})
+          }
+        } catch (postCommitError) {
+          const message = `Registry committed; finish cleanup from durable evidence: ${errorMessage(postCommitError)}`
+          markBatch(persisted.batch.id, 'recovery-required', message, 'registry-committed', { itemCount: applied.length })
+          return { status: 'recovery-required', batchId: persisted.batch.id, message }
+        }
+      } catch (error) {
+        if (registryCommitted) {
+          const message = `Registry committed; finish cleanup from durable evidence: ${errorMessage(error)}`
+          markBatch(persisted.batch.id, 'recovery-required', message, 'registry-committed', { itemCount: applied.length })
+          return { status: 'recovery-required', batchId: persisted.batch.id, message }
+        }
+        let compensationError: unknown
+        try {
+          for (const [reverseIndex, state] of [...applied].reverse().entries()) {
+            options.consolidationHooks?.onFaultPoint?.({ batchId: persisted.batch.id, itemIndex: applied.length - 1 - reverseIndex, point: 'before-compensation' })
+            if (state.canonicalInstalled && pathEntryExists(state.plan.item.canonical_path)) renameSync(state.plan.item.canonical_path, state.stage)
+            for (const snapshot of [...state.displacedLinks].reverse()) {
+              if (pathEntryExists(snapshot.rollbackPath) && !pathEntryExists(snapshot.deployment.target_path!)) renameSync(snapshot.rollbackPath, snapshot.deployment.target_path!)
+              rmSync(snapshot.archivePath, { force: true })
+            }
+            if (state.sourceDisplaced && pathEntryExists(state.sourceRollback) && !pathEntryExists(state.plan.source.path)) renameSync(state.sourceRollback, state.plan.source.path)
+            rmSync(state.plan.item.archive_path, { recursive: true, force: true })
+            rmSync(state.stage, { recursive: true, force: true })
+          }
+          removeCreatedParents(applied.flatMap((state) => state.createdCanonicalParents))
+          rmSync(resolveWithin(sourceArchivePath, persisted.batch.id), { recursive: true, force: true })
+        } catch (failure) { compensationError = failure }
+        if (compensationError) {
+          const message = `${errorMessage(error)}; compensation failed: ${errorMessage(compensationError)}`
+          markBatch(persisted.batch.id, 'recovery-required', message, 'compensation-failed', { itemCount: applied.length })
+          return { status: 'recovery-required', batchId: persisted.batch.id, message }
+        }
+        runInTransaction(options.db, () => {
+          options.db.prepare('UPDATE consolidation_items SET phase = NULL WHERE batch_id = ?').run(persisted.batch.id)
+          markBatch(persisted.batch.id, 'failed', errorMessage(error), null, { itemCount: applied.length })
+          releaseDurableLocks(persisted.batch.id)
+        })
+        return { status: 'rejected', batchId: persisted.batch.id, reason: 'plan-stale', message: errorMessage(error) }
       }
-      if (compensationError) {
-        const message = `${errorMessage(error)}; compensation failed: ${errorMessage(compensationError)}`
-        markBatch(batch.id, 'recovery-required', message, 'compensation-failed', evidence)
-        return { status: 'recovery-required', batchId: batch.id, message }
-      }
-      markBatch(batch.id, 'failed', errorMessage(error), null, evidence)
-      return { status: 'rejected', batchId: batch.id, reason: 'plan-stale', message: errorMessage(error) }
-    }
+    } finally { /* durable locks are released only by terminal success or compensated failure */ }
   }
 
   function undoConsolidation(batchId: string): ConsolidationOutcome | { status: 'undone'; batchId: string } {
@@ -427,92 +623,113 @@ export function createSkillLibraryFacade(options: {
     if (!persisted || persisted.batch.status !== 'completed') {
       return { status: 'rejected', batchId, reason: 'batch-not-undoable', message: 'Consolidation Batch is not completed.' }
     }
-    let item: ItemRow
-    try { item = requireSingleItem(persisted.items) } catch (error) {
-      return { status: 'rejected', batchId, reason: 'batch-not-undoable', message: errorMessage(error) }
+    if (!acquireDurableLocks(batchId, resourcesForItems(persisted.items), 'undo-lock-acquired')) {
+      return { status: 'rejected', batchId, reason: 'batch-busy', message: 'Consolidation resources are busy.' }
     }
-    const sourceSnapshot = JSON.parse(item.candidate_source_snapshot) as SkillSource
-    const observedSnapshots = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
-    const deployments = observedSnapshots.map((snapshot) => snapshot.deployment)
-    if (pathEntryExists(sourceSnapshot.path) || deployments.some((deployment) => deployment.target_path && pathEntryExists(deployment.target_path))) {
-      return { status: 'rejected', batchId, reason: 'restore-path-occupied', message: 'An original Source or tool entry path is occupied.' }
-    }
-    const canonical = getSourceByPath(options.db, item.canonical_path)
-    if (!canonical || canonical.source_role !== 'canonical' || !existsSync(canonical.path) || hashDir(canonical.path) !== item.canonical_hash) {
-      return { status: 'rejected', batchId, reason: 'plan-stale', message: 'Canonical Source changed after consolidation.' }
-    }
-    if (getDeploymentsBySkillId(options.db, canonical.skill_id).some((deployment) => deployment.source_id === canonical.id)) {
-      return { status: 'rejected', batchId, reason: 'plan-stale', message: 'Canonical Source has subsequent Deployments.' }
-    }
-    if (!existsSync(item.archive_path) || hashDir(item.archive_path) !== sourceSnapshot.hash) {
-      return { status: 'rejected', batchId, reason: 'plan-stale', message: 'Source Archive changed after consolidation.' }
-    }
-    for (const snapshot of observedSnapshots) {
-      const archivedLink = resolveWithin(sourceArchivePath, batchId, 'links', String(snapshot.deployment.id))
-      if (!pathEntryExists(archivedLink) || !lstatSync(archivedLink).isSymbolicLink() || readlinkSync(archivedLink) !== snapshot.linkTarget) {
-        return { status: 'rejected', batchId, reason: 'plan-stale', message: 'Archived tool entry changed after consolidation.' }
-      }
-    }
-    const canonicalRollback = resolveWithin(canonicalRepositoryPath, `.consolidation-undo-${batchId}`)
-    if (pathEntryExists(canonicalRollback)) {
-      return { status: 'rejected', batchId, reason: 'restore-path-occupied', message: 'Canonical rollback path is occupied.' }
-    }
-    let canonicalMoved = false
-    let sourceRestored = false
-    const restoredLinks: Array<{ target: string; archive: string }> = []
-    const undoEvidence = {
-      canonicalPath: canonical.path,
-      canonicalRollback,
-      sourcePath: sourceSnapshot.path,
-      archivePath: item.archive_path,
-      toolEntries: observedSnapshots.map((snapshot) => ({ targetPath: snapshot.deployment.target_path }))
-    }
+    type UndoPlan = { item: ItemRow; source: SkillSource; observed: ObservedEntrySnapshot[]; canonical: SkillSource; rollback: string }
+    let plans: UndoPlan[]
     try {
-      markBatch(batchId, 'completed', undefined, 'restoring', undoEvidence)
-      mkdirSync(dirname(sourceSnapshot.path), { recursive: true })
-      renameSync(canonical.path, canonicalRollback)
-      canonicalMoved = true
-      cpSync(item.archive_path, sourceSnapshot.path, { recursive: true, force: false })
-      if (hashDir(sourceSnapshot.path) !== sourceSnapshot.hash) throw new Error('Restored Candidate Source failed hash verification')
-      sourceRestored = true
-      observedSnapshots.forEach((snapshot) => {
-        restoreObservedEntry(snapshot)
-        restoredLinks.push({ target: snapshot.deployment.target_path!, archive: '' })
+      plans = persisted.items.map((item, index) => {
+        const source = JSON.parse(item.candidate_source_snapshot) as SkillSource
+        const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
+        if (pathEntryExists(source.path) || observed.some((entry) => pathEntryExists(entry.deployment.target_path!))) throw new Error('An original Source or tool entry path is occupied.')
+        const canonical = getSourceByPath(options.db, item.canonical_path)
+        if (!canonical || canonical.source_role !== 'canonical' || !existsSync(canonical.path) || hashDir(canonical.path) !== item.canonical_hash) throw new Error('Canonical Source changed after consolidation.')
+        if (getDeploymentsBySkillId(options.db, canonical.skill_id).some((deployment) => deployment.source_id === canonical.id)) throw new Error('Canonical Source has subsequent Deployments.')
+        if (!existsSync(item.archive_path) || hashDir(item.archive_path) !== source.hash) throw new Error('Source Archive changed after consolidation.')
+        for (const snapshot of observed) {
+          const archivedLink = resolveWithin(sourceArchivePath, batchId, 'links', String(snapshot.deployment.id))
+          if (!pathEntryExists(archivedLink) || !lstatSync(archivedLink).isSymbolicLink() || readlinkSync(archivedLink) !== snapshot.linkTarget) throw new Error('Archived tool entry changed after consolidation.')
+        }
+        const rollback = resolveWithin(canonicalRepositoryPath, `.consolidation-undo-${batchId}-${index}`)
+        if (pathEntryExists(rollback)) throw new Error('Canonical rollback path is occupied.')
+        return { item, source, observed, canonical, rollback }
       })
+    } catch (error) {
+      releaseDurableLocks(batchId)
+      const reason = errorMessage(error).includes('occupied') ? 'restore-path-occupied' as const : 'plan-stale' as const
+      return { status: 'rejected', batchId, reason, message: errorMessage(error) }
+    }
+    const applied: Array<{ plan: UndoPlan; canonicalMoved: boolean; sourceRestored: boolean; restoredTargets: string[]; createdRestoreParents: string[] }> = []
+    let registryCommitted = false
+    try {
+      for (const [index, plan] of plans.entries()) {
+        const evidence = { canonicalPath: plan.canonical.path, canonicalRollback: plan.rollback, sourcePath: plan.source.path,
+          archivePath: plan.item.archive_path, toolEntries: plan.observed.map((entry) => ({ targetPath: entry.deployment.target_path })), journal: [] as Array<{ phase: string; intent: string }> }
+        const state = {
+          plan, canonicalMoved: false, sourceRestored: false, restoredTargets: [] as string[],
+          createdRestoreParents: [...new Set([
+            ...missingParents(plan.source.path),
+            ...plan.observed.flatMap((entry) => missingParents(entry.deployment.target_path!))
+          ])]
+        }
+        applied.push(state)
+        markItem(plan.item, batchId, index, 'undo-restoring', evidence, 'prepared', 'completed')
+        mkdirSync(dirname(plan.source.path), { recursive: true })
+        renameSync(plan.canonical.path, plan.rollback)
+        state.canonicalMoved = true
+        cpSync(plan.item.archive_path, plan.source.path, { recursive: true, force: false })
+        if (hashDir(plan.source.path) !== plan.source.hash) throw new Error('Restored Candidate Source failed hash verification')
+        state.sourceRestored = true
+        for (const snapshot of plan.observed) {
+          restoreObservedEntry(snapshot)
+          state.restoredTargets.push(snapshot.deployment.target_path!)
+        }
+        markItem(plan.item, batchId, index, 'undo-restoring', evidence, 'applied', 'completed')
+      }
       runInTransaction(options.db, () => {
-        options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(canonical.id)
-        restoreSourceSnapshot(options.db, sourceSnapshot)
-        for (const deployment of deployments) restoreDeploymentSnapshot(options.db, deployment)
-        updatePrimarySourcePath(options.db, sourceSnapshot.skill_id, sourceSnapshot.path)
+        for (const state of applied) {
+          options.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(state.plan.canonical.id)
+          restoreSourceSnapshot(options.db, state.plan.source)
+          for (const snapshot of state.plan.observed) restoreDeploymentSnapshot(options.db, snapshot.deployment)
+          updatePrimarySourcePath(options.db, state.plan.source.skill_id, state.plan.source.path)
+          options.db.prepare("UPDATE consolidation_items SET phase = 'undo-registry-committed' WHERE id = ?").run(state.plan.item.id)
+        }
+        options.db.prepare("UPDATE consolidation_batches SET phase = 'undo-registry-committed' WHERE id = ?").run(batchId)
       })
-      // The authority has already been removed from its canonical placement. Cleanup
-      // failures must not compensate a committed DB transaction back into inconsistency;
-      // leftover copies remain inside controlled storage as recovery evidence.
+      registryCommitted = true
       try {
-        rmSync(canonicalRollback, { recursive: true, force: false })
-      } catch (cleanupError) {
-        const message = `Undo committed but canonical rollback cleanup failed: ${errorMessage(cleanupError)}`
-        markBatch(batchId, 'recovery-required', message, 'undo-cleanup-failed', undoEvidence)
+        options.consolidationHooks?.afterRegistryCommit?.({ batchId })
+        for (const [itemIndex, state] of applied.entries()) {
+          options.consolidationHooks?.onFaultPoint?.({ batchId, itemIndex, point: 'before-cleanup' })
+          rmSync(state.plan.rollback, { recursive: true, force: false })
+        }
+        runInTransaction(options.db, () => {
+          options.db.prepare('UPDATE consolidation_items SET phase = NULL WHERE batch_id = ?').run(batchId)
+          markBatch(batchId, 'undone', undefined, null, { itemCount: applied.length })
+          releaseDurableLocks(batchId)
+        })
+        return { status: 'undone', batchId }
+      } catch (postCommitError) {
+        const message = `Undo registry committed; finish cleanup from durable evidence: ${errorMessage(postCommitError)}`
+        markBatch(batchId, 'recovery-required', message, 'undo-registry-committed', { itemCount: applied.length })
         return { status: 'recovery-required', batchId, message }
       }
-      try {
-        markBatch(batchId, 'undone', undefined, null, undoEvidence)
-      } catch (statusError) {
-        return { status: 'recovery-required', batchId, message: `Undo committed but status persistence failed: ${errorMessage(statusError)}` }
-      }
-      return { status: 'undone', batchId }
     } catch (error) {
+      if (registryCommitted) {
+        const message = `Undo registry committed; finish cleanup from durable evidence: ${errorMessage(error)}`
+        markBatch(batchId, 'recovery-required', message, 'undo-registry-committed', { itemCount: applied.length })
+        return { status: 'recovery-required', batchId, message }
+      }
       let compensationError: unknown
       try {
-        for (const link of [...restoredLinks].reverse()) if (pathEntryExists(link.target)) rmSync(link.target, { force: false })
-        if (sourceRestored && pathEntryExists(sourceSnapshot.path)) rmSync(sourceSnapshot.path, { recursive: true, force: false })
-        if (canonicalMoved && pathEntryExists(canonicalRollback)) renameSync(canonicalRollback, canonical.path)
-      } catch (compensationFailure) {
-        compensationError = compensationFailure
-      }
+        for (const [reverseIndex, state] of [...applied].reverse().entries()) {
+          options.consolidationHooks?.onFaultPoint?.({ batchId, itemIndex: applied.length - 1 - reverseIndex, point: 'before-compensation' })
+          for (const target of [...state.restoredTargets].reverse()) if (pathEntryExists(target)) rmSync(target, { force: false })
+          if (state.sourceRestored && pathEntryExists(state.plan.source.path)) rmSync(state.plan.source.path, { recursive: true, force: false })
+          if (state.canonicalMoved && pathEntryExists(state.plan.rollback)) renameSync(state.plan.rollback, state.plan.canonical.path)
+        }
+        removeCreatedParents(applied.flatMap((state) => state.createdRestoreParents))
+      } catch (failure) { compensationError = failure }
       const message = compensationError ? `${errorMessage(error)}; compensation failed: ${errorMessage(compensationError)}` : errorMessage(error)
-      markBatch(batchId, compensationError ? 'recovery-required' : 'completed', message,
-        compensationError ? 'undo-compensation-failed' : null, undoEvidence)
+      if (compensationError) {
+        markBatch(batchId, 'recovery-required', message, 'undo-compensation-failed', { itemCount: applied.length })
+      } else {
+        runInTransaction(options.db, () => {
+          markBatch(batchId, 'completed', message, null, { itemCount: applied.length })
+          releaseDurableLocks(batchId)
+        })
+      }
       return compensationError
         ? { status: 'recovery-required', batchId, message }
         : { status: 'rejected', batchId, reason: 'plan-stale', message }
@@ -529,6 +746,8 @@ export function createSkillLibraryFacade(options: {
     const sourceDirectory = resolve(assertAbsolutePath(request.sourceDirectory, 'Canonical Source input'))
     const skillName = validateSkillName(request.skillName)
     const destination = resolveWithin(canonicalRepositoryPath, skillName)
+    assertSkillUnlocked(skillName)
+    assertPathsUnlocked([sourceDirectory, destination])
     const stage = resolveWithin(canonicalRepositoryPath, `.stage-${skillName}-${randomUUID()}`)
     const rollback = resolveWithin(canonicalRepositoryPath, `.rollback-${skillName}-${randomUUID()}`)
     const overwritten = existsSync(destination)
@@ -562,14 +781,11 @@ export function createSkillLibraryFacade(options: {
 
   return {
     previewConsolidation,
+    previewConsolidationBatch,
     confirmConsolidation,
     undoConsolidation,
     replaceCanonicalSource,
     read() {
-      options.db.prepare(`UPDATE consolidation_batches
-        SET status = 'recovery-required',
-            failure_message = COALESCE(failure_message, 'Consolidation was interrupted; inspect persisted recovery evidence.')
-        WHERE phase IS NOT NULL AND status IN ('previewed', 'completed')`).run()
       const skills = getAllSkills(options.db).map((skill) => {
         const canonicalSources = skill.sources.filter((source) => source.source_role === 'canonical')
         if (canonicalSources.length > 1) throw new Error(`Skill ${skill.name} has multiple canonical Sources`)
@@ -579,14 +795,23 @@ export function createSkillLibraryFacade(options: {
       const batches = options.db.prepare('SELECT * FROM consolidation_batches ORDER BY created_at DESC').all() as BatchRow[]
       return {
         canonicalRepository: { path: canonicalRepositoryPath }, skills,
-        consolidationBatches: batches.map((batch) => ({
-          id: batch.id, status: batch.status,
-          items: (options.db.prepare('SELECT skill_id, skill_name, canonical_path, archive_path FROM consolidation_items WHERE batch_id = ? ORDER BY id ASC').all(batch.id) as Array<{ skill_id: number; skill_name: string; canonical_path: string; archive_path: string }>).map((item) => ({
-            skillId: item.skill_id, skillName: item.skill_name, canonicalPath: item.canonical_path, archivePath: item.archive_path
-          })),
-          phase: batch.phase, createdAt: batch.created_at,
-          completedAt: batch.completed_at, undoneAt: batch.undone_at, failureMessage: batch.failure_message
-        }))
+        consolidationBatches: batches.map((batch) => {
+          const itemRows = options.db.prepare('SELECT skill_id, skill_name, canonical_path, archive_path, phase FROM consolidation_items WHERE batch_id = ? ORDER BY id ASC').all(batch.id) as Array<{ skill_id: number; skill_name: string; canonical_path: string; archive_path: string; phase: string | null }>
+          const phases = [...new Set([batch.phase, ...itemRows.map((item) => item.phase)].filter((phase): phase is string => phase !== null))]
+          let recoveryDirection: ConsolidationBatchSummary['recoveryDirection'] = null
+          if (batch.status === 'recovery-required') {
+            recoveryDirection = phases.some((phase) => phase.includes('registry-committed') || phase.includes('cleanup'))
+              ? 'finish-cleanup'
+              : phases.some((phase) => phase.includes('undo')) ? 'rollback-undo' : phases.length > 0 ? 'rollback-consolidation' : 'inspect'
+          }
+          return {
+            id: batch.id, status: batch.status,
+            items: itemRows.map((item) => ({ skillId: item.skill_id, skillName: item.skill_name, canonicalPath: item.canonical_path, archivePath: item.archive_path })),
+            phase: batch.phase, createdAt: batch.created_at, completedAt: batch.completed_at,
+            undoneAt: batch.undone_at, failureMessage: batch.failure_message,
+            recoveryDirection, evidenceSummary: { itemCount: itemRows.length, phases }
+          }
+        })
       }
     }
   }

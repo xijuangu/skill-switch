@@ -7,6 +7,8 @@ const api = {
   getSkillLibrary: () => ipcRenderer.invoke('getSkillLibrary'),
   previewConsolidation: (request: { candidateSourceId: number; canonicalRelativeParent: string }) =>
     ipcRenderer.invoke('skillLibrary:previewConsolidation', request),
+  previewConsolidationBatch: (request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }) =>
+    ipcRenderer.invoke('skillLibrary:previewConsolidationBatch', request),
   confirmConsolidation: (confirmationId: string) =>
     ipcRenderer.invoke('skillLibrary:confirmConsolidation', confirmationId),
   undoConsolidation: (batchId: string) =>

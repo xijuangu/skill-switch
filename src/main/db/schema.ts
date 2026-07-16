@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS consolidation_items (
   canonical_path TEXT NOT NULL,
   archive_path TEXT NOT NULL,
   canonical_hash TEXT,
+  phase TEXT,
+  evidence_json TEXT,
   FOREIGN KEY (batch_id) REFERENCES consolidation_batches(id) ON DELETE CASCADE
 );
 
@@ -86,6 +88,11 @@ CREATE INDEX IF NOT EXISTS idx_skill_sources_skill_id ON skill_sources(skill_id)
 CREATE INDEX IF NOT EXISTS idx_deployments_skill_id ON deployments(skill_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_target_tool ON deployments(target_tool);
 CREATE INDEX IF NOT EXISTS idx_consolidation_items_batch_id ON consolidation_items(batch_id);
+CREATE TABLE IF NOT EXISTS consolidation_operation_locks (
+  resource TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL,
+  FOREIGN KEY (batch_id) REFERENCES consolidation_batches(id) ON DELETE CASCADE
+);
 `
 
 /**
@@ -328,12 +335,22 @@ export function runMigrations(
       canonical_path TEXT NOT NULL,
       archive_path TEXT NOT NULL,
       canonical_hash TEXT,
+      phase TEXT,
+      evidence_json TEXT,
       FOREIGN KEY (batch_id) REFERENCES consolidation_batches(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_consolidation_items_batch_id
       ON consolidation_items(batch_id);
+    CREATE TABLE IF NOT EXISTS consolidation_operation_locks (
+      resource TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      FOREIGN KEY (batch_id) REFERENCES consolidation_batches(id) ON DELETE CASCADE
+    );
   `)
   const consolidationColumns = new Set((db.prepare('PRAGMA table_info(consolidation_batches)').all() as { name: string }[]).map((column) => column.name))
   if (!consolidationColumns.has('phase')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN phase TEXT')
   if (!consolidationColumns.has('evidence_json')) db.exec('ALTER TABLE consolidation_batches ADD COLUMN evidence_json TEXT')
+  const consolidationItemColumns = new Set((db.prepare('PRAGMA table_info(consolidation_items)').all() as { name: string }[]).map((column) => column.name))
+  if (!consolidationItemColumns.has('phase')) db.exec('ALTER TABLE consolidation_items ADD COLUMN phase TEXT')
+  if (!consolidationItemColumns.has('evidence_json')) db.exec('ALTER TABLE consolidation_items ADD COLUMN evidence_json TEXT')
 }

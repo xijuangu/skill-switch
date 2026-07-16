@@ -15,10 +15,11 @@ describe('database migrations', () => {
 
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'consolidation_%' ORDER BY name").all()).toEqual([
       { name: 'consolidation_batches' },
-      { name: 'consolidation_items' }
+      { name: 'consolidation_items' },
+      { name: 'consolidation_operation_locks' }
     ])
     expect((db.prepare('PRAGMA table_info(consolidation_items)').all() as Array<{ name: string }>).map((column) => column.name)).toEqual(expect.arrayContaining([
-      'candidate_source_snapshot', 'observed_deployments_snapshot', 'canonical_path', 'archive_path'
+      'candidate_source_snapshot', 'observed_deployments_snapshot', 'canonical_path', 'archive_path', 'phase', 'evidence_json'
     ]))
     db.close()
   })

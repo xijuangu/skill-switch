@@ -61,6 +61,8 @@ export interface SkillLibraryReadModelView {
     completedAt: string | null
     undoneAt: string | null
     failureMessage: string | null
+    recoveryDirection: 'rollback-consolidation' | 'finish-cleanup' | 'rollback-undo' | 'inspect' | null
+    evidenceSummary: { itemCount: number; phases: string[] }
   }>
 }
 
@@ -73,12 +75,20 @@ export type ConsolidationPreviewView = {
   operations: Array<{ kind: 'write-canonical' | 'archive-candidate' | 'remove-observed-entry'; path: string }>
 }
 
+export type ConsolidationBatchPreviewView = {
+  status: 'confirmation-required'
+  confirmationId: string
+  batchId: string
+  items: Array<{ skillId: number; skillName: string; canonicalPath: string }>
+  operations: ConsolidationPreviewView['operations']
+}
+
 export type ConsolidationFailureView =
-  | { status: 'rejected'; batchId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'restore-path-occupied' | 'batch-not-undoable'; message: string }
+  | { status: 'rejected'; batchId?: string; reason: 'confirmation-not-found' | 'plan-stale' | 'restore-path-occupied' | 'batch-not-undoable' | 'batch-busy'; message: string }
   | { status: 'recovery-required'; batchId: string; message: string }
 
 export type ConsolidationConfirmationOutcomeView =
-  | { status: 'completed'; batchId: string; skillId: number; canonicalPath: string }
+  | { status: 'completed'; batchId: string; skillId: number; canonicalPath: string; items?: Array<{ skillId: number; canonicalPath: string }> }
   | ConsolidationFailureView
 
 export type ConsolidationUndoOutcomeView =
@@ -333,6 +343,7 @@ declare global {
       getSkills: () => Promise<SkillWithConflictView[]>
       getSkillLibrary: () => Promise<SkillLibraryReadModelView>
       previewConsolidation: (request: { candidateSourceId: number; canonicalRelativeParent: string }) => Promise<ConsolidationPreviewView>
+      previewConsolidationBatch: (request: { items: Array<{ candidateSourceId: number; canonicalRelativeParent: string }> }) => Promise<ConsolidationBatchPreviewView>
       confirmConsolidation: (confirmationId: string) => Promise<ConsolidationConfirmationOutcomeView>
       undoConsolidation: (batchId: string) => Promise<ConsolidationUndoOutcomeView>
       getSettings: () => Promise<SettingsView>
