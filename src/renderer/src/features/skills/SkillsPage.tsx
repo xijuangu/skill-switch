@@ -31,7 +31,10 @@ type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 type DeployFilter = 'all' | 'deployed' | 'undeployed'
 type DeployTarget = { skill: SkillView; sourceId: number }
 type ConsolidationPreview = Awaited<ReturnType<typeof window.api.previewConsolidation>>
+type ConsolidationBatchPreview = Awaited<ReturnType<typeof window.api.previewConsolidationBatch>>
 type ConsolidationBatch = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationBatches'][number]
+type ConsolidationPlanItem = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['consolidationPlan'][number]
+type ConsolidationDraft = ConsolidationPlanItem & { selected: boolean; canonicalRelativeParent: string }
 type UndoBatch = { batch: ConsolidationBatch; item: ConsolidationBatch['items'][number] }
 
 function managedDeploymentCount(skill: SkillView): number {
@@ -79,6 +82,10 @@ export function SkillsPage({
   const [canonicalRelativeParent, setCanonicalRelativeParent] = useState('')
   const [consolidationPreview, setConsolidationPreview] = useState<ConsolidationPreview | null>(null)
   const [consolidationBatches, setConsolidationBatches] = useState<ConsolidationBatch[]>([])
+  const [consolidationPlan, setConsolidationPlan] = useState<ConsolidationPlanItem[]>([])
+  const [consolidationDrafts, setConsolidationDrafts] = useState<ConsolidationDraft[] | null>(null)
+  const [batchRelativeParent, setBatchRelativeParent] = useState('')
+  const [batchConsolidationPreview, setBatchConsolidationPreview] = useState<ConsolidationBatchPreview | null>(null)
   const [undoBatch, setUndoBatch] = useState<UndoBatch | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
@@ -89,6 +96,7 @@ export function SkillsPage({
   const refreshConsolidationBatches = async () => {
     const library = await window.api.getSkillLibrary()
     setConsolidationBatches(library.consolidationBatches ?? [])
+    setConsolidationPlan(library.consolidationPlan ?? [])
   }
 
   useEffect(() => {
@@ -390,6 +398,64 @@ export function SkillsPage({
     }
   }
 
+  const openBatchConsolidation = () => {
+    setConsolidationDrafts(consolidationPlan.map((item) => ({
+      ...item,
+      selected: item.selectedByDefault,
+      canonicalRelativeParent: item.canonicalRelativeParent
+    })))
+    setBatchRelativeParent('')
+    setBatchConsolidationPreview(null)
+  }
+
+  const closeBatchConsolidation = () => {
+    if (actionBusy) return
+    setConsolidationDrafts(null)
+    setBatchConsolidationPreview(null)
+  }
+
+  const handlePreviewBatchConsolidation = async () => {
+    const selectedDrafts = consolidationDrafts?.filter((draft) => draft.selected) ?? []
+    if (selectedDrafts.length === 0) {
+      toastError('请至少选择一个无冲突 Skill')
+      return
+    }
+    setActionBusy(true)
+    try {
+      const preview = await window.api.previewConsolidationBatch({
+        items: selectedDrafts.map((draft) => ({
+          candidateSourceId: draft.versions[0].candidateSourceIds[0],
+          canonicalRelativeParent: draft.canonicalRelativeParent.trim()
+        }))
+      })
+      setBatchConsolidationPreview(preview)
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const handleConfirmBatchConsolidation = async () => {
+    if (!batchConsolidationPreview) return
+    setActionBusy(true)
+    try {
+      const outcome = await window.api.confirmConsolidation(batchConsolidationPreview.confirmationId)
+      if (outcome.status !== 'completed') {
+        toastError('message' in outcome ? outcome.message : '整理未完成，请刷新后重试。')
+        return
+      }
+      success(`已整理 ${batchConsolidationPreview.items.length} 个 Skill；请按需手动部署`)
+      setConsolidationDrafts(null)
+      setBatchConsolidationPreview(null)
+      await Promise.all([onRefresh(), refreshConsolidationBatches()])
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const getMenuActions = (skill: SkillView) => [
     { key: 'undeploy', label: '从…取消部署', onClick: () => handleUndeployFromInit(skill), disabled: actionBusy },
     { key: 'view-md', label: '查看 SKILL.md', onClick: () => handleViewMd(skill), disabled: actionBusy },
@@ -497,6 +563,14 @@ export function SkillsPage({
             添加
           </Button>
         </div>
+
+        {consolidationPlan.length > 0 && (
+          <div className="p-2 border-b border-border">
+            <Button variant="primary" size="sm" className="w-full" onClick={openBatchConsolidation}>
+              批量整理 ({consolidationPlan.length})
+            </Button>
+          </div>
+        )}
 
         {lastScan && (
           <div className="px-3 py-1.5 text-2xs text-foreground-muted border-b border-border">
@@ -675,6 +749,84 @@ export function SkillsPage({
               <p className="text-2xs text-foreground-muted">
                 这里只填写权威库内的相对父目录；Skill 名称会自动保留。
               </p>
+            </div>
+          )}
+        </Dialog>
+      )}
+
+      {consolidationDrafts && (
+        <Dialog
+          open
+          onClose={closeBatchConsolidation}
+          title={batchConsolidationPreview ? '确认批量整理' : '选择要整理的 Skill'}
+          description="无冲突项默认选中；冲突项需在冲突解决流程中明确版本后才能选择。"
+          busy={actionBusy}
+          confirmLabel={batchConsolidationPreview ? '确认批量整理' : '预览批量整理'}
+          onConfirm={batchConsolidationPreview ? handleConfirmBatchConsolidation : handlePreviewBatchConsolidation}
+          closeOnOverlay={false}
+        >
+          {batchConsolidationPreview ? (
+            <ConsolidationOperations operations={batchConsolidationPreview.operations} />
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded border border-border p-3 space-y-2">
+                <label htmlFor="batch-relative-parent" className="block text-xs font-medium text-foreground-secondary">
+                  批量设置权威库内父目录
+                </label>
+                <div className="flex gap-2">
+                  <Input
+                    id="batch-relative-parent"
+                    aria-label="批量设置权威库内父目录"
+                    value={batchRelativeParent}
+                    onChange={(event) => setBatchRelativeParent(event.target.value)}
+                    placeholder="留空表示权威库根目录"
+                    mono
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setConsolidationDrafts((drafts) => drafts?.map((draft) =>
+                      draft.selected ? { ...draft, canonicalRelativeParent: batchRelativeParent } : draft
+                    ) ?? null)}
+                  >
+                    应用到已选
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {consolidationDrafts.map((draft) => (
+                  <div key={draft.skillId} className="rounded border border-border p-3 space-y-2">
+                    <label className="flex items-center gap-2 text-xs font-medium">
+                      <input
+                        type="checkbox"
+                        aria-label={`选择 ${draft.skillName}`}
+                        checked={draft.selected}
+                        disabled={draft.hasConflict}
+                        onChange={(event) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
+                          item.skillId === draft.skillId ? { ...item, selected: event.target.checked } : item
+                        ) ?? null)}
+                      />
+                      <span>{draft.skillName}</span>
+                      <span className="text-2xs text-foreground-muted">
+                        {draft.hasConflict ? `${draft.versions.length} 个冲突版本（未选择）` : `${draft.versions[0].candidateSourceIds.length} 个同内容来源`}
+                      </span>
+                    </label>
+                    <Input
+                      aria-label={`${draft.skillName} 权威库内父目录`}
+                      value={draft.canonicalRelativeParent}
+                      disabled={!draft.selected}
+                      onChange={(event) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
+                        item.skillId === draft.skillId ? { ...item, canonicalRelativeParent: event.target.value } : item
+                      ) ?? null)}
+                      placeholder="权威库根目录"
+                      mono
+                      className="w-full"
+                    />
+                  </div>
+                ))}
+              </div>
+              <p className="text-2xs text-foreground-muted">最终目录名固定使用 Skill 名称；未选 Candidate 不会被本批次修改。</p>
             </div>
           )}
         </Dialog>

@@ -52,6 +52,14 @@ export interface SkillLibraryReadModelView {
     canonicalSource: SkillLibrarySourceView | null
     candidates: SkillLibrarySourceView[]
   }>
+  consolidationPlan: Array<{
+    skillId: number
+    skillName: string
+    selectedByDefault: boolean
+    hasConflict: boolean
+    canonicalRelativeParent: string
+    versions: Array<{ hash: string; candidateSourceIds: number[]; paths: string[] }>
+  }>
   consolidationBatches: Array<{
     id: string
     status: 'previewed' | 'completed' | 'failed' | 'recovery-required' | 'undone'

@@ -16,6 +16,7 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     getSkillLibrary: vi.fn().mockResolvedValue({
       canonicalRepository: { path: '/canonical' },
       skills: [],
+      consolidationPlan: [],
       consolidationBatches: []
     }),
     previewConsolidation: vi.fn(),
@@ -681,5 +682,87 @@ describe('SkillsPage consolidation (#84)', () => {
     await userEvent.click(screen.getByRole('button', { name: '确认撤销' }))
     await waitFor(() => expect(api.undoConsolidation).toHaveBeenCalledWith('batch-latest'))
     expect(await screen.findByRole('alert')).toHaveTextContent('原候选位置已被占用，无法撤销。')
+  })
+})
+
+describe('SkillsPage bulk consolidation planning (#86)', () => {
+  it('defaults safe version groups to selected and applies batch or per-Skill relative parents', async () => {
+    const skills = buildFakeSkills(3)
+    const plan = [
+      {
+        skillId: skills[0].id, skillName: skills[0].name,
+        selectedByDefault: true, hasConflict: false, canonicalRelativeParent: '',
+        versions: [{ hash: 'same-a', candidateSourceIds: [11, 12], paths: ['/a/one', '/b/one'] }]
+      },
+      {
+        skillId: skills[1].id, skillName: skills[1].name,
+        selectedByDefault: true, hasConflict: false, canonicalRelativeParent: '',
+        versions: [{ hash: 'same-b', candidateSourceIds: [21], paths: ['/a/two'] }]
+      },
+      {
+        skillId: skills[2].id, skillName: skills[2].name,
+        selectedByDefault: false, hasConflict: true, canonicalRelativeParent: '',
+        versions: [
+          { hash: 'conflict-a', candidateSourceIds: [31], paths: ['/a/three'] },
+          { hash: 'conflict-b', candidateSourceIds: [32], paths: ['/b/three'] }
+        ]
+      }
+    ]
+    const preview = {
+      status: 'confirmation-required' as const,
+      confirmationId: 'confirm-86', batchId: 'batch-86',
+      items: [
+        { skillId: skills[0].id, skillName: skills[0].name, canonicalPath: `/canonical/team/${skills[0].name}` },
+        { skillId: skills[1].id, skillName: skills[1].name, canonicalPath: `/canonical/product/${skills[1].name}` }
+      ],
+      operations: [
+        { kind: 'write-canonical' as const, path: `/canonical/team/${skills[0].name}` },
+        { kind: 'write-canonical' as const, path: `/canonical/product/${skills[1].name}` }
+      ]
+    }
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [], consolidationPlan: plan, consolidationBatches: []
+      }),
+      previewConsolidationBatch: vi.fn().mockResolvedValue(preview),
+      confirmConsolidation: vi.fn().mockResolvedValue({
+        status: 'completed', batchId: 'batch-86', skillId: skills[0].id,
+        canonicalPath: `/canonical/team/${skills[0].name}`, items: preview.items
+      })
+    })
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={skills} tools={[]} scanning={false} lastScan={null} loading={false} loadError={null}
+          onScan={vi.fn()} onRefresh={vi.fn().mockResolvedValue(undefined)} onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+
+    await userEvent.click(await screen.findByRole('button', { name: '批量整理 (3)' }))
+    expect(screen.getByRole('checkbox', { name: `选择 ${skills[0].name}` })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: `选择 ${skills[1].name}` })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: `选择 ${skills[2].name}` })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: `选择 ${skills[2].name}` })).toBeDisabled()
+    expect(screen.getByText('2 个同内容来源')).toBeInTheDocument()
+    expect(screen.getByLabelText(`${skills[0].name} 权威库内父目录`)).toHaveValue('')
+
+    await userEvent.type(screen.getByLabelText('批量设置权威库内父目录'), 'team')
+    await userEvent.click(screen.getByRole('button', { name: '应用到已选' }))
+    const secondParent = screen.getByLabelText(`${skills[1].name} 权威库内父目录`)
+    await userEvent.clear(secondParent)
+    await userEvent.type(secondParent, 'product')
+    await userEvent.click(screen.getByRole('button', { name: '预览批量整理' }))
+
+    expect(api.previewConsolidationBatch).toHaveBeenCalledWith({ items: [
+      { candidateSourceId: 11, canonicalRelativeParent: 'team' },
+      { candidateSourceId: 21, canonicalRelativeParent: 'product' }
+    ] })
+    expect(screen.getByRole('dialog')).toHaveTextContent(`/canonical/team/${skills[0].name}`)
+    expect(screen.getByRole('dialog')).toHaveTextContent(`/canonical/product/${skills[1].name}`)
+
+    await userEvent.click(screen.getByRole('button', { name: '确认批量整理' }))
+    await waitFor(() => expect(api.confirmConsolidation).toHaveBeenCalledWith('confirm-86'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('已整理 2 个 Skill')
   })
 })

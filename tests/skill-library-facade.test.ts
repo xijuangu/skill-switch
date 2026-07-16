@@ -379,6 +379,30 @@ describe('SkillLibraryFacade', () => {
     fixture.root.cleanup()
   })
 
+  test('rejects parent traversal, absolute parents, and occupied Canonical Placements during preview', () => {
+    const traversal = consolidationFixture('skill-library-consolidate-traversal-')
+    expect(() => traversal.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: traversal.source.id, canonicalRelativeParent: 'team/../outside'
+    }] })).toThrow('cannot contain . or ..')
+    traversal.db.close()
+    traversal.root.cleanup()
+
+    const absolute = consolidationFixture('skill-library-consolidate-absolute-')
+    expect(() => absolute.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: absolute.source.id, canonicalRelativeParent: join(absolute.root.dir, 'outside')
+    }] })).toThrow('must be relative')
+    absolute.db.close()
+    absolute.root.cleanup()
+
+    const occupied = consolidationFixture('skill-library-consolidate-occupied-')
+    mkdirSync(join(occupied.canonicalRepository, 'demo'))
+    expect(() => occupied.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: occupied.source.id, canonicalRelativeParent: ''
+    }] })).toThrow('occupied')
+    occupied.db.close()
+    occupied.root.cleanup()
+  })
+
   test('surfaces an interrupted applying batch as recovery-required with durable evidence', () => {
     const fixture = consolidationFixture('skill-library-consolidate-interrupted-')
     const preview = fixture.facade.previewConsolidation({ candidateSourceId: fixture.source.id, canonicalRelativeParent: '' })
@@ -404,7 +428,7 @@ describe('SkillLibraryFacade', () => {
     fixture.root.cleanup()
   })
 
-  test('single-source consolidation rejects a Skill that still has another Candidate Source', () => {
+  test('consolidation rejects a Skill that still has an unresolved Candidate version', () => {
     const fixture = consolidationFixture('skill-library-consolidate-conflict-')
     const sibling = join(fixture.root.dir, 'other', 'demo')
     mkdirSync(sibling, { recursive: true })
@@ -416,9 +440,81 @@ describe('SkillLibraryFacade', () => {
     expect(() => fixture.facade.previewConsolidation({
       candidateSourceId: fixture.source.id,
       canonicalRelativeParent: ''
-    })).toThrow('exactly one Candidate Source')
+    })).toThrow('explicit decision for conflicting Candidate versions')
     expect(existsSync(fixture.candidatePath)).toBe(true)
     expect(existsSync(sibling)).toBe(true)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('groups hash-identical Candidates into one default-selected consolidation decision', () => {
+    const fixture = consolidationFixture('skill-library-identical-plan-')
+    const duplicatePath = join(fixture.root.dir, 'duplicates', 'demo')
+    mkdirSync(duplicatePath, { recursive: true })
+    writeFileSync(join(duplicatePath, 'SKILL.md'), '# candidate demo')
+    upsertSource(fixture.db, fixture.source.skill_id, duplicatePath, hashDir(duplicatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+
+    expect(fixture.facade.read().consolidationPlan).toEqual([{
+      skillId: fixture.source.skill_id,
+      skillName: 'demo',
+      selectedByDefault: true,
+      hasConflict: false,
+      canonicalRelativeParent: '',
+      versions: [{
+        hash: fixture.source.hash,
+        candidateSourceIds: [fixture.source.id, getSourceByPath(fixture.db, duplicatePath)!.id],
+        paths: [fixture.candidatePath, duplicatePath]
+      }]
+    }])
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('consolidates every Candidate in a selected hash-identical version and undo restores them', () => {
+    const fixture = consolidationFixture('skill-library-identical-consolidate-')
+    const duplicatePath = join(fixture.root.dir, 'duplicates', 'demo')
+    mkdirSync(duplicatePath, { recursive: true })
+    writeFileSync(join(duplicatePath, 'SKILL.md'), '# candidate demo')
+    upsertSource(fixture.db, fixture.source.skill_id, duplicatePath, hashDir(duplicatePath), 2, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: fixture.source.id,
+      canonicalRelativeParent: ''
+    }] })
+    expect(preview.items).toHaveLength(1)
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+    expect(existsSync(fixture.candidatePath)).toBe(false)
+    expect(existsSync(duplicatePath)).toBe(false)
+    expect(fixture.facade.read().skills[0].candidates).toEqual([])
+
+    expect(fixture.facade.undoConsolidation(preview.batchId)).toEqual({ status: 'undone', batchId: preview.batchId })
+    expect(readFileSync(join(fixture.candidatePath, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+    expect(readFileSync(join(duplicatePath, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('leaves an unselected Candidate available for a later batch', () => {
+    const fixture = consolidationFixture('skill-library-unselected-')
+    const later = addCandidate(fixture, 'later', 'claude')
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [{
+      candidateSourceId: fixture.source.id,
+      canonicalRelativeParent: ''
+    }] })
+    expect(fixture.facade.confirmConsolidation(preview.confirmationId)).toMatchObject({ status: 'completed' })
+
+    expect(existsSync(later.candidatePath)).toBe(true)
+    expect(fixture.facade.read().consolidationPlan).toMatchObject([{
+      skillName: 'later', selectedByDefault: true
+    }])
 
     fixture.db.close()
     fixture.root.cleanup()
