@@ -28,17 +28,10 @@ import {
   type SkillSourceView,
   type DeployResultView,
   type InstallResultView,
-  type ConsolidationPreview,
-  type ConsolidationBatchPreview,
   type ConsolidationBatch,
-  type ConsolidationPlanItem,
-  type ConflictResolutionDecision,
-  type ConsolidationDraft,
-  type ConflictResolutionEditor,
-  type UndoBatch,
-  type SourceRelocationPreview,
   type SourceRelocation,
 } from './dialogs'
+import { useConsolidationFlow, useBatchConsolidationFlow, useConflictResolutionFlow, useSourceRelocationFlow } from './hooks'
 import { groupByHash, shortHash } from './sourceGrouping'
 
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
@@ -88,33 +81,32 @@ export function SkillsPage({
   const [viewMdSourcePicker, setViewMdSourcePicker] = useState<SkillView | null>(null)
   const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string; management: 'managed' | 'observed' }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
-  const [consolidationTarget, setConsolidationTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
-  const [consolidationPreview, setConsolidationPreview] = useState<ConsolidationPreview | null>(null)
-  const [consolidationBatches, setConsolidationBatches] = useState<ConsolidationBatch[]>([])
-  const [consolidationPlan, setConsolidationPlan] = useState<ConsolidationPlanItem[]>([])
-  const [consolidationDrafts, setConsolidationDrafts] = useState<ConsolidationDraft[] | null>(null)
-  const [batchConsolidationPreview, setBatchConsolidationPreview] = useState<ConsolidationBatchPreview | null>(null)
-  const [conflictResolutionEditor, setConflictResolutionEditor] = useState<ConflictResolutionEditor | null>(null)
-  const [undoBatch, setUndoBatch] = useState<UndoBatch | null>(null)
-  const [relocationTarget, setRelocationTarget] = useState<{ skill: SkillView; source: SkillSourceView } | null>(null)
-  const [relocationPreview, setRelocationPreview] = useState<SourceRelocationPreview | null>(null)
-  const [sourceRelocations, setSourceRelocations] = useState<SourceRelocation[]>([])
-  const [undoRelocation, setUndoRelocation] = useState<SourceRelocation | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
   const pendingAdjacentSelectRef = useRef<number | null>(null)
 
   const { success, error: toastError, info } = useToast()
 
-  const refreshSkillLibrary = async () => {
+  const refreshLibrary = async () => {
     const library = await window.api.getSkillLibrary()
-    setConsolidationBatches(library.consolidationBatches ?? [])
-    setConsolidationPlan(library.consolidationPlan ?? [])
-    setSourceRelocations(library.sourceRelocations ?? [])
+    consolidationFlow.applyLibrary(library)
+    batchFlow.applyLibrary(library)
+    relocationFlow.applyLibrary(library)
+    return library
   }
 
+  const flowDeps = { actionBusy, setActionBusy, onRefresh, success, toastError }
+  const consolidationFlow = useConsolidationFlow(flowDeps, refreshLibrary)
+  const batchFlow = useBatchConsolidationFlow(flowDeps, refreshLibrary)
+  const conflictFlow = useConflictResolutionFlow(
+    { actionBusy, setActionBusy, toastError },
+    skills,
+    (skillId, cr) => batchFlow.updateDraft(skillId, { selected: true, conflictResolution: cr })
+  )
+  const relocationFlow = useSourceRelocationFlow(flowDeps, refreshLibrary)
+
   useEffect(() => {
-    refreshSkillLibrary().catch((e) => {
+    refreshLibrary().catch((e) => {
       toastError(e instanceof Error ? e.message : String(e))
     })
   }, [skills]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -349,264 +341,6 @@ export function SkillsPage({
     setInstallOpen(false)
   }
 
-  const closeConsolidation = () => {
-    if (actionBusy) return
-    setConsolidationTarget(null)
-    setConsolidationPreview(null)
-  }
-
-  const handlePreviewConsolidation = async (canonicalRelativeParent: string) => {
-    if (!consolidationTarget) return
-    setActionBusy(true)
-    try {
-      const preview = await window.api.previewConsolidation({
-        candidateSourceId: consolidationTarget.source.id,
-        canonicalRelativeParent: canonicalRelativeParent.trim()
-      })
-      setConsolidationPreview(preview)
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const handleConfirmConsolidation = async () => {
-    if (!consolidationPreview) return
-    setActionBusy(true)
-    try {
-      const outcome = await window.api.confirmConsolidation(consolidationPreview.confirmationId)
-      if (outcome.status !== 'completed') {
-        toastError('message' in outcome ? outcome.message : '整理未完成，请刷新后重试。')
-        return
-      }
-      success(`「${consolidationPreview.skillName}」整理完成；请按需手动部署`)
-      setConsolidationTarget(null)
-      setConsolidationPreview(null)
-      await Promise.all([onRefresh(), refreshSkillLibrary()])
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const handleUndoConsolidation = async () => {
-    if (!undoBatch) return
-    setActionBusy(true)
-    try {
-      const outcome = await window.api.undoConsolidation(undoBatch.batch.id)
-      if (outcome.status !== 'undone') {
-        toastError('message' in outcome ? outcome.message : '撤销未完成，请刷新后重试。')
-        return
-      }
-      success(`已撤销「${undoBatch.item.skillName}」的整理`)
-      setUndoBatch(null)
-      await Promise.all([onRefresh(), refreshSkillLibrary()])
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const openBatchConsolidation = () => {
-    setConsolidationDrafts(consolidationPlan.map((item) => ({
-      ...item,
-      selected: item.selectedByDefault,
-      canonicalRelativeParent: item.canonicalRelativeParent
-    })))
-    setBatchConsolidationPreview(null)
-  }
-
-  const closeBatchConsolidation = () => {
-    if (actionBusy) return
-    setConsolidationDrafts(null)
-    setBatchConsolidationPreview(null)
-  }
-
-  const openConflictResolution = async (draft: ConsolidationDraft) => {
-    setActionBusy(true)
-    try {
-      const preview = await window.api.previewConflictResolution(draft.skillId)
-      setConflictResolutionEditor({
-        draftSkillId: draft.skillId,
-        preview,
-        authoritativeSourceId: draft.conflictResolution?.authoritativeSourceId ?? null,
-        actions: Object.fromEntries(preview.versions.map((version) => {
-          const existing = draft.conflictResolution?.otherVersions.find((decision) =>
-            version.sources.some((source) => source.id === decision.sourceId)
-          )
-          return [version.hash, {
-            action: existing?.action ?? 'archive',
-            newSkillName: existing?.newSkillName ?? '',
-            canonicalRelativeParent: existing?.canonicalRelativeParent ?? ''
-          }]
-        }))
-      })
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const applyConflictResolution = () => {
-    if (!conflictResolutionEditor?.authoritativeSourceId) {
-      toastError('请选择一个版本作为原名权威版本')
-      return
-    }
-    const authoritative = conflictResolutionEditor.preview.versions.find((version) =>
-      version.sources.some((source) => source.id === conflictResolutionEditor.authoritativeSourceId)
-    )
-    if (!authoritative) {
-      toastError('所选权威版本已不可用')
-      return
-    }
-    const otherVersions: ConflictResolutionDecision['otherVersions'] = []
-    const reservedNames = new Set(skills.map((skill) => skill.name))
-    for (const version of conflictResolutionEditor.preview.versions) {
-      if (version.hash === authoritative.hash) continue
-      const action = conflictResolutionEditor.actions[version.hash]
-      if (!action) {
-        toastError('请为每个其他版本选择处理方式')
-        return
-      }
-      const decision: ConflictResolutionDecision['otherVersions'][number] = {
-        sourceId: version.sources[0].id,
-        action: action.action
-      }
-      if (action.action === 'save-as') {
-        const newName = action.newSkillName.trim()
-        if (!newName || newName === '.' || newName === '..' || /[\\/\u0000-\u001f\u007f]/.test(newName)) {
-          toastError('新 Skill 名称不合法')
-          return
-        }
-        if (reservedNames.has(newName)) {
-          toastError(`新 Skill 名称「${newName}」已存在`)
-          return
-        }
-        reservedNames.add(newName)
-        decision.newSkillName = newName
-        decision.canonicalRelativeParent = action.canonicalRelativeParent.trim()
-      }
-      otherVersions.push(decision)
-    }
-    const conflictResolution: ConflictResolutionDecision = {
-      authoritativeSourceId: conflictResolutionEditor.authoritativeSourceId,
-      otherVersions
-    }
-    setConsolidationDrafts((drafts) => drafts?.map((draft) =>
-      draft.skillId === conflictResolutionEditor.draftSkillId
-        ? { ...draft, selected: true, conflictResolution }
-        : draft
-    ) ?? null)
-    setConflictResolutionEditor(null)
-  }
-
-  const handlePreviewBatchConsolidation = async () => {
-    const selectedDrafts = consolidationDrafts?.filter((draft) => draft.selected) ?? []
-    if (selectedDrafts.length === 0) {
-      toastError('请至少选择一个无冲突 Skill')
-      return
-    }
-    setActionBusy(true)
-    try {
-      const preview = await window.api.previewConsolidationBatch({
-        items: selectedDrafts.map((draft) => ({
-          candidateSourceId: draft.conflictResolution?.authoritativeSourceId ?? draft.versions[0].candidateSourceIds[0],
-          canonicalRelativeParent: draft.canonicalRelativeParent.trim(),
-          ...(draft.conflictResolution ? { conflictResolution: draft.conflictResolution } : {})
-        }))
-      })
-      setBatchConsolidationPreview(preview)
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const handleConfirmBatchConsolidation = async () => {
-    if (!batchConsolidationPreview) return
-    setActionBusy(true)
-    try {
-      const outcome = await window.api.confirmConsolidation(batchConsolidationPreview.confirmationId)
-      if (outcome.status !== 'completed') {
-        toastError('message' in outcome ? outcome.message : '整理未完成，请刷新后重试。')
-        return
-      }
-      success(`已整理 ${batchConsolidationPreview.items.length} 个 Skill；请按需手动部署`)
-      setConsolidationDrafts(null)
-      setBatchConsolidationPreview(null)
-      await Promise.all([onRefresh(), refreshSkillLibrary()])
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const closeRelocation = () => {
-    if (actionBusy) return
-    setRelocationTarget(null)
-    setRelocationPreview(null)
-  }
-
-  const handlePreviewRelocation = async (canonicalRelativeParent: string) => {
-    if (!relocationTarget) return
-    setActionBusy(true)
-    try {
-      setRelocationPreview(await window.api.previewSourceRelocation({
-        sourceId: relocationTarget.source.id,
-        canonicalRelativeParent: canonicalRelativeParent.trim()
-      }))
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const handleConfirmRelocation = async () => {
-    if (!relocationPreview) return
-    setActionBusy(true)
-    try {
-      const outcome = await window.api.confirmSourceRelocation(relocationPreview.confirmationId)
-      if (outcome.status !== 'completed') {
-        toastError('message' in outcome ? outcome.message : '移动未完成，请刷新后重试。')
-        return
-      }
-      success(`已移动「${relocationPreview.skillName}」的权威 Source`)
-      setRelocationTarget(null)
-      setRelocationPreview(null)
-      await Promise.all([onRefresh(), refreshSkillLibrary()])
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  const handleUndoRelocation = async () => {
-    if (!undoRelocation) return
-    setActionBusy(true)
-    try {
-      const outcome = await window.api.undoSourceRelocation(undoRelocation.id)
-      if (outcome.status !== 'undone') {
-        toastError('message' in outcome ? outcome.message : '撤销移动未完成，请刷新后重试。')
-        return
-      }
-      success(`已撤销「${undoRelocation.skillName}」的 Source 移动`)
-      setUndoRelocation(null)
-      await Promise.all([onRefresh(), refreshSkillLibrary()])
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
   const getMenuActions = (skill: SkillView) => [
     { key: 'undeploy', label: '从…取消部署', onClick: () => handleUndeployFromInit(skill), disabled: actionBusy },
     { key: 'view-md', label: '查看 SKILL.md', onClick: () => handleViewMd(skill), disabled: actionBusy },
@@ -715,10 +449,10 @@ export function SkillsPage({
           </Button>
         </div>
 
-        {consolidationPlan.length > 0 && (
+        {batchFlow.plan.length > 0 && (
           <div className="p-2 border-b border-border">
-            <Button variant="primary" size="sm" className="w-full" onClick={openBatchConsolidation}>
-              批量整理 ({consolidationPlan.length})
+            <Button variant="primary" size="sm" className="w-full" onClick={batchFlow.open}>
+              批量整理 ({batchFlow.plan.length})
             </Button>
           </div>
         )}
@@ -770,21 +504,15 @@ export function SkillsPage({
         {selected ? (
           <SkillDetail
             skill={selected}
-            consolidationBatches={consolidationBatches}
-            sourceRelocations={sourceRelocations}
+            consolidationBatches={consolidationFlow.batches}
+            sourceRelocations={relocationFlow.relocations}
             tab={detailTab}
             onTabChange={setDetailTab}
             onDeploy={() => handleDeployClick(selected)}
-            onConsolidate={(source) => {
-              setConsolidationTarget({ skill: selected, source })
-              setConsolidationPreview(null)
-            }}
-            onUndoConsolidation={setUndoBatch}
-            onRelocate={(source) => {
-              setRelocationTarget({ skill: selected, source })
-              setRelocationPreview(null)
-            }}
-            onUndoRelocation={setUndoRelocation}
+            onConsolidate={(source) => consolidationFlow.open(selected, source)}
+            onUndoConsolidation={consolidationFlow.setUndoBatch}
+            onRelocate={(source) => relocationFlow.open(selected, source)}
+            onUndoRelocation={relocationFlow.setUndo}
             onMoreClick={(el) => {
               setVisibleMenuAnchor(el)
               setVisibleMenuSkill(selected)
@@ -874,76 +602,70 @@ export function SkillsPage({
         />
       )}
 
-      {consolidationTarget && (
+      {consolidationFlow.target && (
         <ConsolidationDialog
-          skill={consolidationTarget.skill}
-          source={consolidationTarget.source}
-          preview={consolidationPreview}
+          skill={consolidationFlow.target.skill}
+          source={consolidationFlow.target.source}
+          preview={consolidationFlow.preview}
           busy={actionBusy}
-          onPreview={handlePreviewConsolidation}
-          onConfirm={handleConfirmConsolidation}
-          onClose={closeConsolidation}
+          onPreview={consolidationFlow.handlePreview}
+          onConfirm={consolidationFlow.handleConfirm}
+          onClose={consolidationFlow.close}
         />
       )}
 
-      {consolidationDrafts && !conflictResolutionEditor && (
+      {batchFlow.drafts && (
         <BatchConsolidationDialog
-          drafts={consolidationDrafts}
-          preview={batchConsolidationPreview}
+          drafts={batchFlow.drafts}
+          preview={batchFlow.preview}
           busy={actionBusy}
-          onApplyBatchParent={(parent) => setConsolidationDrafts((drafts) => drafts?.map((draft) =>
-            draft.selected ? { ...draft, canonicalRelativeParent: parent } : draft
-          ) ?? null)}
-          onToggleDraft={(skillId, selected) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
-            item.skillId === skillId ? { ...item, selected } : item
-          ) ?? null)}
-          onDraftParentChange={(skillId, parent) => setConsolidationDrafts((drafts) => drafts?.map((item) =>
-            item.skillId === skillId ? { ...item, canonicalRelativeParent: parent } : item
-          ) ?? null)}
-          onResolveConflict={openConflictResolution}
-          onPreview={handlePreviewBatchConsolidation}
-          onConfirm={handleConfirmBatchConsolidation}
-          onClose={closeBatchConsolidation}
+          onApplyBatchParent={batchFlow.applyBatchParent}
+          onToggleDraft={batchFlow.toggleDraft}
+          onDraftParentChange={batchFlow.draftParentChange}
+          onResolveConflict={conflictFlow.open}
+          onPreview={batchFlow.handlePreview}
+          onConfirm={batchFlow.handleConfirm}
+          onClose={batchFlow.close}
         />
       )}
 
-      {conflictResolutionEditor && (
+      {conflictFlow.editor && (
         <ConflictResolutionDialog
-          editor={conflictResolutionEditor}
+          editor={conflictFlow.editor}
           busy={actionBusy}
-          onEditorChange={(updater) => setConflictResolutionEditor((prev) => prev ? updater(prev) : null)}
-          onApply={applyConflictResolution}
-          onClose={() => { if (!actionBusy) setConflictResolutionEditor(null) }}
+          onEditorChange={conflictFlow.updateEditor}
+          onApply={conflictFlow.apply}
+          onClose={conflictFlow.close}
         />
       )}
 
-      {undoBatch && (
+      {consolidationFlow.undoBatch && (
         <UndoConsolidationDialog
-          undoBatch={undoBatch}
+          undoBatch={consolidationFlow.undoBatch}
           busy={actionBusy}
-          onConfirm={handleUndoConsolidation}
-          onClose={() => { if (!actionBusy) setUndoBatch(null) }}
+          onConfirm={consolidationFlow.handleUndo}
+          onClose={() => { if (!actionBusy) consolidationFlow.setUndoBatch(null) }}
         />
       )}
 
-      {relocationTarget && (
+      {relocationFlow.target && (
         <SourceRelocationDialog
-          skill={relocationTarget.skill}
-          source={relocationTarget.source}
-          preview={relocationPreview}
+          skill={relocationFlow.target.skill}
+          source={relocationFlow.target.source}
+          preview={relocationFlow.preview}
           busy={actionBusy}
-          onPreview={handlePreviewRelocation}
-          onConfirm={handleConfirmRelocation}
-          onClose={closeRelocation}
+          onPreview={relocationFlow.handlePreview}
+          onConfirm={relocationFlow.handleConfirm}
+          onClose={relocationFlow.close}
         />
       )}
 
-      {undoRelocation && (
+      {relocationFlow.undo && (
         <UndoRelocationDialog
-          relocation={undoRelocation}
+          relocation={relocationFlow.undo}
           busy={actionBusy}
-          onConfirm={handleUndoRelocation}
-          onClose={() => { if (!actionBusy) setUndoRelocation(null) }}
+          onConfirm={relocationFlow.handleUndo}
+          onClose={() => { if (!actionBusy) relocationFlow.setUndo(null) }}
         />
       )}
     </div>
