@@ -103,7 +103,7 @@ export function SkillsPage({
     refreshSkillLibrary().catch((e) => {
       toastError(e instanceof Error ? e.message : String(e))
     })
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [skills]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim()

@@ -686,6 +686,37 @@ describe('SkillsPage consolidation (#84)', () => {
 })
 
 describe('SkillsPage bulk consolidation planning (#86)', () => {
+  it('refreshes the consolidation plan when a scan refreshes the Skills list', async () => {
+    const skills = buildFakeSkills(1)
+    const plan = [{
+      skillId: skills[0].id, skillName: skills[0].name,
+      selectedByDefault: true, hasConflict: false, canonicalRelativeParent: '',
+      versions: [{ hash: 'newly-scanned', candidateSourceIds: [11], paths: ['/new/skill'] }]
+    }]
+    const api = mockWindowApi({
+      getSkillLibrary: vi.fn()
+        .mockResolvedValueOnce({
+          canonicalRepository: { path: '/canonical' }, skills: [], consolidationPlan: [], consolidationBatches: []
+        })
+        .mockResolvedValueOnce({
+          canonicalRepository: { path: '/canonical' }, skills: [], consolidationPlan: plan, consolidationBatches: []
+        })
+    })
+    const props = {
+      tools: [], scanning: false, lastScan: null, loading: false, loadError: null,
+      onScan: vi.fn(), onRefresh: vi.fn().mockResolvedValue(undefined), onRetry: vi.fn().mockResolvedValue(undefined)
+    }
+    const { rerender } = render(
+      <ToastProvider><SkillsPage {...props} skills={[]} /></ToastProvider>
+    )
+    await waitFor(() => expect(api.getSkillLibrary).toHaveBeenCalledTimes(1))
+
+    rerender(<ToastProvider><SkillsPage {...props} skills={skills} /></ToastProvider>)
+
+    expect(await screen.findByRole('button', { name: '批量整理 (1)' })).toBeInTheDocument()
+    expect(api.getSkillLibrary).toHaveBeenCalledTimes(2)
+  })
+
   it('defaults safe version groups to selected and applies batch or per-Skill relative parents', async () => {
     const skills = buildFakeSkills(3)
     const plan = [
