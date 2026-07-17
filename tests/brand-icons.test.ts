@@ -124,7 +124,7 @@ describe('derived icon assets exist with correct dimensions (issue #66)', () => 
     expect(existsSync(path)).toBe(true)
     const sizes = icoSizes(path)
     for (const s of [16, 32, 48, 64, 128, 256]) {
-      expect(sizes, `ico missing ${s}px`).toContain([s, s])
+      expect(sizes, `ico missing ${s}px`).toContainEqual([s, s])
     }
   })
 
