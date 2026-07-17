@@ -5,9 +5,8 @@
   "main": "./out/main/index.js",
   "author": "xijuangu <xijuangu@users.noreply.github.com>",
   "scripts": {
-    "native:node": "npm rebuild better-sqlite3",
+    "native:node": "node -e \"require('fs').rmSync('node_modules/better-sqlite3/build',{recursive:true,force:true})\" && npm rebuild better-sqlite3",
     "native:electron": "electron-rebuild -f -w better-sqlite3",
-    "postinstall": "electron-builder install-app-deps",
     "dev": "npm run native:electron && electron-vite dev",
     "build": "electron-vite build",
     "build:electron": "npm run native:electron && npm run build",
