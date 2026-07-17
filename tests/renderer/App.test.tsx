@@ -84,6 +84,7 @@ describe('App (integration)', () => {
     const skill = buildFakeSkills(1)[0]
     skill.sources[0].source_role = 'canonical'
     skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
     const api = mockWindowApi({
       getDeployTargets: vi.fn().mockResolvedValue([{
         targetId: 'agents-user',
@@ -92,17 +93,25 @@ describe('App (integration)', () => {
         eligible: true,
         reason: null
       }]),
-      deploymentDeploy: vi.fn().mockResolvedValue({
-        status: 'completed',
-        deploymentId: 1,
-        result: {
-          action: 'created',
-          mode: 'symlink',
-          targetId: 'agents-user',
-          targetDisplayName: 'Agents',
-          degradedFrom: null,
-          degradeReason: null
-        }
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{
+          key: 'agents-user',
+          status: 'completed',
+          outcome: {
+            status: 'completed',
+            deploymentId: 1,
+            result: {
+              action: 'created',
+              mode: 'symlink',
+              targetDisplayName: 'Agents',
+              degradedFrom: null,
+              degradeReason: null
+            }
+          }
+        }]
       })
     })
 
@@ -110,11 +119,9 @@ describe('App (integration)', () => {
     expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
     expect(screen.getByRole('radio', { name: 'copy' })).not.toBeChecked()
     await userEvent.click(screen.getByRole('button', { name: '部署' }))
-    await waitFor(() => expect(api.deploymentDeploy).toHaveBeenCalledWith({
-      sourceId: skill.sources[0].id,
-      targetId: 'agents-user',
-      requestedMode: 'symlink'
-    }))
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalledWith([
+      { key: 'agents-user', sourceId: skill.sources[0].id, targetId: 'agents-user', requestedMode: 'symlink' }
+    ]))
   })
 
   it('keeps installation open as a repeatable deployment step until the user closes it', async () => {
@@ -124,6 +131,7 @@ describe('App (integration)', () => {
     installed.sources[0].source_type = 'central-repo'
     installed.sources[0].path = '/canonical/local-demo'
     installed.conflict.primarySource = installed.sources[0]
+    installed.deployments = []
     const installResult = {
       skillName: 'local-demo',
       skillId: installed.id,
@@ -141,13 +149,22 @@ describe('App (integration)', () => {
         targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex',
         eligible: true, reason: null
       }]),
-      deploymentDeploy: vi.fn().mockResolvedValue({
-        status: 'completed',
-        deploymentId: 1,
-        result: {
-          action: 'created', mode: 'symlink', targetId: 'codex-user',
-          targetDisplayName: 'Codex', degradedFrom: null, degradeReason: null
-        }
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{
+          key: 'codex-user',
+          status: 'completed',
+          outcome: {
+            status: 'completed',
+            deploymentId: 1,
+            result: {
+              action: 'created', mode: 'symlink', targetDisplayName: 'Codex',
+              degradedFrom: null, degradeReason: null
+            }
+          }
+        }]
       })
     })
     const onDone = vi.fn().mockResolvedValue(undefined)
@@ -167,9 +184,177 @@ describe('App (integration)', () => {
     expect(onDone).toHaveBeenCalledWith(installResult)
     expect(screen.getByRole('radio', { name: 'symlink' })).toBeChecked()
     await userEvent.click(screen.getByRole('button', { name: '部署' }))
-    await waitFor(() => expect(api.deploymentDeploy).toHaveBeenCalled())
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalled())
     expect(screen.getByText(/安装完成，可继续部署到多个工具/)).toBeInTheDocument()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('shows per-target status badges in the deploy matrix', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = [{
+      id: 1, skill_id: skill.id, target_tool: 'trae', target_path: '/trae/skill',
+      mode: 'symlink' as const, management: 'managed' as const,
+      source_path: '/repo/skill', deployed_at: new Date().toISOString(),
+      source_hash_at_deploy: 'hash0', status: 'normal' as const, target_id: 'trae-user',
+      source_id: skill.sources[0].id
+    }]
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([
+        { targetId: 'trae-user', targetTool: 'trae', displayName: 'Trae', eligible: true, reason: null },
+        { targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex', eligible: true, reason: null },
+        { targetId: 'cursor-user', targetTool: 'cursor', displayName: 'Cursor', eligible: false, reason: '已有外部订阅' }
+      ]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{
+          key: 'codex-user',
+          status: 'completed',
+          outcome: { status: 'completed', deploymentId: 2, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } }
+        }]
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeInTheDocument())
+    expect(screen.getByRole('checkbox', { name: 'Trae' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).toBeDisabled()
+    expect(screen.getByText('已部署')).toBeInTheDocument()
+    expect(screen.getAllByText('未部署')).toHaveLength(2)
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalled())
+    expect(screen.getAllByText('已部署')).toHaveLength(2)
+  })
+
+  it('keeps the deploy dialog open after a successful deployment and allows continuing', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
+    const onDone = vi.fn().mockResolvedValue(undefined)
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([
+        { targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex', eligible: true, reason: null },
+        { targetId: 'cursor-user', targetTool: 'cursor', displayName: 'Cursor', eligible: true, reason: null }
+      ]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 2,
+        completed: 2,
+        failed: 0,
+        items: [
+          { key: 'codex-user', status: 'completed', outcome: { status: 'completed', deploymentId: 1, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } } },
+          { key: 'cursor-user', status: 'completed', outcome: { status: 'completed', deploymentId: 2, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Cursor' } } }
+        ]
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={onDone} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked())
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('完成 2，失败 0')).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ action: 'created', targetDisplayName: 'Codex' }))
+    expect(onDone).not.toHaveBeenCalledWith(null)
+    expect(screen.getByRole('checkbox', { name: 'Codex' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).not.toBeChecked()
+  })
+
+  it('allows retrying failed targets after a batch deploy', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([
+        { targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex', eligible: true, reason: null },
+        { targetId: 'cursor-user', targetTool: 'cursor', displayName: 'Cursor', eligible: true, reason: null }
+      ]),
+      bulkDeploy: vi.fn()
+        .mockResolvedValueOnce({
+          total: 2,
+          completed: 1,
+          failed: 1,
+          items: [
+            { key: 'codex-user', status: 'completed', outcome: { status: 'completed', deploymentId: 1, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } } },
+            { key: 'cursor-user', status: 'rejected', message: 'target busy' }
+          ]
+        })
+        .mockResolvedValueOnce({
+          total: 1,
+          completed: 1,
+          failed: 0,
+          items: [
+            { key: 'cursor-user', status: 'completed', outcome: { status: 'completed', deploymentId: 2, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Cursor' } } }
+          ]
+        })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked())
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('完成 1，失败 1')).toBeInTheDocument()
+    expect(screen.getByText(/target busy/)).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Codex' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('完成 2，失败 0')).toBeInTheDocument()
+  })
+
+  it('completes confirmation-required targets via bulkConfirmDeploy in the single deploy matrix', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex',
+        eligible: true, reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 0,
+        failed: 1,
+        items: [{
+          key: 'codex-user',
+          status: 'confirmation-required',
+          outcome: {
+            status: 'confirmation-required',
+            confirmationId: 'confirm-1',
+            expiresAt: Date.now() + 60_000,
+            facts: {
+              skillName: skill.name,
+              targetDisplayName: 'Codex',
+              reasons: ['external-overwrite'],
+              requestedMode: 'symlink',
+              actualMode: 'symlink',
+              backup: { required: true, directory: '/backups' }
+            }
+          }
+        }]
+      }),
+      bulkConfirmDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{ key: 'codex-user', status: 'completed', outcome: { status: 'completed', deploymentId: 1, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } } }]
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked())
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('将覆盖目标中不受管理的现有内容')).toBeInTheDocument()
+    expect(screen.getByText('备份：/backups')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '确认并继续' }))
+    await waitFor(() => expect(api.bulkConfirmDeploy).toHaveBeenCalledWith([
+      { key: 'codex-user', confirmationId: 'confirm-1' }
+    ]))
+    expect(await screen.findByText('完成 1，失败 0')).toBeInTheDocument()
   })
 
   it('runs selected skill-target pairs as a symlink batch and keeps per-item results visible', async () => {
