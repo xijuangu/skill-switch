@@ -70,6 +70,8 @@ const api = {
   undeploy: (deploymentId: number) => ipcRenderer.invoke('undeploy', deploymentId),
   bulkDeploy: (requests: Array<{ key: string; sourceId: number; targetId: string; requestedMode: 'copy' | 'symlink' | 'junction' }>) =>
     ipcRenderer.invoke('bulk:deploy', requests),
+  bulkConfirmDeploy: (requests: Array<{ key: string; confirmationId: string }>) =>
+    ipcRenderer.invoke('bulk:confirmDeploy', requests),
   bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) =>
     ipcRenderer.invoke('bulk:undeploy', requests),
   bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) =>
@@ -83,6 +85,8 @@ const api = {
   // Drift + Remove from Registry(#8)
   removeFromManifest: (deploymentId: number) =>
     ipcRenderer.invoke('removeFromManifest', deploymentId),
+  detachStaleDeployment: (deploymentId: number) =>
+    ipcRenderer.invoke('detachStaleDeployment', deploymentId),
   getDeploymentsForSkill: (skillId: number) =>
     ipcRenderer.invoke('getDeploymentsForSkill', skillId),
   viewSkillMd: (skillId: number, sourcePath?: string) =>

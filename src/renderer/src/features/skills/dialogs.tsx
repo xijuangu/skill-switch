@@ -68,6 +68,16 @@ type BulkUndeployItem = {
   targetPath: string | null
 }
 
+function deploymentRiskLabel(reason: string): string {
+  return {
+    'external-overwrite': '将覆盖目标中不受管理的现有内容',
+    'target-modified': '受管目标已被修改',
+    'mode-degraded': '当前平台需要降级部署模式',
+    'source-updated': '权威来源已更新',
+    'bidirectional': '来源与目标均发生变化'
+  }[reason] ?? reason
+}
+
 export function BulkSkillActionsDialog({
   skills,
   onRefresh,
@@ -86,13 +96,16 @@ export function BulkSkillActionsDialog({
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<BulkMutationResultView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const skillsKey = skills.map((skill) => skill.id).join(',')
 
   useEffect(() => {
     let cancelled = false
-    setResult(null)
     setLoadError(null)
     if (action === 'remove') {
-      setSelectedKeys(new Set(skills.map((skill) => String(skill.id))))
+      setBusy(false)
+      setSelectedKeys((current) => current.size > 0
+        ? current
+        : new Set(skills.map((skill) => String(skill.id))))
       return () => { cancelled = true }
     }
     setBusy(true)
@@ -114,7 +127,9 @@ export function BulkSkillActionsDialog({
         if (cancelled) return
         const pairs = groups.flat()
         setDeployPairs(pairs)
-        setSelectedKeys(new Set(pairs.filter((pair) => pair.eligible).map((pair) => pair.key)))
+        setSelectedKeys((current) => current.size > 0
+          ? current
+          : new Set(pairs.filter((pair) => pair.eligible).map((pair) => pair.key)))
       }).catch((error) => {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
       }).finally(() => {
@@ -136,7 +151,9 @@ export function BulkSkillActionsDialog({
         if (cancelled) return
         const items = groups.flat()
         setUndeployItems(items)
-        setSelectedKeys(new Set(items.map((item) => item.key)))
+        setSelectedKeys((current) => current.size > 0
+          ? current
+          : new Set(items.map((item) => item.key)))
       }).catch((error) => {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
       }).finally(() => {
@@ -144,7 +161,7 @@ export function BulkSkillActionsDialog({
       })
     }
     return () => { cancelled = true }
-  }, [action, skills])
+  }, [action, skillsKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggle = (key: string) => {
     setSelectedKeys((current) => {
@@ -164,20 +181,40 @@ export function BulkSkillActionsDialog({
 
   const run = async () => {
     setBusy(true)
-    setResult(null)
     try {
       let outcome: BulkMutationResultView
       if (action === 'deploy') {
-        outcome = await window.api.bulkDeploy(
-          deployPairs
-            .filter((pair) => pair.eligible && selectedKeys.has(pair.key))
-            .map((pair) => ({
-              key: pair.key,
-              sourceId: pair.sourceId,
-              targetId: pair.targetId,
-              requestedMode: mode
-            }))
+        const pendingConfirmations = (result?.items ?? []).flatMap((item) =>
+          item.status === 'confirmation-required' &&
+          selectedKeys.has(item.key) &&
+          item.outcome != null &&
+          'status' in item.outcome &&
+          item.outcome?.status === 'confirmation-required'
+            ? [{ key: item.key, confirmationId: item.outcome.confirmationId }]
+            : []
         )
+        if (pendingConfirmations.length > 0) {
+          const confirmed = await window.api.bulkConfirmDeploy(pendingConfirmations)
+          const confirmedByKey = new Map(confirmed.items.map((item) => [item.key, item]))
+          const items = (result?.items ?? []).map((item) => confirmedByKey.get(item.key) ?? item)
+          outcome = {
+            total: items.length,
+            completed: items.filter((item) => item.status === 'completed').length,
+            failed: items.filter((item) => item.status !== 'completed').length,
+            items
+          }
+        } else {
+          outcome = await window.api.bulkDeploy(
+            deployPairs
+              .filter((pair) => pair.eligible && selectedKeys.has(pair.key))
+              .map((pair) => ({
+                key: pair.key,
+                sourceId: pair.sourceId,
+                targetId: pair.targetId,
+                requestedMode: mode
+              }))
+          )
+        }
       } else if (action === 'undeploy') {
         outcome = await window.api.bulkUndeploy(
           visibleUndeployItems
@@ -202,7 +239,12 @@ export function BulkSkillActionsDialog({
   }
 
   const resultByKey = new Map(result?.items.map((item) => [item.key, item]) ?? [])
-  const actionLabel = action === 'deploy' ? '批量部署' : action === 'undeploy' ? '批量取消部署' : '批量从注册表移除'
+  const hasPendingConfirmation = action === 'deploy' && (result?.items ?? []).some((item) =>
+    item.status === 'confirmation-required' && selectedKeys.has(item.key)
+  )
+  const actionLabel = action === 'deploy'
+    ? hasPendingConfirmation ? '确认并继续' : '批量部署'
+    : action === 'undeploy' ? '批量取消部署' : '批量从注册表移除'
 
   return (
     <Dialog
@@ -222,7 +264,16 @@ export function BulkSkillActionsDialog({
             ['undeploy', '取消部署'],
             ['remove', '从注册表移除']
           ] as const).map(([value, label]) => (
-            <Button key={value} size="sm" variant={action === value ? 'primary' : 'secondary'} onClick={() => setAction(value)}>
+            <Button
+              key={value}
+              size="sm"
+              variant={action === value ? 'primary' : 'secondary'}
+              onClick={() => {
+                setAction(value)
+                setResult(null)
+                setSelectedKeys(new Set())
+              }}
+            >
               {label}
             </Button>
           ))}
@@ -256,9 +307,30 @@ export function BulkSkillActionsDialog({
         {result && (
           <div className="rounded border border-border p-2 text-xs">
             <p className="font-medium">完成 {result.completed}，失败 {result.failed}</p>
-            {result.items.filter((item) => item.status !== 'completed').map((item) => (
-              <p key={item.key} className="text-danger mt-1">{item.key}: {item.message ?? item.status}</p>
-            ))}
+            {result.items.filter((item) => item.status !== 'completed').map((item) => {
+              const confirmation = item.outcome != null &&
+                'status' in item.outcome &&
+                item.outcome.status === 'confirmation-required'
+                ? item.outcome
+                : null
+              return confirmation ? (
+                <div key={item.key} className="mt-2 rounded border border-warning/30 bg-warning-subtle p-2">
+                  <p className="font-medium text-warning">{confirmation.facts.skillName} → {confirmation.facts.targetDisplayName}</p>
+                  <ul className="list-disc pl-4 mt-1 text-foreground-secondary">
+                    {confirmation.facts.reasons.map((reason) => <li key={reason}>{deploymentRiskLabel(reason)}</li>)}
+                  </ul>
+                  <p className="mt-1">
+                    模式：{confirmation.facts.requestedMode}
+                    {confirmation.facts.actualMode !== confirmation.facts.requestedMode
+                      ? ` → ${confirmation.facts.actualMode}`
+                      : ''}
+                  </p>
+                  <p>备份：{confirmation.facts.backup.required ? confirmation.facts.backup.directory ?? '会创建备份' : '不需要'}</p>
+                </div>
+              ) : (
+                <p key={item.key} className="text-danger mt-1">{item.key}: {item.message ?? item.status}</p>
+              )
+            })}
           </div>
         )}
 

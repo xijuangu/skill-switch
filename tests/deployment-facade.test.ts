@@ -94,6 +94,40 @@ describe('Deployment Facade', () => {
         target_id: 'removed-codex-target'
       }
     })
+    expect(env.create().detachStaleTarget(deployment.id)).toEqual({
+      status: 'completed',
+      deploymentId: deployment.id
+    })
+    expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, 'removed-codex-target')).toBeUndefined()
+  })
+
+  test('rechecks stale target configuration before metadata-only detach for managed relations', () => {
+    const env = setup()
+    const staleTargetId = 'removed-codex-target'
+    upsertDeployment(
+      env.db,
+      env.skillId,
+      'codex',
+      join(env.targetRoot, 'demo'),
+      'copy',
+      env.sourcePath,
+      hashDir(env.sourcePath),
+      { sourceId: env.sourceId, targetId: staleTargetId },
+      'managed'
+    )
+    const deployment = getDeploymentBySkillAndTargetId(env.db, env.skillId, staleTargetId)!
+    const reconfigured = {
+      ...env.tool,
+      targets: [{ id: staleTargetId, path: env.targetRoot }],
+      existingTargets: [{ id: staleTargetId, path: env.targetRoot }]
+    }
+
+    expect(env.create({ tools: [reconfigured] }).detachStaleTarget(deployment.id)).toMatchObject({
+      status: 'rejected',
+      reason: 'observation-stale'
+    })
+    expect(getDeploymentBySkillAndTargetId(env.db, env.skillId, staleTargetId)).toBeDefined()
+    expect(env.create({ tools: [] }).detachStaleTarget(deployment.id)).toMatchObject({ status: 'completed' })
   })
 
   test.runIf(process.platform !== 'win32')('previews every observed subscription grouped by tool without changing links', () => {
@@ -438,7 +472,8 @@ describe('Deployment Facade', () => {
     const result = await removeFromRegistry(env.db, env.skillId, {
       centralSkillsDir: dirname(env.sourcePath),
       backupsDir: join(env.targetRoot, '..', 'registry-backups'),
-      undeployDeployment: (deploymentId) => facade.undeploy(deploymentId)
+      undeployDeployment: (deploymentId) => facade.undeploy(deploymentId),
+      preflightUndeploy: (deploymentId) => facade.preflightUndeploy(deploymentId)
     })
     expect(result.undeployedTools).toEqual(['codex'])
     expect(facade.inspect(1)).toBeNull()

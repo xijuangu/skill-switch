@@ -348,7 +348,11 @@ export interface BulkMutationResultView {
     key: string
     status: 'completed' | 'confirmation-required' | 'rejected' | 'recovery-required'
     message?: string
-    outcome?: unknown
+    outcome?: DeploymentOutcomeView | DeploymentMutationOutcomeView | {
+      skillName: string
+      backedUp: boolean
+      undeployedTools: string[]
+    }
   }>
 }
 
@@ -498,6 +502,7 @@ declare global {
       redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
       undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       bulkDeploy: (requests: Array<{ key: string; sourceId: number; targetId: string; requestedMode: DeployModeView }>) => Promise<BulkMutationResultView>
+      bulkConfirmDeploy: (requests: Array<{ key: string; confirmationId: string }>) => Promise<BulkMutationResultView>
       bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
       bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) => Promise<BulkMutationResultView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
@@ -508,6 +513,7 @@ declare global {
       getTools: () => Promise<ToolWithDriftsView[]>
       // Drift + Remove from Registry (#8)
       removeFromManifest: (deploymentId: number) => Promise<void>
+      detachStaleDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       getDeploymentsForSkill: (skillId: number) => Promise<DeploymentView[]>
       viewSkillMd: (skillId: number, sourcePath?: string) => Promise<{ content: string; path: string } | null>
       removeFromRegistry: (

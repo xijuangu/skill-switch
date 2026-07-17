@@ -2,7 +2,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, r
 import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import type { DB } from '../db/database'
-import { adoptObservedDeployment, getAllDeployments, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
+import { adoptObservedDeployment, deleteDeploymentById, getAllDeployments, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
 import { getSourceById, getSourceByPath, getCanonicalSourceBySkillId, upsertSource } from '../db/dao/skill-sources'
 import { getSkillById } from '../db/dao/skills'
 import type { DeployMode, DeployResult, Deployment, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
@@ -86,6 +86,10 @@ export type DeploymentMutationOutcome =
       message: string
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
+
+export type DeploymentPreflightOutcome =
+  | { status: 'ready'; deploymentId: number }
+  | Extract<DeploymentMutationOutcome, { status: 'rejected' | 'recovery-required' }>
 
 export type TargetAdoptionOutcome =
   | { status: 'adopted'; deploymentId: number; candidateSourceId: number; candidateSourcePath: string }
@@ -183,6 +187,8 @@ export interface DeploymentFacade {
   confirm(confirmationId: string): Promise<DeploymentOutcome>
   redeploy(deploymentId: number): Promise<DeploymentRedeployOutcome>
   undeploy(deploymentId: number): Promise<DeploymentMutationOutcome>
+  preflightUndeploy(deploymentId: number): DeploymentPreflightOutcome
+  detachStaleTarget(deploymentId: number): DeploymentMutationOutcome
   adopt(deploymentId: number): Promise<DeploymentMutationOutcome>
   adoptTargetAsCandidate(deploymentId: number): Promise<TargetAdoptionOutcome>
   getBulkAdoptionFacts(): BulkAdoptionPreviewFacts
@@ -787,6 +793,46 @@ export function createDeploymentFacade(options: {
         if (prepared.reasons.length > 0) return requireConfirmation(prepared)
         return execute(prepared)
       })
+    },
+    preflightUndeploy(deploymentId) {
+      const deployment = getDeploymentById(options.db, deploymentId)
+      if (!deployment) {
+        return { status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' }
+      }
+      if (deployment.management === 'observed') {
+        return { status: 'rejected', reason: 'observed-read-only', message: '外部订阅尚未接管，拒绝取消部署。' }
+      }
+      if (deployment.target_id == null || deployment.target_path == null) {
+        return { status: 'rejected', reason: 'unresolved', message: '部署目标身份尚未解析，拒绝执行文件系统操作。' }
+      }
+      if (lockedTargets.has(deployment.target_id)) {
+        return { status: 'rejected', reason: 'target-busy', message: '目标正在执行其他部署操作，请稍后重试。' }
+      }
+      if (canonicalSourceFrozen(deployment.skill_id)) {
+        return CANONICAL_SOURCE_UNAVAILABLE
+      }
+      const recovery = inspectRecoveryEvidence(deployment.target_path)
+      if (recovery) {
+        return { status: 'recovery-required', message: '检测到未完成的部署操作，请保留现场并人工选择恢复方向。', evidence: recovery }
+      }
+      return { status: 'ready', deploymentId }
+    },
+    detachStaleTarget(deploymentId) {
+      const deployment = getDeploymentById(options.db, deploymentId)
+      if (!deployment) {
+        return { status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' }
+      }
+      if (deployment.target_id == null) {
+        return { status: 'rejected', reason: 'unresolved', message: '部署目标身份尚未解析。' }
+      }
+      const configured = options.getRuntime().tools.some((tool) =>
+        tool.enabled && tool.existingTargets.some((target) => target.id === deployment.target_id)
+      )
+      if (configured) {
+        return { status: 'rejected', reason: 'observation-stale', message: '目标已重新配置，请刷新后重试。' }
+      }
+      deleteDeploymentById(options.db, deploymentId)
+      return { status: 'completed', deploymentId }
     },
     undeploy(deploymentId) {
       const deployment = getDeploymentById(options.db, deploymentId)

@@ -55,6 +55,7 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     redeploy: vi.fn(),
     undeploy: vi.fn(),
     bulkDeploy: vi.fn(),
+    bulkConfirmDeploy: vi.fn(),
     bulkUndeploy: vi.fn(),
     bulkRemoveFromRegistry: vi.fn(),
     adoptDeployment: vi.fn(),
@@ -63,6 +64,7 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     confirmBulkAdoption: vi.fn(),
     getTools: vi.fn().mockResolvedValue([]),
     removeFromManifest: vi.fn(),
+    detachStaleDeployment: vi.fn(),
     getDeploymentsForSkill: vi.fn().mockResolvedValue([]),
     viewSkillMd: vi.fn(),
     removeFromRegistry: vi.fn(),
@@ -195,7 +197,7 @@ describe('App (integration)', () => {
       })
     })
 
-    render(<BulkSkillActionsDialog skills={skills} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    const view = render(<BulkSkillActionsDialog skills={skills} onRefresh={vi.fn()} onClose={vi.fn()} />)
     expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
     await waitFor(() => expect(screen.getAllByRole('checkbox', { name: /Codex/ })).toHaveLength(2))
     await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
@@ -206,6 +208,66 @@ describe('App (integration)', () => {
     ]))
     expect(await screen.findByText('完成 1，失败 1')).toBeInTheDocument()
     expect(screen.getByText(/target busy/)).toBeInTheDocument()
+    view.rerender(<BulkSkillActionsDialog skills={skills.map((skill) => ({ ...skill }))} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByText('完成 1，失败 1')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: `${skills[0].name} → Codex` })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: `${skills[1].name} → Codex` })).toBeChecked()
+  })
+
+  it('completes confirmation-required items inside the batch deployment flow', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    const key = `${skill.id}:codex-user`
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user',
+        targetTool: 'codex',
+        displayName: 'Codex',
+        eligible: true,
+        reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 0,
+        failed: 1,
+        items: [{
+          key,
+          status: 'confirmation-required',
+          outcome: {
+            status: 'confirmation-required',
+            confirmationId: 'confirm-1',
+            expiresAt: Date.now() + 60_000,
+            facts: {
+              skillName: skill.name,
+              targetDisplayName: 'Codex',
+              reasons: ['external-overwrite'],
+              requestedMode: 'symlink',
+              actualMode: 'symlink',
+              backup: { required: true, directory: '/backups' }
+            }
+          }
+        }]
+      }),
+      bulkConfirmDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{ key, status: 'completed' }]
+      })
+    })
+
+    render(<BulkSkillActionsDialog skills={[skill]} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('checkbox', { name: `${skill.name} → Codex` })
+    await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
+    expect(await screen.findByText('将覆盖目标中不受管理的现有内容')).toBeInTheDocument()
+    expect(screen.getByText('备份：/backups')).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: '确认并继续' }))
+
+    await waitFor(() => expect(api.bulkConfirmDeploy).toHaveBeenCalledWith([
+      { key, confirmationId: 'confirm-1' }
+    ]))
+    expect(await screen.findByText('完成 1，失败 0')).toBeInTheDocument()
   })
 
   it('mounts without throwing (regression: white screen from useToast outside ToastProvider)', async () => {
@@ -351,7 +413,7 @@ describe('App (integration)', () => {
 
   it('allows a stale observed relation for a removed Discovery Target to be detached', async () => {
     const api = mockWindowApi({
-      removeFromManifest: vi.fn().mockResolvedValue(undefined),
+      detachStaleDeployment: vi.fn().mockResolvedValue({ status: 'completed', deploymentId: 29 }),
       getTools: vi.fn().mockResolvedValue([{
         config: {
           key: 'trae', displayName: 'TRAE', enabled: true,
@@ -383,7 +445,7 @@ describe('App (integration)', () => {
     await userEvent.click(screen.getByRole('button', { name: '解除登记' }))
     expect(screen.getByRole('dialog')).toHaveTextContent('/trae/find-skills')
     await userEvent.click(screen.getByRole('button', { name: '确认解除登记' }))
-    await waitFor(() => expect(api.removeFromManifest).toHaveBeenCalledWith(29))
+    await waitFor(() => expect(api.detachStaleDeployment).toHaveBeenCalledWith(29))
   })
 
   it('previews and confirms every observed subscription globally, then retries only failures', async () => {

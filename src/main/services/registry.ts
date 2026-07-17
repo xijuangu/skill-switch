@@ -12,7 +12,7 @@
 import { existsSync, rmSync } from 'fs'
 import { join, resolve } from 'path'
 import type { DB } from '../db/database'
-import type { ConflictStatus, SkillSource, ToolConfig } from '../types'
+import type { ConflictStatus, RecoveryEvidence, SkillSource, ToolConfig } from '../types'
 import {
   deleteSourceById,
   deleteSourcesBySkillId,
@@ -28,7 +28,7 @@ import {
   getDeploymentsBySkillId
 } from '../db/dao/deployments'
 import { runInTransaction } from '../db/database'
-import { createBackup } from './backup'
+import { createBackup, restoreBackup, type BackupMeta } from './backup'
 import {
   assertAbsolutePath,
   isPathWithin,
@@ -202,7 +202,19 @@ export interface RemoveFromRegistryOptions {
   undeployDeployment: (deploymentId: number) => Promise<{
     status: 'completed' | 'rejected' | 'recovery-required'
     message?: string
+    evidence?: RecoveryEvidence
   }>
+  preflightUndeploy: (deploymentId: number) => {
+    status: 'ready' | 'rejected' | 'recovery-required'
+    message?: string
+  }
+}
+
+export class RegistryMutationRejectedError extends Error {}
+export class RegistryRecoveryRequiredError extends Error {
+  constructor(message: string, readonly evidence: RecoveryEvidence) {
+    super(message)
+  }
 }
 
 /** removeFromRegistry 返回结果 */
@@ -217,12 +229,12 @@ export interface RemoveFromRegistryResult {
 /**
  * 从注册表移除 skill:删中央仓库实体 + 所有部署 + 清单记录,删前先备份中央实体。
  *
- * 顺序(保证 DB 与磁盘一致性):
- * 1. (事务外)若中央实体存在 → createBackup(拷贝),backedUp=true
- * 2. 逐个把 Deployment ID 交给 Facade 卸载(生产路径共享目标锁与补偿)。
- * 3. (事务内)deleteSourcesBySkillId
- * 4. (事务内)deleteSkill(ON DELETE CASCADE 兜底,但此处已显式清理)
- * 5. (事务外)rmSync 中央实体目录(备份已先拷贝,删除不影响备份)
+ * 顺序:
+ * 1. 静态关系检查 + Facade 全量取消部署预检(无副作用)。
+ * 2. 若中央实体存在 → createBackup；预检拒绝时不会产生备份。
+ * 3. 逐个把 Deployment ID 交给 Facade 卸载(共享目标锁与补偿)。
+ * 4. 删除已备份的中央实体目录；失败时元数据保持不变。
+ * 5. 在一个事务内删除 Source 与 Skill 元数据；失败时从备份恢复中央实体。
  *
  * 若某个 Facade mutation 返回 busy / recovery-required，停止级联并保留注册表；
  * 已完成的取消部署代表真实状态，下次调用会继续处理剩余记录。
@@ -237,7 +249,7 @@ export async function removeFromRegistry(
   // Step 1: 查 skill,不存在则抛错
   const skill = getSkillById(db, skillId)
   if (!skill) {
-    throw new Error(`skill not found: id=${skillId}`)
+    throw new RegistryMutationRejectedError(`skill not found: id=${skillId}`)
   }
 
   const sources = getSourcesBySkillId(db, skillId)
@@ -249,7 +261,7 @@ export async function removeFromRegistry(
     )
   const centralEntityPath = canonicalSource?.path ?? null
   if (centralEntityPath && !isPathWithin(opts.centralSkillsDir, centralEntityPath)) {
-    throw new Error('权威 Source 不在 Canonical Repository 内，拒绝移除。')
+    throw new RegistryMutationRejectedError('权威 Source 不在 Canonical Repository 内，拒绝移除。')
   }
 
   // Static preflight must finish before backup or filesystem mutation. An
@@ -258,7 +270,7 @@ export async function removeFromRegistry(
   const deployments = getDeploymentsBySkillId(db, skillId)
   const observed = deployments.find((deployment) => deployment.management === 'observed')
   if (observed) {
-    throw new Error(`仍有未接管的外部订阅：${observed.target_tool}，请先接管或解除登记。`)
+    throw new RegistryMutationRejectedError(`仍有未接管的外部订阅：${observed.target_tool}，请先接管或解除登记。`)
   }
   const unresolved = deployments.find((deployment) =>
     deployment.source_id == null ||
@@ -266,28 +278,29 @@ export async function removeFromRegistry(
     deployment.target_path == null
   )
   if (unresolved) {
-    throw new Error(`仍有待确认的部署关系：${unresolved.target_tool}，请先解除或修复该关系。`)
+    throw new RegistryMutationRejectedError(`仍有待确认的部署关系：${unresolved.target_tool}，请先解除或修复该关系。`)
   }
 
-  // Step 2: each filesystem mutation completes through the Deployment Facade
-  // before registry metadata is removed. Do not hold a SQLite transaction
-  // across awaited target locks.
-  const undeployedTools: string[] = []
+  // Step 2: ask the Deployment Facade to validate every relationship before
+  // any backup or filesystem mutation. Runtime I/O can still fail later, but
+  // known read-only, unresolved and recovery-required states cannot cause a
+  // partial cascade.
   for (const dep of deployments) {
-    const outcome = await opts.undeployDeployment(dep.id)
-    if (outcome.status !== 'completed') {
-      throw new Error(outcome.message ?? `unable to undeploy deployment ${dep.id}`)
+    const outcome = opts.preflightUndeploy(dep.id)
+    if (outcome.status !== 'ready') {
+      throw new RegistryMutationRejectedError(
+        outcome.message ?? `unable to preflight deployment ${dep.id}`
+      )
     }
-    undeployedTools.push(dep.target_tool)
   }
 
-  // Step 3: only a Canonical Source is application-owned content. Back it up
-  // after all relationship preflight/mutations succeed. Candidate removal is
-  // metadata-only and leaves the external directory untouched.
+  // Step 3: back up application-owned canonical content only after all
+  // relationship preflights pass, but before the first target is changed.
   let backedUp = false
+  let canonicalBackup: BackupMeta | null = null
   const centralEntityExists = centralEntityPath != null && existsSync(centralEntityPath)
   if (centralEntityExists) {
-    createBackup({
+    canonicalBackup = createBackup({
       skillName: skill.name,
       targetTool: 'registry',
       sourcePath: centralEntityPath,
@@ -296,18 +309,50 @@ export async function removeFromRegistry(
     backedUp = true
   }
 
-  // Step 4: metadata deletion remains atomic after all target mutations.
-  runInTransaction(db, () => {
-    // Step 4: 删 skill_sources 记录
-    deleteSourcesBySkillId(db, skillId)
+  // Step 4: each filesystem mutation completes through the Deployment Facade
+  // before registry metadata is removed. Do not hold a SQLite transaction
+  // across awaited target locks.
+  const undeployedTools: string[] = []
+  for (const dep of deployments) {
+    const outcome = await opts.undeployDeployment(dep.id)
+    if (outcome.status === 'recovery-required') {
+      if (!outcome.evidence) throw new Error('recovery-required undeploy outcome is missing evidence')
+      throw new RegistryRecoveryRequiredError(
+        outcome.message ?? `deployment ${dep.id} requires recovery`,
+        outcome.evidence
+      )
+    }
+    if (outcome.status !== 'completed') {
+      throw new RegistryMutationRejectedError(outcome.message ?? `unable to undeploy deployment ${dep.id}`)
+    }
+    undeployedTools.push(dep.target_tool)
+  }
 
-    // Step 5: 删 skill 记录(ON DELETE CASCADE 兜底,但已显式清理)
-    deleteSkill(db, skillId)
-  })
-
-  // Step 5: delete only the application-owned Canonical Source.
+  // Step 5: remove application-owned content while the registry still
+  // describes it. A filesystem failure leaves metadata intact and the backup
+  // available. If the following DB transaction fails, restore the canonical
+  // content before surfacing the fault.
   if (centralEntityExists && centralEntityPath) {
     rmSync(centralEntityPath, { recursive: true, force: true })
+  }
+
+  try {
+    runInTransaction(db, () => {
+      deleteSourcesBySkillId(db, skillId)
+      deleteSkill(db, skillId)
+    })
+  } catch (error) {
+    if (canonicalBackup && centralEntityPath && !existsSync(centralEntityPath)) {
+      try {
+        restoreBackup(canonicalBackup.backupId, centralEntityPath, opts.backupsDir)
+      } catch (restoreError) {
+        throw new Error(
+          `注册表移除失败，且权威 Source 自动恢复失败：${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+          { cause: error }
+        )
+      }
+    }
+    throw error
   }
 
   return { skillName: skill.name, backedUp, undeployedTools }

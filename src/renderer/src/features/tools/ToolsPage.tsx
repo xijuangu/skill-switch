@@ -76,10 +76,15 @@ export function ToolsPage({
 
   const handleRemoveFromManifest = async () => {
     if (!confirmRemoveManifest) return
-    const { deploymentId, skillId, targetTool } = confirmRemoveManifest
+    const { deploymentId, skillId, targetTool, staleTarget } = confirmRemoveManifest
     setBusyKey({ skillId, targetTool })
     try {
-      await window.api.removeFromManifest(deploymentId)
+      if (staleTarget) {
+        const outcome = await window.api.detachStaleDeployment(deploymentId)
+        if (outcome.status !== 'completed') throw new Error(outcome.message)
+      } else {
+        await window.api.removeFromManifest(deploymentId)
+      }
       await refreshPage()
       success('已从清单移除')
       setConfirmRemoveManifest(null)
@@ -571,12 +576,12 @@ function DriftItem({
             从清单移除
           </Button>
         )}
-        {!isObserved && onUndeploy && drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && (
+        {!isObserved && onUndeploy && drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && drift.kind !== 'target-unconfigured' && (
           <Button variant="danger" size="sm" onClick={onUndeploy} disabled={busy}>
             取消部署
           </Button>
         )}
-        {isObserved && drift.kind === 'target-unconfigured' && onRemoveFromManifest && (
+        {drift.kind === 'target-unconfigured' && onRemoveFromManifest && (
           <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
             解除登记
           </Button>
