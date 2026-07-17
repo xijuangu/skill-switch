@@ -50,6 +50,25 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Validate version consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "package.json version: ${PKG_VERSION}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/}"
+            # Strip optional leading 'v' from tag (v1.0.0 -> 1.0.0)
+            TAG_VERSION_NO_V="${TAG_VERSION#v}"
+            echo "git tag: ${TAG_VERSION} (normalized: ${TAG_VERSION_NO_V})"
+            if [[ "${PKG_VERSION}" != "${TAG_VERSION_NO_V}" ]]; then
+              echo "::error::Version mismatch: package.json=${PKG_VERSION}, tag=${TAG_VERSION_NO_V}"
+              exit 1
+            fi
+            echo "Version consistency: OK (${PKG_VERSION})"
+          else
+            echo "Not a tag push — skipping tag/version equality check"
+          fi
       - run: npm ci
       - run: npm run ${{ matrix.script }}
       - uses: actions/upload-artifact@v4
@@ -59,28 +78,58 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Release
+    name: Draft Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist/
           merge-multiple: true
-      - run: |
-          # 收集正式安装产物(排除 unpacked 目录内的原始 exe、blockmap、yml 元数据)
+      - name: Collect and validate required assets
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p release-assets
+          # Collect installable artifacts (exclude unpacked dirs, blockmaps, yml metadata)
           find dist -type f \( \
             -name '*.dmg' -o \
             -name '*Setup*.exe' -o \
             -name '*.AppImage' -o \
             -name '*.deb' \
           \) ! -path 'dist/*-unpacked/*' -exec cp {} release-assets/ \;
+          echo "=== Collected assets ==="
           ls -lh release-assets/
-      - uses: softprops/action-gh-release@v2
+
+          # Required asset contract: macOS DMG, Windows NSIS exe, Linux x64 installer (AppImage or DEB)
+          missing=0
+          if ! ls release-assets/*.dmg >/dev/null 2>&1; then
+            echo "::error::Missing required macOS DMG"
+            missing=1
+          fi
+          if ! ls release-assets/*Setup*.exe >/dev/null 2>&1; then
+            echo "::error::Missing required Windows x64 NSIS installer"
+            missing=1
+          fi
+          if ! ls release-assets/*.AppImage >/dev/null 2>&1 && ! ls release-assets/*.deb >/dev/null 2>&1; then
+            echo "::error::Missing required Linux x64 installer (AppImage or DEB)"
+            missing=1
+          fi
+          if [[ "${missing}" -ne 0 ]]; then
+            echo "::error::Required asset contract not satisfied"
+            exit 1
+          fi
+          echo "=== Required asset contract: OK ==="
+
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
-          generate_release_notes: true
+          draft: true
+          prerelease: false
+          body_path: docs/release-notes/v1.0.0.md
+          generate_release_notes: false
