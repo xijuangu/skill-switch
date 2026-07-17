@@ -75,7 +75,6 @@ export function SkillsPage({
   const [conflictTarget, setConflictTarget] = useState<SkillView | null>(null)
   const [deployTarget, setDeployTarget] = useState<DeployTarget | null>(null)
   const [installOpen, setInstallOpen] = useState(false)
-  const [installInitialTab, setInstallInitialTab] = useState<'github' | 'zip' | 'local-dir'>('github')
   const [contextMenu, setContextMenu] = useState<{ skill: SkillView; x: number; y: number } | null>(null)
   const [visibleMenuAnchor, setVisibleMenuAnchor] = useState<HTMLElement | null>(null)
   const [visibleMenuSkill, setVisibleMenuSkill] = useState<SkillView | null>(null)
@@ -402,8 +401,8 @@ export function SkillsPage({
   }
 
   return (
-    <div className="flex gap-0 h-full -mx-6 -my-6">
-      <div className="w-72 shrink-0 border-r border-border flex flex-col bg-surface">
+    <div className="flex gap-0 h-full -mx-6 -my-6 overflow-hidden">
+      <div className="w-72 shrink-0 border-r border-border flex flex-col bg-surface min-h-0">
         <div className="p-3 space-y-2 border-b border-border">
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
@@ -445,16 +444,10 @@ export function SkillsPage({
           </Button>
           <Button
             variant="secondary" size="sm"
-            onClick={() => { setInstallInitialTab('github'); setInstallOpen(true) }}
+            onClick={() => setInstallOpen(true)}
             className="flex-1"
           >
             安装
-          </Button>
-          <Button
-            variant="secondary" size="sm"
-            onClick={() => { setInstallInitialTab('local-dir'); setInstallOpen(true) }}
-          >
-            添加
           </Button>
           <Button
             variant={bulkSelecting ? 'primary' : 'secondary'}
@@ -502,7 +495,7 @@ export function SkillsPage({
           </div>
         )}
 
-        <div className="flex-1 overflow-auto" role="listbox" aria-label="Skill 列表">
+        <div className="flex-1 overflow-auto min-h-0" role="listbox" aria-label="Skill 列表">
           {filtered.length === 0 ? (
             <div className="p-6 text-center">
               <p className="text-xs text-foreground-muted mb-2">
@@ -585,7 +578,7 @@ export function SkillsPage({
 
       {installOpen && (
         <InstallDialogContent
-          initialTab={installInitialTab}
+          initialTab="github"
           onInstalled={handleInstalled}
           onRefresh={onRefresh}
           onClose={() => setInstallOpen(false)}
@@ -1004,31 +997,35 @@ function SourceItem({
           onClick={() => setExpanded(!expanded)}
         >
         <div className="flex items-center gap-2 min-w-0">
-          <span className={`text-2xs px-1.5 py-0.5 rounded-full border ${
+          <span className={`text-2xs px-1.5 py-0.5 rounded-full border shrink-0 whitespace-nowrap ${
             source.source_role === 'canonical'
               ? 'bg-primary-subtle text-primary border-primary/20'
               : 'bg-warning-subtle text-warning border-warning/20'
           }`}>
             {sourceRoleLabel(source.source_role)}
           </span>
-          <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface-secondary text-foreground-secondary border border-border-subtle">
+          <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface-secondary text-foreground-secondary border border-border-subtle shrink-0 whitespace-nowrap">
             {sourceOriginLabel(source.source_origin)}
           </span>
           <code className="text-xs font-mono text-foreground truncate">{source.path}</code>
         </div>
           {expanded ? <ChevronDown className="h-3.5 w-3.5 text-foreground-muted shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-foreground-muted shrink-0" />}
         </button>
-        {canConsolidate && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={onConsolidate}>整理</Button>
-        )}
-        {undoBatch && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoConsolidation(undoBatch)}>撤销整理</Button>
-        )}
-        {canRelocate && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={onRelocate}>移动权威 Source</Button>
-        )}
-        {undoRelocation && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoRelocation(undoRelocation)}>撤销移动</Button>
+        {(canConsolidate || undoBatch || canRelocate || undoRelocation) && (
+          <div className="flex items-center shrink-0">
+            {canConsolidate && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={onConsolidate}>整理</Button>
+            )}
+            {undoBatch && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoConsolidation(undoBatch)}>撤销整理</Button>
+            )}
+            {canRelocate && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={onRelocate}>移动权威 Source</Button>
+            )}
+            {undoRelocation && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoRelocation(undoRelocation)}>撤销移动</Button>
+            )}
+          </div>
         )}
       </div>
       {expanded && (

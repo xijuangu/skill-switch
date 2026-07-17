@@ -1323,3 +1323,43 @@ describe('SkillsPage Source Relocation (#90)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('旧位置已被占用')
   })
 })
+
+describe('SkillsPage toolbar entry consolidation (#65)', () => {
+  function renderSkillsPage(skills: SkillWithConflictView[] = []) {
+    mockWindowApi()
+    return render(
+      <ToastProvider>
+        <SkillsPage
+          skills={skills}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+  }
+
+  it('removes the duplicate 添加 entry and keeps 扫描/安装/批量 with stable accessible names', () => {
+    renderSkillsPage(buildFakeSkills(1))
+    expect(screen.getByRole('button', { name: '扫描' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '安装' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '批量' })).toBeInTheDocument()
+    // 重复的"添加"入口已删除
+    expect(screen.queryByRole('button', { name: '添加' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the local directory entry reachable from the unified 安装 dialog', async () => {
+    renderSkillsPage(buildFakeSkills(1))
+    // 工具栏只有一个"安装"入口;点击后弹窗内可切到"本地目录"
+    await userEvent.click(screen.getByRole('button', { name: '安装' }))
+    expect(await screen.findByRole('button', { name: '本地目录' })).toBeInTheDocument()
+    // GitHub 与 ZIP 入口仍在同一弹窗,统一纳入安装
+    expect(screen.getByRole('button', { name: 'GitHub URL' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'ZIP 文件' })).toBeInTheDocument()
+  })
+})
