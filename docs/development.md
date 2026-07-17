@@ -66,14 +66,38 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 
 ## 原生依赖与平台打包
 
-`better-sqlite3` 是原生依赖，Node/Vitest 与 Electron 使用不同 ABI，npm 脚本会在每次工作流前准备正确二进制：
+`better-sqlite3` 是原生依赖，Node/Vitest 与 Electron 使用不同 ABI。二者共享同一个
+`build/Release/better_sqlite3.node` 产物，因此必须显式区分准备时机，避免互相污染。
 
-```bash
-npm run native:node     # 为当前 Node 运行时重建
-npm run native:electron # 为 Electron 重建
-```
+### issue #64：macOS verify exit 139 根因与修复边界
 
-若 `better_sqlite3.node` 报 `NODE_MODULE_VERSION` 不匹配，运行对应的原生准备命令，而不是重装仓库。平台特定打包命令：
+**根因**：原先 `postinstall: electron-builder install-app-deps` 在 `npm ci` 阶段为
+Electron 重建 better-sqlite3，把原生二进制切到 Electron ABI。随后 `npm test` 中的
+`native:node` 再切回 Node ABI，但两步共享同一产物路径，残留的 Electron-ABI 二进制被
+Node 运行时加载时触发段错误（exit 139），表现为 macOS verify 间歇性失败。
+
+**修复边界**：
+
+- 移除 `postinstall`，install 阶段不再为 Electron 重建原生模块。`npm ci` 后二进制保持
+  better-sqlite3 自带 install 脚本下载的 Node ABI，verify 不再被 Electron ABI 污染。
+- `native:node` 在 `npm rebuild better-sqlite3` 前清除 `node_modules/better-sqlite3/build`，
+  确保任何 stale Electron-ABI 产物都不会存活到 Node 测试，使准备流程从干净状态可复现。
+- `native:electron` 继续使用 `electron-rebuild -f` 强制为 Electron 重建。
+- 每条工作流显式准备自身所需 ABI，互不污染：
+
+| 命令 | 准备的 ABI | 说明 |
+| --- | --- | --- |
+| `npm test` / `npm run test:watch` | Node | 先 `native:node`，再跑 vitest |
+| `npm run dev` / `npm start` | Electron | 先 `native:electron`，再启动 Electron |
+| `npm run build:electron` / `npm run package:*` | Electron | 先 `native:electron`，再构建/打包 |
+| `npm run build` / `npm run verify` | 无 | 只做 vite 打包，不加载原生模块 |
+| `npm ci` | Node | better-sqlite3 自带 install 脚本下载 Node 预编译 |
+
+若 `better_sqlite3.node` 报 `NODE_MODULE_VERSION` 不匹配，运行对应的原生准备命令
+（`native:node` 或 `native:electron`），而不是重装仓库。`native:node` 会先清除残留
+二进制再重建，因此本地切换 dev/test 顺序也不会留下错误 ABI 的产物。
+
+平台特定打包命令：
 
 - `npm run package:mac` → DMG
 - `npm run package:win` → NSIS 安装包

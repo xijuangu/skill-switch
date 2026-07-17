@@ -7,7 +7,7 @@
 需要本地安装 Node.js 20 和 npm。`better-sqlite3` 是原生依赖，不同工作流需要不同的 ABI，仓库已通过 npm 脚本自动准备对应二进制。
 
 ```bash
-# 安装依赖（会自动执行 electron-builder install-app-deps）
+# 安装依赖（better-sqlite3 自带 install 脚本下载 Node ABI；install 阶段不为 Electron 重建）
 npm ci
 
 # 启动 Electron 开发应用（会先重建 better-sqlite3 的 Electron ABI）
@@ -48,7 +48,7 @@ npm run package     # 为当前平台构建安装包
 You need Node.js 20 and npm. `better-sqlite3` is a native dependency whose ABI differs between Node and Electron; the npm scripts rebuild the correct binary for each workflow.
 
 ```bash
-npm ci            # install deps (runs electron-builder install-app-deps)
+npm ci            # install deps (better-sqlite3 ships a Node-ABI binary via its own install script; no Electron rebuild at install time)
 npm run dev       # launch the Electron dev app (rebuilds Electron ABI first)
 npm run verify    # typecheck + tests + build main/renderer bundles
 ```
