@@ -463,8 +463,11 @@ describe('App (integration)', () => {
     expect(screen.getByText('skill-switch')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '技能' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '工具' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '备份' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '恢复' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '设置' })).toBeInTheDocument()
+    // #116: 来源归档与备份合并到恢复页的标签, 不再是并列一级入口
+    expect(screen.queryByRole('button', { name: '来源归档' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '备份' })).not.toBeInTheDocument()
     // 首次 refresh 触发
     await waitFor(() => {
       expect(window.api.getSkills).toHaveBeenCalledTimes(1)
@@ -477,7 +480,7 @@ describe('App (integration)', () => {
     render(<App />)
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     await userEvent.click(screen.getByRole('button', { name: '工具' }))
-    await userEvent.click(screen.getByRole('button', { name: '来源归档' }))
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
     await userEvent.click(screen.getByRole('button', { name: '技能' }))
     // 切回 skills 时不抛错即可
     expect(screen.getByRole('button', { name: '技能' })).toBeInTheDocument()
@@ -510,14 +513,20 @@ describe('App (integration)', () => {
       })
     })
     render(<App />)
-    await userEvent.click(screen.getByRole('button', { name: '来源归档' }))
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
 
     expect(await screen.findByText('demo')).toBeInTheDocument()
+    // #116: UUID/哈希/完整路径默认隐藏, 需要展开技术详情
+    expect(screen.queryByText('/imports/demo')).not.toBeInTheDocument()
+    expect(screen.queryByText('/imports/demo-copy')).not.toBeInTheDocument()
+    expect(screen.queryByText('/tools/codex/demo')).not.toBeInTheDocument()
+    expect(screen.getByText('归档占用：2 KB')).toBeInTheDocument()
+    expect(screen.getByText('可恢复')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '技术详情' }))
     expect(screen.getByText('/imports/demo')).toBeInTheDocument()
     expect(screen.getByText('/imports/demo-copy')).toBeInTheDocument()
     expect(screen.getByText('/tools/codex/demo')).toBeInTheDocument()
-    expect(screen.getByText('归档占用：2 KB')).toBeInTheDocument()
-    expect(screen.getByText('可恢复')).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: '永久清理' }))
     await userEvent.click(screen.getByRole('button', { name: '预览清理' }))
@@ -527,7 +536,7 @@ describe('App (integration)', () => {
     expect(api.confirmSourceArchivePurge).toHaveBeenCalledWith('purge-88')
   })
 
-  it('shows the fixed Canonical Repository separately from Candidate Source directories', async () => {
+  it('keeps the fixed Canonical Repository in 设置 and Candidate Source directories in 工具 (regression: #116)', async () => {
     mockWindowApi({
       getSkillLibrary: vi.fn().mockResolvedValue({
         canonicalRepository: { path: '/canonical/skills' },
@@ -542,10 +551,15 @@ describe('App (integration)', () => {
       }])
     })
     render(<App />)
+    // #116: 设置页只保留全局偏好与平台能力, 候选来源目录已迁至工具页
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     expect(await screen.findByText('权威源码库')).toBeInTheDocument()
     expect(screen.getByText('/canonical/skills')).toBeInTheDocument()
-    expect(screen.getByText('候选来源目录')).toBeInTheDocument()
+    expect(screen.queryByText('候选来源目录')).not.toBeInTheDocument()
+    expect(screen.queryByText('/imports/team-skills')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    expect(await screen.findByText('发现目录')).toBeInTheDocument()
     expect(screen.getByText('/imports/team-skills')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重新扫描' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '解除登记' })).toBeInTheDocument()
@@ -755,6 +769,127 @@ describe('App (integration)', () => {
       expect(screen.getByText('加载失败')).toBeInTheDocument()
     })
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+  })
+
+  // #116: 恢复页与工具页信息架构回归
+  it('switches between 来源归档 and 备份 tabs on the Recovery page', async () => {
+    mockWindowApi()
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    // 默认显示来源归档 tab
+    const archiveTab = await screen.findByRole('tab', { name: '来源归档' })
+    expect(archiveTab).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: '备份' })).toHaveAttribute('aria-selected', 'false')
+    expect(await screen.findByText('暂无来源归档')).toBeInTheDocument()
+    // 切到备份 tab
+    await userEvent.click(screen.getByRole('tab', { name: '备份' }))
+    expect(screen.getByRole('tab', { name: '来源归档' })).toHaveAttribute('aria-selected', 'false')
+    expect(screen.getByRole('tab', { name: '备份' })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByText('暂无备份')).toBeInTheDocument()
+  })
+
+  it('shows recovery state badges and recommendations on source archive batches', async () => {
+    const recoverableBatch = {
+      id: 'batch-r', status: 'completed' as const, phase: null,
+      items: [{
+        skillId: 1, skillName: 'demo', canonicalPath: '/canonical/demo',
+        archivePath: '/archive/batch-r/demo', originalPath: '/imports/demo',
+        originalPaths: ['/imports/demo'], originalHash: 'hash-r',
+        originalHashes: ['hash-r'], archivedToolPaths: ['/tools/codex/demo']
+      }],
+      archive: { sizeBytes: 1024, recoverable: true, purgeable: true, purgedAt: null, recoveryBlockedReason: null },
+      createdAt: '2026-07-16T00:00:00.000Z', completedAt: '2026-07-16T00:01:00.000Z',
+      undoneAt: null, failureMessage: null, recoveryDirection: null,
+      evidenceSummary: { itemCount: 1, phases: [] }
+    }
+    const cleanedBatch = {
+      id: 'batch-c', status: 'completed' as const, phase: null,
+      items: [{
+        skillId: 2, skillName: 'cleaned-skill', canonicalPath: '/canonical/cleaned',
+        archivePath: '/archive/batch-c/cleaned', originalPath: '/imports/cleaned',
+        originalPaths: ['/imports/cleaned'], originalHash: 'hash-c',
+        originalHashes: ['hash-c'], archivedToolPaths: []
+      }],
+      archive: { sizeBytes: 1024, recoverable: false, purgeable: false, purgedAt: '2026-07-16T02:00:00.000Z', recoveryBlockedReason: null },
+      createdAt: '2026-07-15T00:00:00.000Z', completedAt: '2026-07-15T00:01:00.000Z',
+      undoneAt: null, failureMessage: null, recoveryDirection: null,
+      evidenceSummary: { itemCount: 1, phases: [] }
+    }
+    const needsHandlingBatch = {
+      id: 'batch-n', status: 'recovery-required' as const, phase: null,
+      items: [{
+        skillId: 3, skillName: 'pending-skill', canonicalPath: '/canonical/pending',
+        archivePath: '/archive/batch-n/pending', originalPath: '/imports/pending',
+        originalPaths: ['/imports/pending'], originalHash: 'hash-n',
+        originalHashes: ['hash-n'], archivedToolPaths: []
+      }],
+      archive: { sizeBytes: 1024, recoverable: false, purgeable: true, purgedAt: null, recoveryBlockedReason: '部分归档载荷缺失' },
+      createdAt: '2026-07-14T00:00:00.000Z', completedAt: '2026-07-14T00:01:00.000Z',
+      undoneAt: null, failureMessage: null, recoveryDirection: null,
+      evidenceSummary: { itemCount: 1, phases: [] }
+    }
+    mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [],
+        consolidationBatches: [recoverableBatch, cleanedBatch, needsHandlingBatch]
+      })
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    // 三种恢复状态分别可见
+    expect(await screen.findByText('可恢复')).toBeInTheDocument()
+    expect(screen.getByText('已清理')).toBeInTheDocument()
+    expect(screen.getByText('需要处理')).toBeInTheDocument()
+    // 建议动作文案可见
+    expect(screen.getByText(/可恢复原候选来源与旧工具入口/)).toBeInTheDocument()
+    expect(screen.getByText(/归档已永久清理/)).toBeInTheDocument()
+    expect(screen.getByText(/请检查批次状态/)).toBeInTheDocument()
+    // 涉及 Skill 名字默认可见
+    expect(screen.getByText('demo')).toBeInTheDocument()
+    expect(screen.getByText('cleaned-skill')).toBeInTheDocument()
+    expect(screen.getByText('pending-skill')).toBeInTheDocument()
+  })
+
+  it('hides backupId/hash/path in expandable technical details on the Recovery 备份 tab', async () => {
+    mockWindowApi({
+      listBackups: vi.fn().mockResolvedValue([{
+        backupId: 'backup-uuid-123', skillName: 'demo', targetTool: 'codex',
+        sourcePath: '/canonical/demo', sourceHash: 'hash-abc-def',
+        backupTime: '2026-07-16T00:00:00.000Z'
+      }])
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    await userEvent.click(await screen.findByRole('tab', { name: '备份' }))
+    // 备份条目可见, 但 UUID/哈希/路径默认隐藏
+    expect(await screen.findByText('demo')).toBeInTheDocument()
+    expect(screen.getByText('codex')).toBeInTheDocument()
+    expect(screen.queryByText('backup-uuid-123')).not.toBeInTheDocument()
+    expect(screen.queryByText('hash-abc-def')).not.toBeInTheDocument()
+    expect(screen.queryByText('/canonical/demo')).not.toBeInTheDocument()
+    // 展开技术详情后可见
+    await userEvent.click(screen.getByRole('button', { name: '技术详情' }))
+    expect(screen.getByText('backup-uuid-123')).toBeInTheDocument()
+    expect(screen.getByText('hash-abc-def')).toBeInTheDocument()
+    expect(screen.getByText('/canonical/demo')).toBeInTheDocument()
+  })
+
+  it('shows empty states on the Recovery page tabs when no data', async () => {
+    mockWindowApi()
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    expect(await screen.findByText('暂无来源归档')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('tab', { name: '备份' }))
+    expect(await screen.findByText('暂无备份')).toBeInTheDocument()
+  })
+
+  it('shows empty states on the Tools page when no tools, source roots, or deployments', async () => {
+    mockWindowApi()
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    expect(await screen.findByText('尚未配置任何工具。')).toBeInTheDocument()
+    expect(screen.getByText('尚未登记候选来源目录。')).toBeInTheDocument()
+    expect(screen.getByText('暂无部署关系')).toBeInTheDocument()
   })
 })
 // #56:1000 条假数据搜索/筛选/选择功能与性能冒烟(不断言毫秒阈值,只确认可用)
