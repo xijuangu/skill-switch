@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { mkdirSync, rmSync, symlinkSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { createTempDir } from './helpers/temp'
 import {
   assessSafeDeployTarget,
@@ -24,7 +24,12 @@ describe('path safety', () => {
   })
 
   test('resolves a child path only when it remains under the root', () => {
-    expect(resolveWithin('/tmp/root', 'child')).toBe('/tmp/root/child')
+    // Expected value uses path.resolve() so it follows the same platform path
+    // semantics as the implementation: POSIX produces '/tmp/root/child' while
+    // Windows resolves the leading slash against the current drive
+    // (e.g. 'C:\tmp\root\child'). Containment/rejection assertions below are
+    // unchanged, so business behavior is not relaxed. (issue #63)
+    expect(resolveWithin('/tmp/root', 'child')).toBe(resolve('/tmp/root', 'child'))
     expect(() => resolveWithin('/tmp/root', '..', 'escape')).toThrow()
     expect(() => resolveWithin('/tmp/root', '/tmp/other')).toThrow()
   })
@@ -47,7 +52,10 @@ describe('path safety', () => {
     expect(validateBackupId('demo_codex_20260701-120000-000')).toBe(
       'demo_codex_20260701-120000-000'
     )
-    expect(assertAbsolutePath('/tmp/skill', 'sourcePath')).toBe('/tmp/skill')
+    // assertAbsolutePath normalizes via path.resolve(), so the expected value
+    // must use the same cross-platform resolution: '/tmp/skill' on POSIX,
+    // '<drive>:\tmp\skill' on Windows. (issue #63)
+    expect(assertAbsolutePath('/tmp/skill', 'sourcePath')).toBe(resolve('/tmp/skill'))
 
     expect(() => validateToolKey('../codex')).toThrow()
     expect(() => validateBackupId('../../outside')).toThrow()
