@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Button, Input, Dialog } from '../../shared'
+import { Button, Input, Dialog, StatusDot } from '../../shared'
 import { completeMutation } from '../../async-state'
 import { groupByHash, shortHash, findSourceGroup } from './sourceGrouping'
 
@@ -440,96 +440,163 @@ export function DeployDialogContent({
 }) {
   const source = skill.sources.find((candidate) => candidate.id === sourceId)
   const [targetOptions, setTargetOptions] = useState<DeployTargetOptionView[]>([])
-  const [selectedTargetId, setSelectedTargetId] = useState('')
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [mode, setMode] = useState<DeployMode>('symlink')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [confirmationPlan, setConfirmationPlan] = useState<{
-    targetDisplayName: string
-    confirmationId: string
-    reasons: Array<'external-overwrite' | 'target-modified' | 'mode-degraded'>
-    requestedMode: 'copy' | 'symlink' | 'junction'
-    actualMode: 'copy' | 'symlink' | 'junction'
-    backup: { required: boolean; directory: string | null }
-  } | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [sessionResults, setSessionResults] = useState<Map<string, BulkMutationResultView['items'][number]>>(new Map())
 
   useEffect(() => {
+    let cancelled = false
+    setBusy(true)
+    setLoadError(null)
     window.api.getDeployTargets(sourceId)
       .then((options) => {
+        if (cancelled) return
         setTargetOptions(options)
-        const existing = options.find(
-          (o) => o.eligible &&
-            skill.deployments.some((d) => d.target_id === o.targetId)
+        setSelectedKeys((current) =>
+          current.size > 0
+            ? current
+            : new Set(
+                options
+                  .filter(
+                    (o) =>
+                      o.eligible &&
+                      !skill.deployments.some(
+                        (d) => d.target_id === o.targetId && d.management === 'managed'
+                      )
+                  )
+                  .map((o) => o.targetId)
+              )
         )
-        const firstSafe = options.find((o) => o.eligible)
-        if (existing) {
-          setSelectedTargetId(existing.targetId)
-        } else if (firstSafe) {
-          setSelectedTargetId(firstSafe.targetId)
+      })
+      .catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [skill.id, sourceId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggle = (key: string) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function statusFor(targetId: string): 'undeployed' | 'deployed' | 'needs-confirmation' | 'failed' {
+    const session = sessionResults.get(targetId)
+    if (session) {
+      if (session.status === 'completed') return 'deployed'
+      if (session.status === 'confirmation-required') return 'needs-confirmation'
+      return 'failed'
+    }
+    const existing = skill.deployments.find(
+      (d) => d.target_id === targetId && d.management === 'managed'
+    )
+    return existing ? 'deployed' : 'undeployed'
+  }
+
+  const statusLabel: Record<string, string> = {
+    undeployed: '未部署',
+    deployed: '已部署',
+    'needs-confirmation': '需要确认',
+    failed: '失败'
+  }
+  const statusVariant: Record<string, 'neutral' | 'success' | 'warning' | 'danger'> = {
+    undeployed: 'neutral',
+    deployed: 'success',
+    'needs-confirmation': 'warning',
+    failed: 'danger'
+  }
+
+  const run = async () => {
+    if (!source) {
+      setLoadError('所选来源已失效，请刷新后重试')
+      return
+    }
+    setBusy(true)
+    setLoadError(null)
+    try {
+      const pendingConfirmations = [...sessionResults.values()]
+        .filter((item) => item.status === 'confirmation-required' && selectedKeys.has(item.key))
+        .flatMap((item) =>
+          item.outcome != null &&
+          'status' in item.outcome &&
+          item.outcome.status === 'confirmation-required'
+            ? [{ key: item.key, confirmationId: item.outcome.confirmationId }]
+            : []
+        )
+      let outcome: BulkMutationResultView
+      if (pendingConfirmations.length > 0) {
+        outcome = await window.api.bulkConfirmDeploy(pendingConfirmations)
+      } else {
+        outcome = await window.api.bulkDeploy(
+          targetOptions
+            .filter((o) => o.eligible && selectedKeys.has(o.targetId))
+            .map((o) => ({
+              key: o.targetId,
+              sourceId: source.id,
+              targetId: o.targetId,
+              requestedMode: mode
+            }))
+        )
+      }
+      const nextResults = new Map(sessionResults)
+      for (const item of outcome.items) {
+        nextResults.set(item.key, item)
+      }
+      setSessionResults(nextResults)
+      setSelectedKeys(
+        new Set(
+          [...nextResults.values()]
+            .filter((item) => item.status !== 'completed' && selectedKeys.has(item.key))
+            .map((item) => item.key)
+        )
+      )
+      const firstCompleted = outcome.items.find((item) => item.status === 'completed')
+      if (firstCompleted) {
+        const completedOutcome = firstCompleted.outcome
+        if (
+          completedOutcome != null &&
+          'status' in completedOutcome &&
+          completedOutcome.status === 'completed' &&
+          'result' in completedOutcome
+        ) {
+          await onDone(completedOutcome.result)
+        } else {
+          await onDone({
+            action: 'created',
+            mode,
+            targetDisplayName:
+              targetOptions.find((o) => o.targetId === firstCompleted.key)?.displayName ??
+              firstCompleted.key
+          })
         }
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error ? loadError.message : String(loadError))
-      })
-  }, [skill.id, skill.deployments, sourceId])
-
-  const targetSelectionValid = targetOptions.some(
-    (o) => o.targetId === selectedTargetId && o.eligible
-  )
-  const selectedDeployment = skill.deployments.find(
-    (d) => d.target_id === selectedTargetId
-  )
-
-  const handleDeploy = async () => {
-    if (!selectedTargetId || !targetSelectionValid) return
-    setBusy(true)
-    setError(null)
-    try {
-      if (!source) throw new Error('所选来源已失效，请刷新后重试')
-      const outcome = await window.api.deploymentDeploy({
-        sourceId: source.id,
-        targetId: selectedTargetId,
-        requestedMode: mode
-      })
-      if (outcome.status === 'confirmation-required') {
-        setConfirmationPlan({
-          targetDisplayName: outcome.facts.targetDisplayName,
-          confirmationId: outcome.confirmationId,
-          reasons: outcome.facts.reasons,
-          requestedMode: outcome.facts.requestedMode,
-          actualMode: outcome.facts.actualMode,
-          backup: outcome.facts.backup
-        })
-        setBusy(false)
-        return
       }
-      if (outcome.status === 'rejected') throw new Error(outcome.message)
-      if (outcome.status === 'recovery-required') throw new Error(`需要人工恢复：${outcome.message}\n${outcome.evidence.targetPath}`)
-      await completeMutation(outcome.result, onDone)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(false)
     }
   }
 
-  const handleExternalOverwriteConfirm = async () => {
-    if (!confirmationPlan) return
-    setBusy(true)
-    setError(null)
-    try {
-      const outcome = await window.api.deploymentConfirm(confirmationPlan.confirmationId)
-      if (outcome.status !== 'completed') {
-        throw new Error(outcome.status === 'confirmation-required' ? '部署计划已变化，请重新确认' : outcome.message)
-      }
-      setConfirmationPlan(null)
-      await completeMutation(outcome.result, onDone)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const hasPendingConfirmation = [...sessionResults.values()].some(
+    (item) => item.status === 'confirmation-required' && selectedKeys.has(item.key)
+  )
+  const actionLabel = hasPendingConfirmation ? '确认并继续' : '部署'
+  const selectedCount = selectedKeys.size
+  const completedCount = [...sessionResults.values()].filter((item) => item.status === 'completed').length
+  const failedCount = [...sessionResults.values()].filter(
+    (item) => item.status !== 'completed' && item.status !== 'confirmation-required'
+  ).length
+  const hasRun = sessionResults.size > 0
 
   return (
     <Dialog
@@ -537,8 +604,10 @@ export function DeployDialogContent({
       onClose={() => !busy && onDone(null)}
       title={`部署 ${skill.name}`}
       description={contextMessage}
-      confirmLabel="部署"
-      onConfirm={handleDeploy}
+      confirmLabel={actionLabel}
+      onConfirm={() => {
+        if (selectedCount > 0) run()
+      }}
       busy={busy}
       closeOnOverlay={!busy}
     >
@@ -547,61 +616,76 @@ export function DeployDialogContent({
           {source?.path ?? '来源已失效'}
         </p>
 
-        {skill.conflict.hasConflict && (() => {
-          // 一次 groupByHash 派生当前组与其他版本数,避免重复遍历(#62 review)
-          const groups = groupByHash(skill.sources)
-          const currentGroup = source == null ? null : findSourceGroup(skill.sources, source.path)
-          const otherVersions = groups.size - (currentGroup ? 1 : 0)
-          return (
-            <div className="px-3 py-2 rounded border border-warning-subtle bg-warning-subtle space-y-0.5">
-              {currentGroup ? (
-                <div className="text-2xs text-warning font-medium">
-                  当前来源属于版本组 · {currentGroup.count} 个来源 · hash: {shortHash(currentGroup.hash)}
-                </div>
-              ) : (
-                <div className="text-2xs text-warning font-medium">
-                  当前来源未匹配任何版本组
-                </div>
-              )}
-              {otherVersions > 0 && (
-                <div className="text-2xs text-warning">
-                  另有 {otherVersions} 个不同版本
-                </div>
-              )}
-            </div>
-          )
-        })()}
+        {skill.conflict.hasConflict &&
+          (() => {
+            const groups = groupByHash(skill.sources)
+            const currentGroup = source == null ? null : findSourceGroup(skill.sources, source.path)
+            const otherVersions = groups.size - (currentGroup ? 1 : 0)
+            return (
+              <div className="px-3 py-2 rounded border border-warning-subtle bg-warning-subtle space-y-0.5">
+                {currentGroup ? (
+                  <div className="text-2xs text-warning font-medium">
+                    当前来源属于版本组 · {currentGroup.count} 个来源 · hash: {shortHash(currentGroup.hash)}
+                  </div>
+                ) : (
+                  <div className="text-2xs text-warning font-medium">当前来源未匹配任何版本组</div>
+                )}
+                {otherVersions > 0 && (
+                  <div className="text-2xs text-warning">另有 {otherVersions} 个不同版本</div>
+                )}
+              </div>
+            )
+          })()}
 
-        {error && (
-          <div className="px-3 py-2 rounded border border-danger-subtle bg-danger-subtle text-danger text-xs">{error}</div>
+        {loadError && (
+          <div className="px-3 py-2 rounded border border-danger-subtle bg-danger-subtle text-danger text-xs">
+            {loadError}
+          </div>
         )}
 
-        <div>
-          <label className="block text-xs font-medium text-foreground mb-1">目标工具</label>
-          <select
-            value={selectedTargetId}
-            onChange={(e) => {
-              setSelectedTargetId(e.target.value)
-            }}
-            disabled={busy}
-            className="w-full h-8 border border-border rounded bg-surface px-2.5 text-xs text-foreground focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
-          >
-            {targetOptions.length === 0 && (
-              <option value="" disabled>无可用工具目标</option>
-            )}
-            {targetOptions.map((o) => (
-              <option key={o.targetId} value={o.targetId} disabled={!o.eligible}>
-                {o.displayName}
-                {!o.eligible ? ` (不可用：${o.reason})` : ''}
-              </option>
-            ))}
-          </select>
-          {selectedDeployment && (
-            <p className="text-2xs text-foreground-muted mt-1">
-              此工具已有部署，只能更新原目标
-            </p>
-          )}
-        </div>
+        {hasRun && (
+          <div className="rounded border border-border p-2 text-xs">
+            <p className="font-medium">完成 {completedCount}，失败 {failedCount}</p>
+            {[...sessionResults.values()]
+              .filter((item) => item.status !== 'completed')
+              .map((item) => {
+                const confirmation =
+                  item.outcome != null &&
+                  'status' in item.outcome &&
+                  item.outcome.status === 'confirmation-required'
+                    ? item.outcome
+                    : null
+                return confirmation ? (
+                  <div key={item.key} className="mt-2 rounded border border-warning/30 bg-warning-subtle p-2">
+                    <p className="font-medium text-warning">
+                      {confirmation.facts.skillName} → {confirmation.facts.targetDisplayName}
+                    </p>
+                    <ul className="list-disc pl-4 mt-1 text-foreground-secondary">
+                      {confirmation.facts.reasons.map((reason) => (
+                        <li key={reason}>{deploymentRiskLabel(reason)}</li>
+                      ))}
+                    </ul>
+                    <p className="mt-1">
+                      模式：{confirmation.facts.requestedMode}
+                      {confirmation.facts.actualMode !== confirmation.facts.requestedMode
+                        ? ` → ${confirmation.facts.actualMode}`
+                        : ''}
+                    </p>
+                    <p>
+                      备份：
+                      {confirmation.facts.backup.required
+                        ? confirmation.facts.backup.directory ?? '会创建备份'
+                        : '不需要'}
+                    </p>
+                  </div>
+                ) : (
+                  <p key={item.key} className="text-danger mt-1">
+                    {item.key}: {item.message ?? item.status}
+                  </p>
+                )
+              })}
+          </div>
+        )}
 
         <div>
           <label className="block text-xs font-medium text-foreground mb-1">模式</label>
@@ -633,32 +717,41 @@ export function DeployDialogContent({
               : '快照副本 — 源更新需手动重新部署'}
           </p>
         </div>
-      </div>
 
-      <Dialog
-        open={confirmationPlan !== null}
-        onClose={() => !busy && setConfirmationPlan(null)}
-        title={`确认部署风险「${skill.name}」?`}
-        description={confirmationPlan == null ? '' : [
-          ...confirmationPlan.reasons.map((reason) => ({
-            'external-overwrite': '目标包含非本应用管理的内容，将覆盖现有内容。',
-            'target-modified': '已部署目标被外部修改，将用当前来源覆盖。',
-            'mode-degraded': `请求模式 ${confirmationPlan.requestedMode} 不可用，实际将使用 ${confirmationPlan.actualMode}。`
-          })[reason]),
-          `目标：${confirmationPlan.targetDisplayName}`,
-          confirmationPlan.backup.required
-            ? `覆盖前会备份到：${confirmationPlan.backup.directory ?? '应用备份目录'}`
-            : '本次不会创建外部内容备份。'
-        ].join('\n')}
-        variant="danger"
-        confirmLabel="确认并部署"
-        onConfirm={handleExternalOverwriteConfirm}
-        busy={busy}
-        closeOnOverlay={false}
-      />
+        <div className="max-h-72 overflow-auto space-y-1">
+          {targetOptions.map((o) => {
+            const status = statusFor(o.targetId)
+            return (
+              <label
+                key={o.targetId}
+                className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!o.eligible ? 'opacity-50' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  aria-label={o.displayName}
+                  checked={selectedKeys.has(o.targetId)}
+                  disabled={!o.eligible || busy}
+                  onChange={() => toggle(o.targetId)}
+                />
+                <span className="flex-1">
+                  <span className="flex items-center gap-2">
+                    <strong>{o.displayName}</strong>
+                    <StatusDot variant={statusVariant[status]} label={statusLabel[status]} />
+                  </span>
+                  {o.reason ? <span className="block text-foreground-muted">{o.reason}</span> : null}
+                </span>
+              </label>
+            )
+          })}
+          {targetOptions.length === 0 && !busy && (
+            <p className="text-xs text-foreground-muted">无可用工具目标</p>
+          )}
+        </div>
+      </div>
     </Dialog>
   )
 }
+
 
 export function InstallDialogContent({
   initialTab,

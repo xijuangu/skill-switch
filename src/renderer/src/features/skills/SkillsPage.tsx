@@ -213,7 +213,6 @@ export function SkillsPage({
       : `已部署 (${result.action}) 到 ${result.targetDisplayName}${degradeNote}`
     success(msg)
     await onRefresh()
-    setDeployTarget(null)
   }
 
   const handleViewMd = async (skill: SkillView) => {
