@@ -65,6 +65,37 @@ function setup() {
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
 
 describe('Deployment Facade', () => {
+  test('reports a configured-target relation as target-unconfigured after that target is removed', () => {
+    const env = setup()
+    const oldTargetPath = join(env.targetRoot, 'demo')
+    upsertDeployment(
+      env.db,
+      env.skillId,
+      'codex',
+      oldTargetPath,
+      'symlink',
+      env.sourcePath,
+      hashDir(env.sourcePath),
+      { sourceId: env.sourceId, targetId: 'removed-codex-target' },
+      'observed'
+    )
+    const deployment = getDeploymentBySkillAndTargetId(
+      env.db,
+      env.skillId,
+      'removed-codex-target'
+    )!
+
+    expect(env.create().inspect(deployment.id)).toMatchObject({
+      kind: 'target-unconfigured',
+      targetPath: oldTargetPath,
+      targetExists: false,
+      deployment: {
+        management: 'observed',
+        target_id: 'removed-codex-target'
+      }
+    })
+  })
+
   test.runIf(process.platform !== 'win32')('previews every observed subscription grouped by tool without changing links', () => {
     const env = setup()
     const targetPath = join(env.targetRoot, 'demo')

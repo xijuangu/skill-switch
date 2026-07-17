@@ -33,6 +33,7 @@ export type ConflictResolutionEditor = {
 export type UndoBatch = { batch: ConsolidationBatch; item: ConsolidationBatch['items'][number] }
 export type SourceRelocationPreview = Awaited<ReturnType<typeof window.api.previewSourceRelocation>>
 export type SourceRelocation = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['sourceRelocations'][number]
+type BulkMutationResultView = Awaited<ReturnType<typeof window.api.bulkDeploy>>
 
 export function sourceOriginLabel(origin: SkillSourceView['source_origin']): string {
   const labels: Record<SkillSourceView['source_origin'], string> = {
@@ -47,6 +48,244 @@ export function sourceOriginLabel(origin: SkillSourceView['source_origin']): str
 
 export function sourceRoleLabel(role: SkillSourceView['source_role']): string {
   return role === 'canonical' ? '权威来源' : '候选来源'
+}
+
+type BulkAction = 'deploy' | 'undeploy' | 'remove'
+type BulkDeployPair = {
+  key: string
+  skillName: string
+  sourceId: number
+  targetId: string
+  targetName: string
+  eligible: boolean
+  reason: string | null
+}
+type BulkUndeployItem = {
+  key: string
+  skillName: string
+  deploymentId: number
+  targetTool: string
+  targetPath: string | null
+}
+
+export function BulkSkillActionsDialog({
+  skills,
+  onRefresh,
+  onClose
+}: {
+  skills: SkillView[]
+  onRefresh: () => Promise<void>
+  onClose: () => void
+}) {
+  const [action, setAction] = useState<BulkAction>('deploy')
+  const [mode, setMode] = useState<DeployMode>('symlink')
+  const [deployPairs, setDeployPairs] = useState<BulkDeployPair[]>([])
+  const [undeployItems, setUndeployItems] = useState<BulkUndeployItem[]>([])
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
+  const [toolFilter, setToolFilter] = useState('all')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<BulkMutationResultView | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setResult(null)
+    setLoadError(null)
+    if (action === 'remove') {
+      setSelectedKeys(new Set(skills.map((skill) => String(skill.id))))
+      return () => { cancelled = true }
+    }
+    setBusy(true)
+    if (action === 'deploy') {
+      Promise.all(skills.map(async (skill) => {
+        const canonical = skill.sources.find((source) => source.source_role === 'canonical')
+        if (!canonical) return []
+        const targets = await window.api.getDeployTargets(canonical.id)
+        return targets.map((target) => ({
+          key: `${skill.id}:${target.targetId}`,
+          skillName: skill.name,
+          sourceId: canonical.id,
+          targetId: target.targetId,
+          targetName: target.displayName,
+          eligible: target.eligible,
+          reason: target.reason
+        }))
+      })).then((groups) => {
+        if (cancelled) return
+        const pairs = groups.flat()
+        setDeployPairs(pairs)
+        setSelectedKeys(new Set(pairs.filter((pair) => pair.eligible).map((pair) => pair.key)))
+      }).catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
+      }).finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+    } else {
+      Promise.all(skills.map(async (skill) => {
+        const deployments = await window.api.getDeploymentsForSkill(skill.id)
+        return deployments
+          .filter((deployment) => deployment.management === 'managed')
+          .map((deployment) => ({
+            key: String(deployment.id),
+            skillName: skill.name,
+            deploymentId: deployment.id,
+            targetTool: deployment.target_tool,
+            targetPath: deployment.target_path
+          }))
+      })).then((groups) => {
+        if (cancelled) return
+        const items = groups.flat()
+        setUndeployItems(items)
+        setSelectedKeys(new Set(items.map((item) => item.key)))
+      }).catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
+      }).finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+    }
+    return () => { cancelled = true }
+  }, [action, skills])
+
+  const toggle = (key: string) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const visibleUndeployItems = toolFilter === 'all'
+    ? undeployItems
+    : undeployItems.filter((item) => item.targetTool === toolFilter)
+  const selectedCount = action === 'undeploy'
+    ? visibleUndeployItems.filter((item) => selectedKeys.has(item.key)).length
+    : selectedKeys.size
+
+  const run = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      let outcome: BulkMutationResultView
+      if (action === 'deploy') {
+        outcome = await window.api.bulkDeploy(
+          deployPairs
+            .filter((pair) => pair.eligible && selectedKeys.has(pair.key))
+            .map((pair) => ({
+              key: pair.key,
+              sourceId: pair.sourceId,
+              targetId: pair.targetId,
+              requestedMode: mode
+            }))
+        )
+      } else if (action === 'undeploy') {
+        outcome = await window.api.bulkUndeploy(
+          visibleUndeployItems
+            .filter((item) => selectedKeys.has(item.key))
+            .map((item) => ({ key: item.key, deploymentId: item.deploymentId }))
+        )
+      } else {
+        outcome = await window.api.bulkRemoveFromRegistry(
+          skills
+            .filter((skill) => selectedKeys.has(String(skill.id)))
+            .map((skill) => ({ key: String(skill.id), skillId: skill.id }))
+        )
+      }
+      setResult(outcome)
+      setSelectedKeys(new Set(outcome.items.filter((item) => item.status !== 'completed').map((item) => item.key)))
+      await onRefresh()
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resultByKey = new Map(result?.items.map((item) => [item.key, item]) ?? [])
+  const actionLabel = action === 'deploy' ? '批量部署' : action === 'undeploy' ? '批量取消部署' : '批量从注册表移除'
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`批量操作 · ${skills.length} 个 Skill`}
+      description="成功项会从选择中移除；失败项保留，修正后可直接重试。"
+      confirmLabel={actionLabel}
+      busy={busy}
+      onConfirm={() => { if (selectedCount > 0) run() }}
+      closeOnOverlay={false}
+    >
+      <div className="space-y-4">
+        <div className="flex gap-2">
+          {([
+            ['deploy', '部署'],
+            ['undeploy', '取消部署'],
+            ['remove', '从注册表移除']
+          ] as const).map(([value, label]) => (
+            <Button key={value} size="sm" variant={action === value ? 'primary' : 'secondary'} onClick={() => setAction(value)}>
+              {label}
+            </Button>
+          ))}
+        </div>
+
+        {action === 'deploy' && (
+          <div>
+            <p className="text-xs font-medium text-foreground mb-2">模式</p>
+            <div className="flex gap-3">
+              {(['symlink', 'copy'] as const).map((value) => (
+                <label key={value} className="flex items-center gap-1.5 text-xs">
+                  <input type="radio" name="bulk-deploy-mode" checked={mode === value} onChange={() => setMode(value)} />
+                  {value}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {action === 'undeploy' && (
+          <label className="block text-xs">
+            目标工具
+            <select className="ml-2 border border-border rounded bg-surface px-2 py-1" value={toolFilter} onChange={(event) => setToolFilter(event.target.value)}>
+              <option value="all">全部工具</option>
+              {[...new Set(undeployItems.map((item) => item.targetTool))].map((tool) => <option key={tool} value={tool}>{tool}</option>)}
+            </select>
+          </label>
+        )}
+
+        {loadError && <p className="text-xs text-danger">{loadError}</p>}
+        {result && (
+          <div className="rounded border border-border p-2 text-xs">
+            <p className="font-medium">完成 {result.completed}，失败 {result.failed}</p>
+            {result.items.filter((item) => item.status !== 'completed').map((item) => (
+              <p key={item.key} className="text-danger mt-1">{item.key}: {item.message ?? item.status}</p>
+            ))}
+          </div>
+        )}
+
+        <div className="max-h-72 overflow-auto space-y-1">
+          {action === 'deploy' && deployPairs.map((pair) => (
+            <label key={pair.key} className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!pair.eligible ? 'opacity-50' : ''}`}>
+              <input type="checkbox" aria-label={`${pair.skillName} → ${pair.targetName}`} checked={selectedKeys.has(pair.key)} disabled={!pair.eligible || busy} onChange={() => toggle(pair.key)} />
+              <span><strong>{pair.skillName}</strong> → {pair.targetName}{pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}</span>
+            </label>
+          ))}
+          {action === 'undeploy' && visibleUndeployItems.map((item) => (
+            <label key={item.key} className="flex items-start gap-2 rounded border border-border p-2 text-xs">
+              <input type="checkbox" aria-label={`${item.skillName} → ${item.targetTool}`} checked={selectedKeys.has(item.key)} disabled={busy} onChange={() => toggle(item.key)} />
+              <span><strong>{item.skillName}</strong> → {item.targetTool}<span className="block text-foreground-muted break-all">{item.targetPath}</span></span>
+            </label>
+          ))}
+          {action === 'remove' && skills.map((skill) => (
+            <label key={skill.id} className="flex items-center gap-2 rounded border border-border p-2 text-xs">
+              <input type="checkbox" aria-label={`移除 ${skill.name}`} checked={selectedKeys.has(String(skill.id))} disabled={busy} onChange={() => toggle(String(skill.id))} />
+              <span>{skill.name}</span>
+              {resultByKey.get(String(skill.id))?.message && <span className="text-danger ml-auto">{resultByKey.get(String(skill.id))?.message}</span>}
+            </label>
+          ))}
+        </div>
+      </div>
+    </Dialog>
+  )
 }
 
 function conflictFileStatusLabel(status: 'added' | 'deleted' | 'modified'): string {
@@ -119,16 +358,18 @@ export function ConflictDialog({
 export function DeployDialogContent({
   skill,
   sourceId,
+  contextMessage,
   onDone
 }: {
   skill: SkillView
   sourceId: number
+  contextMessage?: string
   onDone: (result: DeployResultView | null) => Promise<void>
 }) {
   const source = skill.sources.find((candidate) => candidate.id === sourceId)
   const [targetOptions, setTargetOptions] = useState<DeployTargetOptionView[]>([])
   const [selectedTargetId, setSelectedTargetId] = useState('')
-  const [mode, setMode] = useState<DeployMode>('copy')
+  const [mode, setMode] = useState<DeployMode>('symlink')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmationPlan, setConfirmationPlan] = useState<{
@@ -223,6 +464,7 @@ export function DeployDialogContent({
       open
       onClose={() => !busy && onDone(null)}
       title={`部署 ${skill.name}`}
+      description={contextMessage}
       confirmLabel="部署"
       onConfirm={handleDeploy}
       busy={busy}
@@ -348,10 +590,14 @@ export function DeployDialogContent({
 
 export function InstallDialogContent({
   initialTab,
-  onDone
+  onInstalled,
+  onRefresh,
+  onClose
 }: {
   initialTab: 'github' | 'zip' | 'local-dir'
-  onDone: (result: InstallResultView | null) => Promise<void>
+  onInstalled: (result: InstallResultView) => Promise<void>
+  onRefresh: () => Promise<void>
+  onClose: () => void
 }) {
   const [tab, setTab] = useState<'github' | 'zip' | 'local-dir'>(initialTab)
   const [githubUrl, setGithubUrl] = useState('')
@@ -359,6 +605,7 @@ export function InstallDialogContent({
   const [localPath, setLocalPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [installedSkill, setInstalledSkill] = useState<SkillView | null>(null)
 
   const handleSelectZip = async () => {
     const path = await window.api.selectZipFile()
@@ -397,7 +644,11 @@ export function InstallDialogContent({
         }
         result = await window.api.installFromLocalDir(localPath)
       }
-      await completeMutation(result, onDone)
+      await completeMutation(result, onInstalled)
+      const skills = await window.api.getSkills()
+      const installed = skills.find((skill) => skill.id === result.skillId)
+      if (!installed) throw new Error('安装已完成，但刷新后未找到对应 Skill')
+      setInstalledSkill(installed)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -405,12 +656,45 @@ export function InstallDialogContent({
     }
   }
 
+  if (installedSkill) {
+    const canonical = installedSkill.sources.find((source) => source.source_role === 'canonical')
+    if (!canonical) {
+      return (
+        <Dialog
+          open
+          onClose={onClose}
+          title={`已安装 ${installedSkill.name}`}
+          description="安装已完成，但未找到可部署的权威 Source。"
+          hideCancel
+          confirmLabel="关闭"
+          onConfirm={onClose}
+        />
+      )
+    }
+    return (
+      <DeployDialogContent
+        skill={installedSkill}
+        sourceId={canonical.id}
+        contextMessage="安装完成，可继续部署到多个工具；每次成功后弹窗会保持打开。"
+        onDone={async (result) => {
+          if (!result) {
+            onClose()
+            return
+          }
+          await onRefresh()
+          const refreshed = (await window.api.getSkills()).find((skill) => skill.id === installedSkill.id)
+          if (refreshed) setInstalledSkill(refreshed)
+        }}
+      />
+    )
+  }
+
   return (
     <Dialog
       open
-      onClose={() => !busy && onDone(null)}
+      onClose={() => !busy && onClose()}
       title="安装 Skill"
-      confirmLabel={tab === 'local-dir' ? '添加' : '安装'}
+      confirmLabel="安装"
       onConfirm={handleInstall}
       busy={busy}
     >
@@ -465,7 +749,7 @@ export function InstallDialogContent({
 
         {tab === 'local-dir' && (
           <div>
-            <label className="block text-xs text-foreground-secondary mb-1">本地目录（索引模式，不搬文件）</label>
+            <label className="block text-xs text-foreground-secondary mb-1">本地目录</label>
             <div className="flex items-center gap-2">
               <Button variant="secondary" onClick={handleSelectDir} disabled={busy} size="sm">
                 选择目录…
@@ -473,7 +757,7 @@ export function InstallDialogContent({
               {localPath && <code className="text-xs font-mono text-foreground-secondary truncate">{localPath}</code>}
             </div>
             <p className="text-2xs text-foreground-muted mt-1">
-              将目录登记为索引 source，文件保留在原位。
+              将内容复制到权威源码库；原目录保持不变。
             </p>
           </div>
         )}

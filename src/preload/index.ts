@@ -68,6 +68,12 @@ const api = {
   // renderer 不传任何路径。
   redeploy: (deploymentId: number) => ipcRenderer.invoke('redeploy', deploymentId),
   undeploy: (deploymentId: number) => ipcRenderer.invoke('undeploy', deploymentId),
+  bulkDeploy: (requests: Array<{ key: string; sourceId: number; targetId: string; requestedMode: 'copy' | 'symlink' | 'junction' }>) =>
+    ipcRenderer.invoke('bulk:deploy', requests),
+  bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) =>
+    ipcRenderer.invoke('bulk:undeploy', requests),
+  bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) =>
+    ipcRenderer.invoke('bulk:removeFromRegistry', requests),
   adoptDeployment: (deploymentId: number) => ipcRenderer.invoke('adoptDeployment', deploymentId),
   adoptTargetAsCandidate: (deploymentId: number) => ipcRenderer.invoke('adoptTargetAsCandidate', deploymentId),
   getBulkAdoptionFacts: () => ipcRenderer.invoke('getBulkAdoptionFacts'),

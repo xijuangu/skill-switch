@@ -303,8 +303,8 @@ export function createDeploymentFacade(options: {
     if (!targetKnown) {
       return {
         skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
-        targetPath, deployment, targetExists: false, currentSourceHash: null,
-        currentTargetHash: null, kind: 'unresolved'
+        targetPath, deployment, targetExists: (() => { try { lstatSync(targetPath); return true } catch { return false } })(),
+        currentSourceHash: null, currentTargetHash: null, kind: 'target-unconfigured'
       }
     }
     const source = getSourceById(options.db, deployment.source_id)

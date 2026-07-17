@@ -15,7 +15,7 @@ import {
 } from '../src/main/services/registry'
 import { getSkillByName, getSkillById, getAllSkills, upsertSkill } from '../src/main/db/dao/skills'
 import { getSourceByPath, getSourcesBySkillId, upsertSource } from '../src/main/db/dao/skill-sources'
-import { getDeploymentById, getDeploymentsBySkillId } from '../src/main/db/dao/deployments'
+import { getDeploymentById, getDeploymentsBySkillId, upsertDeployment } from '../src/main/db/dao/deployments'
 import { executePreparedDeployment, executePreparedUndeployment } from '../src/main/services/deployer'
 import { listBackups } from '../src/main/services/backup'
 import { runInTransaction } from '../src/main/db/database'
@@ -683,6 +683,53 @@ describe('filterSourcesByEnabledTools (issue #20)', () => {
 })
 
 describe('removeFromRegistry', () => {
+  test('rejects an observed relationship before creating any backup or changing state', async () => {
+    const central = createTempDir('ss-central-')
+    const backups = createTempDir('ss-backups-')
+    const source = createTempDir('ss-source-')
+    const target = createTempDir('ss-target-')
+    const { db, cleanup: cleanupDb } = createTempDb()
+    const sourcePath = writeSkillDir(
+      source.dir,
+      'find-skills',
+      '---\nname: find-skills\n---\nbody\n'
+    )
+    const skillId = upsertSkill(db, 'find-skills', sourcePath)
+    upsertSource(db, skillId, sourcePath, 'hash', Date.now(), 'indexed', {
+      role: 'candidate',
+      origin: 'scan'
+    })
+    const sourceRow = getSourcesBySkillId(db, skillId)[0]
+    upsertDeployment(
+      db,
+      skillId,
+      'trae',
+      join(target.dir, 'find-skills'),
+      'symlink',
+      sourcePath,
+      'hash',
+      { sourceId: sourceRow.id, targetId: 'removed-trae-target' },
+      'observed'
+    )
+
+    await expect(removeFromRegistry(db, skillId, {
+      centralSkillsDir: central.dir,
+      backupsDir: backups.dir,
+      undeployDeployment: undeployForTest(db)
+    })).rejects.toThrow(/外部订阅/)
+
+    expect(listBackups(backups.dir)).toHaveLength(0)
+    expect(existsSync(sourcePath)).toBe(true)
+    expect(getSkillById(db, skillId)).toBeDefined()
+    expect(getDeploymentsBySkillId(db, skillId)).toHaveLength(1)
+
+    central.cleanup()
+    backups.cleanup()
+    source.cleanup()
+    target.cleanup()
+    cleanupDb()
+  })
+
   test('removes central-repo entity + all deployments + registry records, with backup', async () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
@@ -764,7 +811,7 @@ describe('removeFromRegistry', () => {
     cleanupDb()
   })
 
-  test('indexed-only skill (no central entity) skips backup but still removes deployments + records', async () => {
+  test('Candidate Source removal detaches metadata without backup or deleting external content', async () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const source = createTempDir('ss-source-')
@@ -804,10 +851,10 @@ describe('removeFromRegistry', () => {
     })
 
     expect(result.skillName).toBe(skillName)
-    expect(result.backedUp).toBe(true)
+    expect(result.backedUp).toBe(false)
     expect(result.undeployedTools).toEqual(['codex'])
-    // 无中央实体 → 备份 primary source(新版行为:Fix #5)
-    expect(listBackups(backups.dir).length).toBe(beforeBackups + 1)
+    expect(listBackups(backups.dir).length).toBe(beforeBackups)
+    expect(existsSync(sourcePath)).toBe(true)
     // 部署已清理
     expect(existsSync(targetDir)).toBe(false)
     expect(getDeploymentsBySkillId(db, skillId)).toHaveLength(0)

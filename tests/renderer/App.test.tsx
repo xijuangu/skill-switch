@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import App from '../../src/renderer/src/app/App'
 import { ToastProvider } from '../../src/renderer/src/app/Toast'
 import { SkillsPage } from '../../src/renderer/src/features/skills/SkillsPage'
+import { BulkSkillActionsDialog, DeployDialogContent, InstallDialogContent } from '../../src/renderer/src/features/skills/dialogs'
 import type { SkillWithConflictView } from '../../src/preload'
 
 // 回归 #52:App 必须在 ToastProvider 之内消费 useToast,
@@ -53,6 +54,9 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     deploymentConfirm: vi.fn(),
     redeploy: vi.fn(),
     undeploy: vi.fn(),
+    bulkDeploy: vi.fn(),
+    bulkUndeploy: vi.fn(),
+    bulkRemoveFromRegistry: vi.fn(),
     adoptDeployment: vi.fn(),
     getBulkAdoptionFacts: vi.fn().mockResolvedValue({ total: 0, tools: [] }),
     previewBulkAdoption: vi.fn().mockResolvedValue({ status: 'empty', facts: { total: 0, tools: [] } }),
@@ -74,6 +78,136 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
 }
 
 describe('App (integration)', () => {
+  it('defaults a new deployment request to symlink while still allowing copy', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'agents-user',
+        targetTool: 'agents',
+        displayName: 'Agents',
+        eligible: true,
+        reason: null
+      }]),
+      deploymentDeploy: vi.fn().mockResolvedValue({
+        status: 'completed',
+        deploymentId: 1,
+        result: {
+          action: 'created',
+          mode: 'symlink',
+          targetId: 'agents-user',
+          targetDisplayName: 'Agents',
+          degradedFrom: null,
+          degradeReason: null
+        }
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'copy' })).not.toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    await waitFor(() => expect(api.deploymentDeploy).toHaveBeenCalledWith({
+      sourceId: skill.sources[0].id,
+      targetId: 'agents-user',
+      requestedMode: 'symlink'
+    }))
+  })
+
+  it('keeps installation open as a repeatable deployment step until the user closes it', async () => {
+    const installed = buildFakeSkills(1)[0]
+    installed.name = 'local-demo'
+    installed.sources[0].source_role = 'canonical'
+    installed.sources[0].source_type = 'central-repo'
+    installed.sources[0].path = '/canonical/local-demo'
+    installed.conflict.primarySource = installed.sources[0]
+    const installResult = {
+      skillName: 'local-demo',
+      skillId: installed.id,
+      sourcePath: '/canonical/local-demo',
+      sourceType: 'central-repo' as const,
+      repoUrl: null,
+      commitSha: null,
+      overwritten: false
+    }
+    const api = mockWindowApi({
+      selectLocalDir: vi.fn().mockResolvedValue('/imports/local-demo'),
+      installFromLocalDir: vi.fn().mockResolvedValue(installResult),
+      getSkills: vi.fn().mockResolvedValue([installed]),
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex',
+        eligible: true, reason: null
+      }]),
+      deploymentDeploy: vi.fn().mockResolvedValue({
+        status: 'completed',
+        deploymentId: 1,
+        result: {
+          action: 'created', mode: 'symlink', targetId: 'codex-user',
+          targetDisplayName: 'Codex', degradedFrom: null, degradeReason: null
+        }
+      })
+    })
+    const onDone = vi.fn().mockResolvedValue(undefined)
+
+    render(
+      <InstallDialogContent
+        initialTab="local-dir"
+        onInstalled={onDone}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: '选择目录…' }))
+    await userEvent.click(screen.getByRole('button', { name: '安装' }))
+
+    expect(await screen.findByText(/安装完成，可继续部署到多个工具/)).toBeInTheDocument()
+    expect(onDone).toHaveBeenCalledWith(installResult)
+    expect(screen.getByRole('radio', { name: 'symlink' })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    await waitFor(() => expect(api.deploymentDeploy).toHaveBeenCalled())
+    expect(screen.getByText(/安装完成，可继续部署到多个工具/)).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('runs selected skill-target pairs as a symlink batch and keeps per-item results visible', async () => {
+    const skills = buildFakeSkills(2)
+    skills.forEach((skill) => {
+      skill.sources[0].source_role = 'canonical'
+      skill.conflict.primarySource = skill.sources[0]
+    })
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user',
+        targetTool: 'codex',
+        displayName: 'Codex',
+        eligible: true,
+        reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 2,
+        completed: 1,
+        failed: 1,
+        items: [
+          { key: `${skills[0].id}:codex-user`, status: 'completed' },
+          { key: `${skills[1].id}:codex-user`, status: 'rejected', message: 'target busy' }
+        ]
+      })
+    })
+
+    render(<BulkSkillActionsDialog skills={skills} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
+    await waitFor(() => expect(screen.getAllByRole('checkbox', { name: /Codex/ })).toHaveLength(2))
+    await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
+
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalledWith([
+      { key: `${skills[0].id}:codex-user`, sourceId: skills[0].sources[0].id, targetId: 'codex-user', requestedMode: 'symlink' },
+      { key: `${skills[1].id}:codex-user`, sourceId: skills[1].sources[0].id, targetId: 'codex-user', requestedMode: 'symlink' }
+    ]))
+    expect(await screen.findByText('完成 1，失败 1')).toBeInTheDocument()
+    expect(screen.getByText(/target busy/)).toBeInTheDocument()
+  })
+
   it('mounts without throwing (regression: white screen from useToast outside ToastProvider)', async () => {
     mockWindowApi()
     // 不应用 catch 兜底,抛错即测试失败
@@ -213,6 +347,43 @@ describe('App (integration)', () => {
     await waitFor(() => expect(api.adoptDeployment).toHaveBeenCalledWith(9))
     await waitFor(() => expect(screen.queryByRole('button', { name: '一键接管 1 个外部订阅' })).not.toBeInTheDocument())
     expect(api.getBulkAdoptionFacts).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows a stale observed relation for a removed Discovery Target to be detached', async () => {
+    const api = mockWindowApi({
+      removeFromManifest: vi.fn().mockResolvedValue(undefined),
+      getTools: vi.fn().mockResolvedValue([{
+        config: {
+          key: 'trae', displayName: 'TRAE', enabled: true,
+          paths: ['/trae-cn'], existingPaths: ['/trae-cn'],
+          targets: [{ id: 'trae-current', path: '/trae-cn' }],
+          existingTargets: [{ id: 'trae-current', path: '/trae-cn' }],
+          isCustom: false, exists: true
+        },
+        drifts: [{
+          skillId: 33, skillName: 'find-skills', targetTool: 'trae',
+          targetPath: '/trae/find-skills', targetExists: false,
+          currentSourceHash: null, currentTargetHash: null, kind: 'target-unconfigured',
+          deployment: {
+            id: 29, skill_id: 33, target_tool: 'trae', target_path: '/trae/find-skills',
+            mode: 'symlink', management: 'observed', source_path: '/agents/find-skills',
+            source_id: 37, target_id: 'trae-removed', deployed_at: '2026-07-15T00:00:00.000Z',
+            source_hash_at_deploy: 'hash'
+          }
+        }]
+      }]) as Window['api']['getTools']
+    })
+
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /TRAE/ }))
+
+    expect(screen.getByText('目标已移除')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '接管' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '解除登记' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('/trae/find-skills')
+    await userEvent.click(screen.getByRole('button', { name: '确认解除登记' }))
+    await waitFor(() => expect(api.removeFromManifest).toHaveBeenCalledWith(29))
   })
 
   it('previews and confirms every observed subscription globally, then retries only failures', async () => {

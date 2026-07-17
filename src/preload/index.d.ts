@@ -340,6 +340,18 @@ export type DeploymentMutationOutcomeView =
   | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'observation-stale' | 'canonical-source-unavailable' | 'source-not-canonical'; message: string }
   | Extract<DeploymentOutcomeView, { status: 'recovery-required' }>
 
+export interface BulkMutationResultView {
+  total: number
+  completed: number
+  failed: number
+  items: Array<{
+    key: string
+    status: 'completed' | 'confirmation-required' | 'rejected' | 'recovery-required'
+    message?: string
+    outcome?: unknown
+  }>
+}
+
 export type TargetAdoptionOutcomeView =
   | { status: 'adopted'; deploymentId: number; candidateSourceId: number; candidateSourcePath: string }
   | { status: 'rejected'; reason: 'deployment-not-found' | 'unresolved' | 'target-busy' | 'observed-read-only' | 'not-target-modified' | 'canonical-repository-unavailable' | 'canonical-source-unavailable'; message: string }
@@ -408,10 +420,12 @@ export type DriftKindView =
   | 'target-modified'
   | 'link-mismatch'
   | 'source-missing'
+  | 'target-unconfigured'
   | 'unresolved'
   | 'drift'
   | 'external'
   | 'recovery-required'
+  | 'bidirectional'
 
 export interface DriftStatusView {
   skillId: number
@@ -483,6 +497,9 @@ declare global {
       // issue #22:漂移重新部署,target_path / source_path 由主进程从清单读取
       redeploy: (deploymentId: number) => Promise<DeploymentRedeployOutcomeView>
       undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
+      bulkDeploy: (requests: Array<{ key: string; sourceId: number; targetId: string; requestedMode: DeployModeView }>) => Promise<BulkMutationResultView>
+      bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
+      bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) => Promise<BulkMutationResultView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       adoptTargetAsCandidate: (deploymentId: number) => Promise<TargetAdoptionOutcomeView>
       getBulkAdoptionFacts: () => Promise<BulkAdoptionPreviewFactsView>

@@ -10,6 +10,7 @@ import {
 import { useToast } from '../../app/Toast'
 import {
   ConflictDialog,
+  BulkSkillActionsDialog,
   DeployDialogContent,
   InstallDialogContent,
   ViewMdDialog,
@@ -83,6 +84,9 @@ export function SkillsPage({
   const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string; management: 'managed' | 'observed' }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
+  const [bulkSelecting, setBulkSelecting] = useState(false)
+  const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<number>>(new Set())
+  const [bulkActionsOpen, setBulkActionsOpen] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
   const pendingAdjacentSelectRef = useRef<number | null>(null)
 
@@ -329,17 +333,12 @@ export function SkillsPage({
     }
   }
 
-  const handleInstallDone = async (result: InstallResultView | null) => {
-    if (!result) {
-      setInstallOpen(false)
-      return
-    }
+  const handleInstalled = async (result: InstallResultView) => {
     const msg = result.overwritten
       ? `已安装「${result.skillName}」(覆盖了已有版本)`
       : `已安装「${result.skillName}」`
     success(msg)
     await onRefresh()
-    setInstallOpen(false)
   }
 
   const getMenuActions = (skill: SkillView) => [
@@ -360,6 +359,15 @@ export function SkillsPage({
       if (dep.target_tool.toLowerCase().includes(q)) return `工具: ${dep.target_tool}`
     }
     return null
+  }
+
+  const toggleBulkSkill = (skillId: number) => {
+    setBulkSelectedIds((current) => {
+      const next = new Set(current)
+      if (next.has(skillId)) next.delete(skillId)
+      else next.add(skillId)
+      return next
+    })
   }
 
   if (loading) {
@@ -448,7 +456,37 @@ export function SkillsPage({
           >
             添加
           </Button>
+          <Button
+            variant={bulkSelecting ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => {
+              setBulkSelecting((current) => !current)
+              if (bulkSelecting) setBulkSelectedIds(new Set())
+            }}
+          >
+            批量
+          </Button>
         </div>
+
+        {bulkSelecting && (
+          <div className="p-2 border-b border-border flex items-center gap-2">
+            <button
+              className="text-2xs text-primary"
+              onClick={() => setBulkSelectedIds(new Set(filtered.map((skill) => skill.id)))}
+            >
+              全选当前
+            </button>
+            <span className="text-2xs text-foreground-muted flex-1">已选 {bulkSelectedIds.size}</span>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={bulkSelectedIds.size === 0}
+              onClick={() => setBulkActionsOpen(true)}
+            >
+              操作
+            </Button>
+          </div>
+        )}
 
         {batchFlow.plan.length > 0 && (
           <div className="p-2 border-b border-border">
@@ -489,8 +527,11 @@ export function SkillsPage({
                 key={skill.id}
                 skill={skill}
                 selected={selectedId === skill.id}
+                selecting={bulkSelecting}
+                checked={bulkSelectedIds.has(skill.id)}
                 matchReason={getMatchReason(skill)}
-                onSelect={() => setSelectedId(skill.id)}
+                onSelect={() => bulkSelecting ? toggleBulkSkill(skill.id) : setSelectedId(skill.id)}
+                onToggleChecked={() => toggleBulkSkill(skill.id)}
                 onContextMenu={(e) => {
                   e.preventDefault()
                   setContextMenu({ skill, x: e.clientX, y: e.clientY })
@@ -545,7 +586,9 @@ export function SkillsPage({
       {installOpen && (
         <InstallDialogContent
           initialTab={installInitialTab}
-          onDone={handleInstallDone}
+          onInstalled={handleInstalled}
+          onRefresh={onRefresh}
+          onClose={() => setInstallOpen(false)}
         />
       )}
 
@@ -600,6 +643,14 @@ export function SkillsPage({
           busy={actionBusy}
           onConfirm={handleRemoveFromRegistryConfirm}
           onCancel={() => setRemoveRegistryTarget(null)}
+        />
+      )}
+
+      {bulkActionsOpen && (
+        <BulkSkillActionsDialog
+          skills={skills.filter((skill) => bulkSelectedIds.has(skill.id))}
+          onRefresh={onRefresh}
+          onClose={() => setBulkActionsOpen(false)}
         />
       )}
 
@@ -676,14 +727,20 @@ export function SkillsPage({
 function SkillMasterItem({
   skill,
   selected,
+  selecting,
+  checked,
   matchReason,
   onSelect,
+  onToggleChecked,
   onContextMenu
 }: {
   skill: SkillView
   selected: boolean
+  selecting: boolean
+  checked: boolean
   matchReason: string | null
   onSelect: () => void
+  onToggleChecked: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const managedCount = managedDeploymentCount(skill)
@@ -706,6 +763,15 @@ function SkillMasterItem({
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          {selecting && (
+            <input
+              type="checkbox"
+              aria-label={`选择 ${skill.name}`}
+              checked={checked}
+              onClick={(event) => event.stopPropagation()}
+              onChange={onToggleChecked}
+            />
+          )}
           <StatusDot
             variant={deployed ? 'success' : observedCount > 0 ? 'warning' : 'neutral'}
             label={deployed

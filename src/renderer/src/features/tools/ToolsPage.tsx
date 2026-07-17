@@ -22,7 +22,7 @@ export function ToolsPage({
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [busyKey, setBusyKey] = useState<DriftKey | null>(null)
   const [confirmUndeploy, setConfirmUndeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
-  const [confirmRemoveManifest, setConfirmRemoveManifest] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
+  const [confirmRemoveManifest, setConfirmRemoveManifest] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string; targetPath: string; staleTarget: boolean } | null>(null)
   const [confirmRedeploy, setConfirmRedeploy] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [confirmAdopt, setConfirmAdopt] = useState<{ deploymentId: number; skillId: number; targetTool: string; skillName: string } | null>(null)
   const [redeployRisk, setRedeployRisk] = useState<ConfirmationRequiredView | null>(null)
@@ -245,7 +245,8 @@ export function ToolsPage({
               busyKey={busyKey}
               onUndeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmUndeploy({ deploymentId, skillId, targetTool, skillName })}
               onRedeploy={(deploymentId, skillId, targetTool, skillName) => setConfirmRedeploy({ deploymentId, skillId, targetTool, skillName })}
-              onRemoveFromManifest={(deploymentId, skillId, targetTool, skillName) => setConfirmRemoveManifest({ deploymentId, skillId, targetTool, skillName })}
+              onRemoveFromManifest={(deploymentId, skillId, targetTool, skillName, targetPath, staleTarget) =>
+                setConfirmRemoveManifest({ deploymentId, skillId, targetTool, skillName, targetPath, staleTarget })}
               onAdopt={(deploymentId, skillId, targetTool, skillName) => setConfirmAdopt({ deploymentId, skillId, targetTool, skillName })}
             />
           ))}
@@ -329,9 +330,11 @@ export function ToolsPage({
       <Dialog
         open={confirmRemoveManifest !== null}
         onClose={() => setConfirmRemoveManifest(null)}
-        title={`从 ${confirmRemoveManifest?.targetTool ?? ''} 清单移除「${confirmRemoveManifest?.skillName ?? ''}」?`}
-        description="目标已从磁盘移除，此操作只清理清单记录。"
-        confirmLabel="移除"
+        title={`${confirmRemoveManifest?.staleTarget ? '解除陈旧目标登记' : `从 ${confirmRemoveManifest?.targetTool ?? ''} 清单移除`}「${confirmRemoveManifest?.skillName ?? ''}」?`}
+        description={confirmRemoveManifest?.staleTarget
+          ? `原 Discovery Target 已从设置中移除：\n${confirmRemoveManifest.targetPath}\n此操作只解除关系登记，不删除 Source 或任何磁盘内容。`
+          : '目标已从磁盘移除，此操作只清理清单记录。'}
+        confirmLabel={confirmRemoveManifest?.staleTarget ? '确认解除登记' : '移除'}
         onConfirm={handleRemoveFromManifest}
         busy={driftKeyEquals(busyKey, confirmRemoveManifest)}
       />
@@ -376,7 +379,7 @@ function ToolCard({
   busyKey: DriftKey | null
   onUndeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
   onRedeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
-  onRemoveFromManifest: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
+  onRemoveFromManifest: (deploymentId: number, skillId: number, targetTool: string, skillName: string, targetPath: string, staleTarget: boolean) => void
   onAdopt: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
 }) {
   const { config, drifts } = tool
@@ -452,7 +455,14 @@ function ToolCard({
                       busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
                       onUndeploy={() => d.deployment && onUndeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
                       onRedeploy={() => d.deployment && onRedeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
-                      onRemoveFromManifest={() => d.deployment && onRemoveFromManifest(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
+                      onRemoveFromManifest={() => d.deployment && onRemoveFromManifest(
+                        d.deployment.id,
+                        d.skillId,
+                        d.targetTool,
+                        d.skillName,
+                        d.targetPath,
+                        d.kind === 'target-unconfigured'
+                      )}
                     />
                   ))}
                 </ul>
@@ -468,6 +478,14 @@ function ToolCard({
                         key={`observed:${d.deployment!.id}`}
                         drift={d}
                         busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
+                        onRemoveFromManifest={() => onRemoveFromManifest(
+                          d.deployment!.id,
+                          d.skillId,
+                          d.targetTool,
+                          d.skillName,
+                          d.targetPath,
+                          d.kind === 'target-unconfigured'
+                        )}
                         onAdopt={() => onAdopt(d.deployment!.id, d.skillId, d.targetTool, d.skillName)}
                       />
                     ))}
@@ -558,7 +576,12 @@ function DriftItem({
             取消部署
           </Button>
         )}
-        {isObserved && onAdopt && (
+        {isObserved && drift.kind === 'target-unconfigured' && onRemoveFromManifest && (
+          <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
+            解除登记
+          </Button>
+        )}
+        {isObserved && drift.kind !== 'target-unconfigured' && onAdopt && (
           <Button variant="primary" size="sm" onClick={onAdopt} disabled={busy}>
             接管
           </Button>

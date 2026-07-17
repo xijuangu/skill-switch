@@ -266,6 +266,7 @@ export type DriftKind =
   | 'target-modified'
   | 'link-mismatch'
   | 'source-missing'
+  | 'target-unconfigured'
   | 'unresolved'
   | 'drift'
   | 'external'

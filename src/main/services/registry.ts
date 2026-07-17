@@ -240,35 +240,39 @@ export async function removeFromRegistry(
     throw new Error(`skill not found: id=${skillId}`)
   }
 
-  const centralEntityPath = resolveWithin(
-    opts.centralSkillsDir,
-    validateSkillName(skill.name)
-  )
-  const centralEntityExists = existsSync(centralEntityPath)
-
-  // Step 2 (事务外):备份 skill 内容
-  // - 中央实体存在 → 备份中央实体(常规场景)
-  // - 中央实体不存在 → 备份 primary source(从外部索引的 skill,无中央实体)
-  //   保证无论 skill 来自哪里,Remove from Registry 前都有备份兜底
-  let backedUp = false
-  const backupSourcePath = centralEntityExists
-    ? centralEntityPath
-    : skill.primary_source_path
-  if (backupSourcePath && existsSync(backupSourcePath)) {
-    createBackup({
-      skillName: skill.name,
-      targetTool: 'registry',
-      sourcePath: backupSourcePath,
-      backupsDir: opts.backupsDir
-    })
-    backedUp = true
+  const sources = getSourcesBySkillId(db, skillId)
+  const canonicalSource =
+    sources.find((source) => source.source_role === 'canonical') ??
+    sources.find((source) =>
+      source.source_type === 'central-repo' &&
+      isPathWithin(opts.centralSkillsDir, source.path)
+    )
+  const centralEntityPath = canonicalSource?.path ?? null
+  if (centralEntityPath && !isPathWithin(opts.centralSkillsDir, centralEntityPath)) {
+    throw new Error('权威 Source 不在 Canonical Repository 内，拒绝移除。')
   }
 
-  // Step 3: each filesystem mutation completes through the Deployment Facade
+  // Static preflight must finish before backup or filesystem mutation. An
+  // observed relation has not granted deletion authority, and a legacy
+  // unresolved row cannot identify a safe target.
+  const deployments = getDeploymentsBySkillId(db, skillId)
+  const observed = deployments.find((deployment) => deployment.management === 'observed')
+  if (observed) {
+    throw new Error(`仍有未接管的外部订阅：${observed.target_tool}，请先接管或解除登记。`)
+  }
+  const unresolved = deployments.find((deployment) =>
+    deployment.source_id == null ||
+    deployment.target_id == null ||
+    deployment.target_path == null
+  )
+  if (unresolved) {
+    throw new Error(`仍有待确认的部署关系：${unresolved.target_tool}，请先解除或修复该关系。`)
+  }
+
+  // Step 2: each filesystem mutation completes through the Deployment Facade
   // before registry metadata is removed. Do not hold a SQLite transaction
   // across awaited target locks.
   const undeployedTools: string[] = []
-  const deployments = getDeploymentsBySkillId(db, skillId)
   for (const dep of deployments) {
     const outcome = await opts.undeployDeployment(dep.id)
     if (outcome.status !== 'completed') {
@@ -277,7 +281,22 @@ export async function removeFromRegistry(
     undeployedTools.push(dep.target_tool)
   }
 
-  // Step 4-5: metadata deletion remains atomic after all target mutations.
+  // Step 3: only a Canonical Source is application-owned content. Back it up
+  // after all relationship preflight/mutations succeed. Candidate removal is
+  // metadata-only and leaves the external directory untouched.
+  let backedUp = false
+  const centralEntityExists = centralEntityPath != null && existsSync(centralEntityPath)
+  if (centralEntityExists) {
+    createBackup({
+      skillName: skill.name,
+      targetTool: 'registry',
+      sourcePath: centralEntityPath,
+      backupsDir: opts.backupsDir
+    })
+    backedUp = true
+  }
+
+  // Step 4: metadata deletion remains atomic after all target mutations.
   runInTransaction(db, () => {
     // Step 4: 删 skill_sources 记录
     deleteSourcesBySkillId(db, skillId)
@@ -286,8 +305,8 @@ export async function removeFromRegistry(
     deleteSkill(db, skillId)
   })
 
-  // Step 6 (事务外):删中央实体目录(备份已先拷贝,安全删除原目录)
-  if (centralEntityExists) {
+  // Step 5: delete only the application-owned Canonical Source.
+  if (centralEntityExists && centralEntityPath) {
     rmSync(centralEntityPath, { recursive: true, force: true })
   }
 

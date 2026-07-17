@@ -51,6 +51,7 @@ import { listBackups, restoreBackup, deleteBackup } from '../services/backup'
 import { readToolDrifts } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
 import { createSkillLibraryFacade, type ConflictResolutionDecision } from '../services/skill-library-facade'
+import { createBulkMutationFacade } from '../services/bulk-mutation-facade'
 import {
   detachSourceRoot,
   listSourceRoots,
@@ -259,6 +260,17 @@ export function registerIpcHandlers(db: DB): void {
         platform: settings.platform
       }
     }
+  })
+  const removeSkillFromRegistry = (skillId: number) =>
+    removeFromRegistry(db, skillId, {
+      centralSkillsDir: SKILLS_DIR,
+      backupsDir: BACKUPS_DIR,
+      undeployDeployment: (deploymentId) => deploymentFacade.undeploy(deploymentId)
+    })
+  const bulkMutationFacade = createBulkMutationFacade({
+    deploy: deploymentFacade.deploy,
+    undeploy: deploymentFacade.undeploy,
+    removeFromRegistry: removeSkillFromRegistry
   })
 
   ipcMain.handle('scan', async () => {
@@ -489,6 +501,44 @@ export function registerIpcHandlers(db: DB): void {
     deploymentFacade.undeploy(assertInteger(deploymentId, 'deploymentId'))
   )
 
+  ipcMain.handle('bulk:deploy', async (_e, requests: unknown) => {
+    if (!Array.isArray(requests)) throw new Error('bulk deploy requests must be an array')
+    return bulkMutationFacade.deploy(requests.map((request, index) => {
+      if (typeof request !== 'object' || request === null) throw new Error(`bulk deploy item ${index} must be an object`)
+      const dto = request as Record<string, unknown>
+      return {
+        key: assertNonEmptyString(dto.key, `bulk deploy item ${index} key`),
+        sourceId: assertInteger(dto.sourceId, `bulk deploy item ${index} sourceId`),
+        targetId: assertNonEmptyString(dto.targetId, `bulk deploy item ${index} targetId`),
+        requestedMode: assertDeployMode(dto.requestedMode)
+      }
+    }))
+  })
+
+  ipcMain.handle('bulk:undeploy', async (_e, requests: unknown) => {
+    if (!Array.isArray(requests)) throw new Error('bulk undeploy requests must be an array')
+    return bulkMutationFacade.undeploy(requests.map((request, index) => {
+      if (typeof request !== 'object' || request === null) throw new Error(`bulk undeploy item ${index} must be an object`)
+      const dto = request as Record<string, unknown>
+      return {
+        key: assertNonEmptyString(dto.key, `bulk undeploy item ${index} key`),
+        deploymentId: assertInteger(dto.deploymentId, `bulk undeploy item ${index} deploymentId`)
+      }
+    }))
+  })
+
+  ipcMain.handle('bulk:removeFromRegistry', async (_e, requests: unknown) => {
+    if (!Array.isArray(requests)) throw new Error('bulk remove requests must be an array')
+    return bulkMutationFacade.remove(requests.map((request, index) => {
+      if (typeof request !== 'object' || request === null) throw new Error(`bulk remove item ${index} must be an object`)
+      const dto = request as Record<string, unknown>
+      return {
+        key: assertNonEmptyString(dto.key, `bulk remove item ${index} key`),
+        skillId: assertInteger(dto.skillId, `bulk remove item ${index} skillId`)
+      }
+    }))
+  })
+
   ipcMain.handle('adoptDeployment', async (_e, deploymentId: number) =>
     deploymentFacade.adopt(assertInteger(deploymentId, 'deploymentId'))
   )
@@ -565,11 +615,7 @@ export function registerIpcHandlers(db: DB): void {
    * 与 undeploy 明确分开:undeploy 只删某工具的部署,Remove from Registry 彻底移除 skill。
    */
   ipcMain.handle('removeFromRegistry', async (_e, skillId: number) => {
-    return removeFromRegistry(db, assertInteger(skillId, 'skillId'), {
-      centralSkillsDir: SKILLS_DIR,
-      backupsDir: BACKUPS_DIR,
-      undeployDeployment: (deploymentId) => deploymentFacade.undeploy(deploymentId)
-    })
+    return removeSkillFromRegistry(assertInteger(skillId, 'skillId'))
   })
 
   ipcMain.handle('getTools', async () => {

@@ -2,6 +2,8 @@
 
 A standalone GUI tool to manage AI coding tool skills (TRAE / Codex / Claude Code / Agents / Gemini CLI) — scan, index, install, and deploy via copy or symlink.
 
+使用说明：[中文用户指南](docs/user-guide.md)
+
 ## Why
 
 Modern AI coding tools each maintain their own local skill directory (`~/.trae-cn/skills`, `~/.codex/skills`, `~/.claude/skills`, etc.). As a user of multiple tools, keeping skills in sync across them is manual, error-prone, and opaque. **skill-switch** is the central panel for all of them.
@@ -29,8 +31,9 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 - Scan skills from multiple tool directories, including unmanaged valid directory symlinks; linked aliases discover the authoritative real Source and are recorded as read-only Observed Subscriptions. They become managed Deployments only after explicit adoption; managed targets are excluded from re-import (no file moving for existing skills)
 - Use `~/.skill-switch/skills` as the fixed Canonical Repository; external registered roots and tool scans produce Candidate Sources
 - Register external Candidate Source directories, recursively discover multiple Skills, rescan or detach metadata without deleting source files
-- Install new skills from GitHub repo (single + subpath) or ZIP into the Canonical Repository; adding a local directory records a Candidate Source
-- Deploy via copy / symlink / Windows junction; every linked-to-copy degradation requires confirmation
+- Install new skills from GitHub repo (single + subpath), ZIP, or a local directory into the Canonical Repository; local installation copies content and leaves the original directory unchanged
+- Deploy individually or in batches via symlink (default), copy, or Windows junction; every linked-to-copy degradation requires confirmation
+- Batch undeploy by target tool and batch registry removal with ordered per-item outcomes and retryable failures
 - Stable Source / Discovery Target / Deployment identities; renderer mutation calls never submit paths
 - Deployment manifest + authoritative per-Deployment inspection, including recovery-required crash evidence
 - Aggregated confirmation for external overwrite, modified targets, and mode degradation
@@ -86,6 +89,7 @@ Spec'd via `/grill-me` → `/to-prd` → `/to-issues`. See:
 - Deployment 生命周期深模块: [issues #69–#78](https://github.com/xijuangu/skill-switch/issues)（稳定语义 ID、Facade、聚合确认、目标锁、可补偿文件系统事务与 contract 收口）
 - 权威源码库整理生命周期 PRD: [issue #81](https://github.com/xijuangu/skill-switch/issues/81)
 - 整理生命周期 Slices: [issues #82–#92](https://github.com/xijuangu/skill-switch/issues)（候选/权威身份与 SkillLibraryFacade、全局一键接管、可撤销整理与原子批次、批量选择与去重、版本冲突与另存、权威版本替换与 copy 漂移、Source Archive 历史与永久清理、可撤销 Source Relocation、Source Recovery、仅权威 Source 可部署）。验收步骤见 [docs/manual-qa.md](docs/manual-qa.md)。
+- 安装、批量部署与安全移除工作流: [issue #97](https://github.com/xijuangu/skill-switch/issues/97)
 
 ## Out of Scope (MVP)
 
@@ -95,7 +99,6 @@ Spec'd via `/grill-me` → `/to-prd` → `/to-issues`. See:
 - Skill update checking
 - GitHub repo browser UI
 - Deep Link import
-- Batch deploy/undeploy
 - Cloud sync / WebDAV / system tray
 - CLI / TUI form
 
