@@ -66,6 +66,11 @@ describe('issue #64: native ABI 准备流程互不污染', () => {
     }
   })
 
+  test('测试套件串行执行，避免 Windows runner 并行加载原生模块时无诊断退出', () => {
+    expect(scripts.test).toContain('--maxWorkers=1')
+    expect(scripts.test).toContain('--minWorkers=1')
+  })
+
   test('dev、start、build:electron 在 Electron 阶段前明确准备 Electron ABI', () => {
     for (const name of ['dev', 'start', 'build:electron']) {
       const s = scripts[name]

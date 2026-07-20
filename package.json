@@ -17,7 +17,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "npm run native:node && vitest run",
+    "test": "npm run native:node && vitest run --maxWorkers=1 --minWorkers=1",
     "test:watch": "npm run native:node && vitest",
     "verify": "npm run typecheck && npm test && npm run build",
     "package": "npm run build:electron && electron-builder --publish never",
