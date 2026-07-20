@@ -102,6 +102,8 @@ describe('issue #119: Draft Release 自动合同', () => {
     expect(ciText).toContain('Asset version mismatch')
     expect(ciText).toContain('Missing required Windows x64 NSIS installer')
     expect(ciText).toContain('Missing required Linux x64 installer')
+    expect(ciText).toContain('-x86_64.AppImage')
+    expect(ciText).toContain('-amd64.deb')
     expect(ciText).toContain('find release-assets -type f -size 0')
   })
 
