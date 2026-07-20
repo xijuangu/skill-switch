@@ -6,6 +6,7 @@ import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { upsertSkill } from '../src/main/db/dao/skills'
 import { setCanonicalRepositoryPath } from '../src/main/db/database'
 import { readToolsView } from '../src/main/ipc/index'
+import { markerForTarget, writeMarker } from '../src/main/services/deployer'
 import { createDeploymentFacade } from '../src/main/services/deployment-facade'
 import { hashDir } from '../src/main/services/hash'
 import type { ToolConfig } from '../src/main/types'
@@ -83,11 +84,18 @@ describe('authoritative deployment read model', () => {
     const env = setup()
     mkdirSync(join(env.firstRoot, 'external-a'))
     mkdirSync(join(env.secondRoot, 'external-b'))
+    writeFileSync(
+      join(env.firstRoot, 'external-a', 'SKILL.md'),
+      '---\nname: declared-a\n---\n'
+    )
     expect(
       readToolsView(env.db, [env.tool], env.facade.inspect)[0].drifts
-        .map((item) => item.targetPath)
+        .map((item) => [item.targetPath, item.targetId, item.targetEntryName, item.skillName])
         .sort()
-    ).toEqual([join(env.firstRoot, 'external-a'), join(env.secondRoot, 'external-b')].sort())
+    ).toEqual([
+      [join(env.firstRoot, 'external-a'), 'codex-a', 'external-a', 'declared-a'],
+      [join(env.secondRoot, 'external-b'), 'codex-b', 'external-b', 'external-b']
+    ].sort())
 
     const deployed = await env.facade.deploy({
       sourceId: env.sourceId,
@@ -97,5 +105,51 @@ describe('authoritative deployment read model', () => {
     if (deployed.status !== 'completed') throw new Error('expected deployment')
     const withNullInspect = readToolsView(env.db, [env.tool], () => null)[0].drifts
     expect(withNullInspect.some((item) => item.skillName === 'demo')).toBe(false)
+  })
+
+  test('unfinished external management remains visible as recovery-required after restart', () => {
+    const env = setup()
+    const externalPath = join(env.firstRoot, 'external-recovery')
+    mkdirSync(externalPath)
+    writeFileSync(join(externalPath, 'SKILL.md'), '# external-recovery')
+    const evidence = markerForTarget(externalPath, 'manage-external-recovery')
+    writeMarker(evidence, 'registry-committed')
+
+    expect(readToolsView(env.db, [env.tool], env.facade.inspect)[0].drifts).toMatchObject([
+      {
+        skillName: 'external-recovery',
+        targetPath: externalPath,
+        deployment: null,
+        kind: 'recovery-required',
+        recovery: {
+          operationId: 'manage-external-recovery',
+          phase: 'registry-committed'
+        }
+      }
+    ])
+  })
+
+  test('an invalid external identity does not block other relationships', () => {
+    const env = setup()
+    const invalidPath = join(env.firstRoot, 'invalid-external')
+    const validPath = join(env.firstRoot, 'valid-external')
+    mkdirSync(invalidPath)
+    mkdirSync(validPath)
+    writeFileSync(join(invalidPath, 'SKILL.md'), '---\nname: ../invalid\n---\n')
+    writeFileSync(join(validPath, 'SKILL.md'), '---\nname: valid-name\n---\n')
+
+    const drifts = readToolsView(env.db, [env.tool], env.facade.inspect)[0].drifts
+    expect(drifts).toHaveLength(2)
+    expect(drifts.find((item) => item.targetPath === invalidPath)).toMatchObject({
+      skillName: 'invalid-external',
+      kind: 'external',
+      targetId: 'codex-a',
+      externalError: expect.stringContaining('无法解析 Skill 身份')
+    })
+    expect(drifts.find((item) => item.targetPath === validPath)).toMatchObject({
+      skillName: 'valid-name',
+      kind: 'external',
+      targetId: 'codex-a'
+    })
   })
 })

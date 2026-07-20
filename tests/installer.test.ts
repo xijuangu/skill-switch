@@ -376,7 +376,7 @@ describe('installFromZip', () => {
 })
 
 describe('installFromLocalDir', () => {
-  test('本地目录索引安装:source_type=indexed,不搬文件', () => {
+  test('installs a local directory as a Canonical Source while preserving the original', () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const { db, cleanup: cleanupDb } = createTempDb()
@@ -387,7 +387,7 @@ describe('installFromLocalDir', () => {
       'grilling',
       '---\nname: grilling\n---\nlocal\n'
     )
-    // 加一个额外文件,验证不搬文件
+    // 加一个额外文件,验证完整复制
     writeFileSync(join(skillDir, 'extra.txt'), 'extra\n')
     const originalContent = readFileSync(join(skillDir, 'SKILL.md'), 'utf-8')
 
@@ -397,27 +397,28 @@ describe('installFromLocalDir', () => {
     })
 
     expect(result.skillName).toBe('grilling')
-    expect(result.sourceType).toBe('indexed')
-    expect(result.sourcePath).toBe(skillDir)
+    expect(result.sourceType).toBe('central-repo')
+    expect(result.sourcePath).toBe(join(central.dir, 'grilling'))
     expect(result.repoUrl).toBeNull()
     expect(result.commitSha).toBeNull()
     expect(result.overwritten).toBe(false)
 
-    // 不搬文件:原目录内容不变
+    // 原目录内容不变
     expect(readFileSync(join(skillDir, 'SKILL.md'), 'utf-8')).toBe(originalContent)
     expect(existsSync(join(skillDir, 'extra.txt'))).toBe(true)
-    // 中央仓库不创建副本
-    expect(existsSync(join(central.dir, 'grilling'))).toBe(false)
+    expect(readFileSync(join(central.dir, 'grilling', 'SKILL.md'), 'utf-8')).toBe(originalContent)
+    expect(readFileSync(join(central.dir, 'grilling', 'extra.txt'), 'utf-8')).toBe('extra\n')
 
     // DB 有记录
     const skill = getSkillByName(db, 'grilling')
     expect(skill).toBeDefined()
     const sources = getSourcesBySkillId(db, skill!.id)
     expect(sources).toHaveLength(1)
-    expect(sources[0].source_type).toBe('indexed')
+    expect(sources[0].source_type).toBe('central-repo')
+    expect(sources[0].source_role).toBe('canonical')
     expect(sources[0].source_origin).toBe('local')
     expect(sources[0].source_tool).toBeNull()
-    expect(sources[0].path).toBe(skillDir)
+    expect(sources[0].path).toBe(join(central.dir, 'grilling'))
     expect(sources[0].repo_url).toBeNull()
     expect(sources[0].commit_sha).toBeNull()
 
@@ -427,7 +428,7 @@ describe('installFromLocalDir', () => {
     cleanupDb()
   })
 
-  test('重复安装幂等:同路径 upsert 不重复', () => {
+  test('reinstalling the same local directory replaces one Canonical Source', () => {
     const central = createTempDir('ss-central-')
     const backups = createTempDir('ss-backups-')
     const { db, cleanup: cleanupDb } = createTempDb()

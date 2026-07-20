@@ -266,6 +266,7 @@ export type DriftKind =
   | 'target-modified'
   | 'link-mismatch'
   | 'source-missing'
+  | 'target-unconfigured'
   | 'unresolved'
   | 'drift'
   | 'external'
@@ -278,6 +279,12 @@ export interface DriftStatus {
   skillName: string
   targetTool: string
   targetPath: string
+  /** External entries expose their resolved Discovery Target identity for path-free adoption. */
+  targetId?: string
+  /** Directory entry used to re-resolve an external target without accepting a renderer path. */
+  targetEntryName?: string
+  /** External entry identity could not be parsed; keep the row visible but disable management. */
+  externalError?: string
   /** 部署清单记录(null 表示外部 skill,清单无记录) */
   deployment: Deployment | null
   /** 当前目标路径是否存在 */

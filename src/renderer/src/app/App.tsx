@@ -1,26 +1,26 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  Sparkles, Wrench, Archive, Settings,
+  Sparkles, Wrench, RotateCcw, Settings,
 } from 'lucide-react'
 import { ToastProvider, useToast } from './Toast'
 import { createLatestRequestGate, completeMutation } from '../async-state'
 import { SkillsPage } from '../features/skills/SkillsPage'
 import { ToolsPage } from '../features/tools/ToolsPage'
-import { BackupsPage } from '../features/backups/BackupsPage'
-import { SourceArchivePage } from '../features/source-archive/SourceArchivePage'
+import { RecoveryPage } from '../features/recovery/RecoveryPage'
 import { SettingsPage } from '../features/settings/SettingsPage'
 
 type ScanResult = Awaited<ReturnType<typeof window.api.scan>>
 type SkillView = Awaited<ReturnType<typeof window.api.getSkills>>[number]
 type ToolWithDriftsView = Awaited<ReturnType<typeof window.api.getTools>>[number]
 
-type Page = 'skills' | 'tools' | 'source-archive' | 'backups' | 'settings'
+// #116:一级导航收拢为「技能 / 工具 / 恢复 / 设置」四个入口。
+// 来源归档与备份合并为恢复页的两个标签;工具相关配置集中在工具页。
+type Page = 'skills' | 'tools' | 'recovery' | 'settings'
 
 const NAV_ITEMS: { page: Page; label: string; icon: typeof Sparkles }[] = [
   { page: 'skills', label: '技能', icon: Sparkles },
   { page: 'tools', label: '工具', icon: Wrench },
-  { page: 'source-archive', label: '来源归档', icon: Archive },
-  { page: 'backups', label: '备份', icon: Archive },
+  { page: 'recovery', label: '恢复', icon: RotateCcw },
   { page: 'settings', label: '设置', icon: Settings },
 ]
 
@@ -106,7 +106,11 @@ function AppShell() {
         </ul>
       </nav>
 
-      <main className="flex-1 p-6 overflow-hidden">
+      <main
+        className={`flex-1 min-w-0 min-h-0 overflow-hidden ${
+          page === 'skills' ? 'p-0' : 'p-6'
+        }`}
+      >
         {page === 'skills' && (
             <SkillsPage
               skills={skills}
@@ -127,8 +131,7 @@ function AppShell() {
             onRefresh={refresh}
           />
         )}
-        {page === 'source-archive' && <SourceArchivePage />}
-        {page === 'backups' && <BackupsPage />}
+        {page === 'recovery' && <RecoveryPage />}
         {page === 'settings' && <SettingsPage />}
       </main>
     </div>

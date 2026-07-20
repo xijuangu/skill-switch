@@ -1,22 +1,25 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
-import type { DB } from '../db/database'
-import { adoptObservedDeployment, getAllDeployments, getDeploymentById, getDeploymentBySkillAndTargetId } from '../db/dao/deployments'
+import { runInTransaction, type DB } from '../db/database'
+import { adoptObservedDeployment, deleteDeploymentById, getAllDeployments, getDeploymentById, getDeploymentBySkillAndTargetId, upsertDeployment } from '../db/dao/deployments'
 import { getSourceById, getSourceByPath, getCanonicalSourceBySkillId, upsertSource } from '../db/dao/skill-sources'
-import { getSkillById } from '../db/dao/skills'
+import { getSkillById, getSkillByName, updatePrimarySourcePath, upsertSkill } from '../db/dao/skills'
 import type { DeployMode, DeployResult, Deployment, DeploymentMutationHooks, DriftStatus, PlatformInfo, RecoveryEvidence, ToolConfig } from '../types'
 import {
   executePreparedDeployment,
   inspectRecoveryEvidence,
   ModeDegradationRequiredError,
+  markerForTarget,
   RecoveryRequiredError,
   resolveActualMode,
   targetMatchesDeployment,
-  executePreparedUndeployment
+  executePreparedUndeployment,
+  writeMarker
 } from './deployer'
 import { hashDir } from './hash'
 import { assessSafeDeployTarget, resolveWithin, validateSkillName } from './path-safety'
+import { resolveSkillName } from './scanner'
 
 /**
  * Read-only target eligibility owned by the same module that authorizes deploy.
@@ -86,6 +89,24 @@ export type DeploymentMutationOutcome =
       message: string
     }
   | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
+
+export type ExternalManagementOutcome =
+  | {
+      status: 'completed'
+      deploymentId: number
+      skillId: number
+      skillName: string
+    }
+  | {
+      status: 'rejected'
+      reason: 'target-busy' | 'target-unavailable' | 'external-not-found' | 'external-invalid' | 'already-managed' | 'canonical-repository-unavailable' | 'canonical-conflict'
+      message: string
+    }
+  | { status: 'recovery-required'; message: string; evidence: RecoveryEvidence }
+
+export type DeploymentPreflightOutcome =
+  | { status: 'ready'; deploymentId: number }
+  | Extract<DeploymentMutationOutcome, { status: 'rejected' | 'recovery-required' }>
 
 export type TargetAdoptionOutcome =
   | { status: 'adopted'; deploymentId: number; candidateSourceId: number; candidateSourcePath: string }
@@ -183,8 +204,12 @@ export interface DeploymentFacade {
   confirm(confirmationId: string): Promise<DeploymentOutcome>
   redeploy(deploymentId: number): Promise<DeploymentRedeployOutcome>
   undeploy(deploymentId: number): Promise<DeploymentMutationOutcome>
+  preflightUndeploy(deploymentId: number): DeploymentPreflightOutcome
+  detachStaleTarget(deploymentId: number): DeploymentMutationOutcome
+  detachRegistration(deploymentId: number): DeploymentMutationOutcome
   adopt(deploymentId: number): Promise<DeploymentMutationOutcome>
   adoptTargetAsCandidate(deploymentId: number): Promise<TargetAdoptionOutcome>
+  manageExternal(request: { targetId: string; entryName: string }): Promise<ExternalManagementOutcome>
   getBulkAdoptionFacts(): BulkAdoptionPreviewFacts
   previewBulkAdoption(): BulkAdoptionPreviewOutcome
   confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome>
@@ -261,7 +286,7 @@ export function createDeploymentFacade(options: {
     message: '只有权威 Source 可以创建部署,请先整理为 Canonical Source。'
   }
 
-  async function withTargetLock<T extends DeploymentOutcome | DeploymentMutationOutcome | TargetAdoptionOutcome>(
+  async function withTargetLock<T extends DeploymentOutcome | DeploymentMutationOutcome | TargetAdoptionOutcome | ExternalManagementOutcome>(
     targetId: string,
     mutation: () => T
   ): Promise<T | TargetBusyOutcome> {
@@ -303,8 +328,8 @@ export function createDeploymentFacade(options: {
     if (!targetKnown) {
       return {
         skillId: skill.id, skillName: skill.name, targetTool: deployment.target_tool,
-        targetPath, deployment, targetExists: false, currentSourceHash: null,
-        currentTargetHash: null, kind: 'unresolved'
+        targetPath, deployment, targetExists: (() => { try { lstatSync(targetPath); return true } catch { return false } })(),
+        currentSourceHash: null, currentTargetHash: null, kind: 'target-unconfigured'
       }
     }
     const source = getSourceById(options.db, deployment.source_id)
@@ -668,6 +693,206 @@ export function createDeploymentFacade(options: {
     }) as Promise<TargetAdoptionOutcome>
   }
 
+  function manageExternal(request: { targetId: string; entryName: string }): Promise<ExternalManagementOutcome> {
+    const entryName = validateSkillName(request.entryName)
+    if (!options.canonicalRepositoryPath) {
+      return Promise.resolve({
+        status: 'rejected',
+        reason: 'canonical-repository-unavailable',
+        message: 'Canonical Repository 路径未配置，无法纳入管理。'
+      })
+    }
+    const matches = options.getRuntime().tools
+      .filter((tool) => tool.enabled)
+      .flatMap((tool) => tool.existingTargets.map((target) => ({ tool, target })))
+      .filter(({ target }) => target.id === request.targetId)
+    if (matches.length !== 1) {
+      return Promise.resolve({
+        status: 'rejected',
+        reason: 'target-unavailable',
+        message: 'Discovery Target 不存在或当前不可用。'
+      })
+    }
+    const { tool, target } = matches[0]
+    const targetPath = resolveWithin(target.path, entryName)
+    if (!pathEntryExists(targetPath)) {
+      return Promise.resolve({
+        status: 'rejected',
+        reason: 'external-not-found',
+        message: '外部 Skill 已不存在，请刷新后重试。'
+      })
+    }
+    if (getAllDeployments(options.db).some((deployment) => deployment.target_path === targetPath)) {
+      return Promise.resolve({
+        status: 'rejected',
+        reason: 'already-managed',
+        message: '该 Skill 已存在部署登记，请刷新后重试。'
+      })
+    }
+    return withTargetLock(request.targetId, () => {
+      let skillName: string
+      let sourceDirectory: string
+      try {
+        if (lstatSync(targetPath).isSymbolicLink()) {
+          return {
+            status: 'rejected',
+            reason: 'external-invalid',
+            message: '外部符号链接不能作为 copy 纳入管理，请先扫描为外部订阅后接管。'
+          }
+        }
+        sourceDirectory = realpathSync(targetPath)
+        if (!statSync(sourceDirectory).isDirectory()) {
+          throw new Error('外部 Skill 不是可读取的目录。')
+        }
+        skillName = resolveSkillName(sourceDirectory)
+      } catch (error) {
+        return {
+          status: 'rejected',
+          reason: 'external-invalid',
+          message: `无法读取外部 Skill 身份：${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+      const sourceHash = hashDir(sourceDirectory)
+      const existingSkill = getSkillByName(options.db, skillName)
+      const existingRelationship = existingSkill
+        ? getDeploymentBySkillAndTargetId(options.db, existingSkill.id, target.id)
+        : undefined
+      if (existingRelationship && existingRelationship.target_path !== targetPath) {
+        return {
+          status: 'rejected',
+          reason: 'already-managed',
+          message: '同一 Skill 在该 Discovery Target 已有另一条受管关系。'
+        }
+      }
+      const existingCanonical = existingSkill
+        ? getCanonicalSourceBySkillId(options.db, existingSkill.id)
+        : undefined
+      if (existingCanonical) {
+        const skill = existingSkill!
+        if (!existsSync(existingCanonical.path) || hashDir(existingCanonical.path) !== sourceHash) {
+          return {
+            status: 'rejected',
+            reason: 'canonical-conflict',
+            message: '同名权威 Source 与外部 Skill 内容不同，请先在技能页解决版本冲突。'
+          }
+        }
+        runInTransaction(options.db, () => {
+          upsertDeployment(
+            options.db,
+            skill.id,
+            tool.key,
+            targetPath,
+            'copy',
+            existingCanonical.path,
+            sourceHash,
+            { sourceId: existingCanonical.id, targetId: target.id }
+          )
+        })
+        const deployment = getDeploymentBySkillAndTargetId(options.db, skill.id, target.id)
+        if (!deployment) throw new Error('纳入管理后未建立 Deployment。')
+        return {
+          status: 'completed',
+          deploymentId: deployment.id,
+          skillId: skill.id,
+          skillName
+        }
+      }
+
+      const canonicalPath = resolveWithin(options.canonicalRepositoryPath!, skillName)
+      if (existsSync(canonicalPath)) {
+        return {
+          status: 'rejected',
+          reason: 'canonical-conflict',
+          message: '权威目录已存在但未能解析为 Source，请先在技能页处理。'
+        }
+      }
+      mkdirSync(options.canonicalRepositoryPath!, { recursive: true })
+      const operationId = createId()
+      const evidence = markerForTarget(targetPath, operationId)
+      evidence.stagingPath = resolveWithin(
+        options.canonicalRepositoryPath!,
+        `.skill-switch-staging-${skillName}-${operationId}`
+      )
+      evidence.rollbackPath = canonicalPath
+      const stage = evidence.stagingPath
+      const markerPath = evidence.markerPath
+      let canonicalCreated = false
+      let registrationCommitted = false
+      try {
+        cpSync(sourceDirectory, stage, { recursive: true, force: true })
+        writeMarker(evidence, 'prepared')
+        renameSync(stage, canonicalPath)
+        canonicalCreated = true
+        const skillId = runInTransaction(options.db, () => {
+          const id = upsertSkill(options.db, skillName, canonicalPath)
+          updatePrimarySourcePath(options.db, id, canonicalPath)
+          upsertSource(
+            options.db,
+            id,
+            canonicalPath,
+            sourceHash,
+            Math.floor(statSync(canonicalPath).mtimeMs),
+            'central-repo',
+            { role: 'canonical', origin: 'local' }
+          )
+          const canonicalSource = getSourceByPath(options.db, canonicalPath)
+          if (!canonicalSource) throw new Error('纳入管理后未找到权威 Source。')
+          upsertDeployment(
+            options.db,
+            id,
+            tool.key,
+            targetPath,
+            'copy',
+            canonicalPath,
+            sourceHash,
+            { sourceId: canonicalSource.id, targetId: target.id }
+          )
+          return id
+        })
+        registrationCommitted = true
+        const deployment = getDeploymentBySkillAndTargetId(options.db, skillId, target.id)
+        if (!deployment) throw new Error('纳入管理后未建立 Deployment。')
+        rmSync(markerPath, { force: true })
+        return {
+          status: 'completed',
+          deploymentId: deployment.id,
+          skillId,
+          skillName
+        }
+      } catch (error) {
+        if (registrationCommitted) {
+          try {
+            writeMarker(evidence, 'cleanup-required')
+          } catch {
+            // The marker or canonical directory remains as recovery evidence.
+          }
+          return {
+            status: 'recovery-required',
+            message: '纳入管理已写入，但清理恢复标记失败，请保留现场并重启后检查。',
+            evidence
+          }
+        }
+        try {
+          rmSync(stage, { recursive: true, force: true })
+          if (canonicalCreated) rmSync(canonicalPath, { recursive: true, force: true })
+          rmSync(markerPath, { force: true })
+        } catch (compensationError) {
+          try {
+            writeMarker(evidence, 'compensation-failed')
+          } catch {
+            // The staging/canonical artifact itself still remains as evidence.
+          }
+          return {
+            status: 'recovery-required',
+            message: `纳入管理失败且自动补偿未完成：${String(compensationError)}`,
+            evidence
+          }
+        }
+        throw error
+      }
+    }) as Promise<ExternalManagementOutcome>
+  }
+
   async function confirmBulkAdoption(confirmationId: string): Promise<BulkAdoptionConfirmationOutcome> {
     if (consumedBulkAdoptionConfirmations.has(confirmationId)) {
       return { status: 'rejected', reason: 'confirmation-used', message: '批量接管确认已使用，请重新预览。' }
@@ -788,6 +1013,54 @@ export function createDeploymentFacade(options: {
         return execute(prepared)
       })
     },
+    preflightUndeploy(deploymentId) {
+      const deployment = getDeploymentById(options.db, deploymentId)
+      if (!deployment) {
+        return { status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' }
+      }
+      if (deployment.management === 'observed') {
+        return { status: 'rejected', reason: 'observed-read-only', message: '外部订阅尚未接管，拒绝取消部署。' }
+      }
+      if (deployment.target_id == null || deployment.target_path == null) {
+        return { status: 'rejected', reason: 'unresolved', message: '部署目标身份尚未解析，拒绝执行文件系统操作。' }
+      }
+      if (lockedTargets.has(deployment.target_id)) {
+        return { status: 'rejected', reason: 'target-busy', message: '目标正在执行其他部署操作，请稍后重试。' }
+      }
+      if (canonicalSourceFrozen(deployment.skill_id)) {
+        return CANONICAL_SOURCE_UNAVAILABLE
+      }
+      const recovery = inspectRecoveryEvidence(deployment.target_path)
+      if (recovery) {
+        return { status: 'recovery-required', message: '检测到未完成的部署操作，请保留现场并人工选择恢复方向。', evidence: recovery }
+      }
+      return { status: 'ready', deploymentId }
+    },
+    detachStaleTarget(deploymentId) {
+      const deployment = getDeploymentById(options.db, deploymentId)
+      if (!deployment) {
+        return { status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' }
+      }
+      if (deployment.target_id == null) {
+        return { status: 'rejected', reason: 'unresolved', message: '部署目标身份尚未解析。' }
+      }
+      const configured = options.getRuntime().tools.some((tool) =>
+        tool.enabled && tool.existingTargets.some((target) => target.id === deployment.target_id)
+      )
+      if (configured) {
+        return { status: 'rejected', reason: 'observation-stale', message: '目标已重新配置，请刷新后重试。' }
+      }
+      deleteDeploymentById(options.db, deploymentId)
+      return { status: 'completed', deploymentId }
+    },
+    detachRegistration(deploymentId) {
+      const deployment = getDeploymentById(options.db, deploymentId)
+      if (!deployment) {
+        return { status: 'rejected', reason: 'deployment-not-found', message: '部署记录不存在。' }
+      }
+      deleteDeploymentById(options.db, deploymentId)
+      return { status: 'completed', deploymentId }
+    },
     undeploy(deploymentId) {
       const deployment = getDeploymentById(options.db, deploymentId)
       if (!deployment) {
@@ -817,6 +1090,7 @@ export function createDeploymentFacade(options: {
       }) as Promise<DeploymentMutationOutcome>
     },
     adopt,
-    adoptTargetAsCandidate
+    adoptTargetAsCandidate,
+    manageExternal
   }
 }

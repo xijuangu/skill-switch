@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import App from '../../src/renderer/src/app/App'
 import { ToastProvider } from '../../src/renderer/src/app/Toast'
 import { SkillsPage } from '../../src/renderer/src/features/skills/SkillsPage'
+import { BulkSkillActionsDialog, DeployDialogContent, InstallDialogContent, RemoveRegistryDialog } from '../../src/renderer/src/features/skills/dialogs'
 import type { SkillWithConflictView } from '../../src/preload'
 
 // 回归 #52:App 必须在 ToastProvider 之内消费 useToast,
@@ -53,12 +54,17 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     deploymentConfirm: vi.fn(),
     redeploy: vi.fn(),
     undeploy: vi.fn(),
+    bulkDeploy: vi.fn(),
+    bulkConfirmDeploy: vi.fn(),
+    bulkUndeploy: vi.fn(),
+    bulkRemoveFromRegistry: vi.fn(),
     adoptDeployment: vi.fn(),
     getBulkAdoptionFacts: vi.fn().mockResolvedValue({ total: 0, tools: [] }),
     previewBulkAdoption: vi.fn().mockResolvedValue({ status: 'empty', facts: { total: 0, tools: [] } }),
     confirmBulkAdoption: vi.fn(),
     getTools: vi.fn().mockResolvedValue([]),
     removeFromManifest: vi.fn(),
+    detachStaleDeployment: vi.fn(),
     getDeploymentsForSkill: vi.fn().mockResolvedValue([]),
     viewSkillMd: vi.fn(),
     removeFromRegistry: vi.fn(),
@@ -67,6 +73,13 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     installFromLocalDir: vi.fn(),
     selectZipFile: vi.fn(),
     selectLocalDir: vi.fn(),
+    bulkDetachDeployments: vi.fn(),
+    bulkManageExternalSkills: vi.fn(),
+    checkForUpdates: vi.fn().mockResolvedValue({
+      status: 'up-to-date',
+      currentVersion: '1.0.0',
+      latestVersion: '1.0.0'
+    }),
     ...overrides,
   }
   Object.defineProperty(window, 'api', { value: api, writable: true, configurable: true })
@@ -74,6 +87,408 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
 }
 
 describe('App (integration)', () => {
+  it('explains registry removal in user-visible actions and recovery limits', () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.name = '.system'
+
+    render(
+      <RemoveRegistryDialog
+        skill={skill}
+        busy={false}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '这会彻底删除 skill-switch 对「.system」的管理记录'
+    )
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '备份权威源码目录（如存在）'
+    )
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '若仍有未接管的外部订阅，操作会被拒绝'
+    )
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '备份仅可用于恢复文件内容，原部署关系需要重新建立'
+    )
+  })
+
+  it('defaults a new deployment request to symlink while still allowing copy', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'agents-user',
+        targetTool: 'agents',
+        displayName: 'Agents',
+        eligible: true,
+        reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{
+          key: 'agents-user',
+          status: 'completed',
+          outcome: {
+            status: 'completed',
+            deploymentId: 1,
+            result: {
+              action: 'created',
+              mode: 'symlink',
+              targetDisplayName: 'Agents',
+              degradedFrom: null,
+              degradeReason: null
+            }
+          }
+        }]
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'copy' })).not.toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalledWith([
+      { key: 'agents-user', sourceId: skill.sources[0].id, targetId: 'agents-user', requestedMode: 'symlink' }
+    ]))
+  })
+
+  it('keeps installation open as a repeatable deployment step until the user closes it', async () => {
+    const installed = buildFakeSkills(1)[0]
+    installed.name = 'local-demo'
+    installed.sources[0].source_role = 'canonical'
+    installed.sources[0].source_type = 'central-repo'
+    installed.sources[0].path = '/canonical/local-demo'
+    installed.conflict.primarySource = installed.sources[0]
+    installed.deployments = []
+    const installResult = {
+      skillName: 'local-demo',
+      skillId: installed.id,
+      sourcePath: '/canonical/local-demo',
+      sourceType: 'central-repo' as const,
+      repoUrl: null,
+      commitSha: null,
+      overwritten: false
+    }
+    const api = mockWindowApi({
+      selectLocalDir: vi.fn().mockResolvedValue('/imports/local-demo'),
+      installFromLocalDir: vi.fn().mockResolvedValue(installResult),
+      getSkills: vi.fn().mockResolvedValue([installed]),
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex',
+        eligible: true, reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{
+          key: 'codex-user',
+          status: 'completed',
+          outcome: {
+            status: 'completed',
+            deploymentId: 1,
+            result: {
+              action: 'created', mode: 'symlink', targetDisplayName: 'Codex',
+              degradedFrom: null, degradeReason: null
+            }
+          }
+        }]
+      })
+    })
+    const onDone = vi.fn().mockResolvedValue(undefined)
+
+    render(
+      <InstallDialogContent
+        initialTab="local-dir"
+        onInstalled={onDone}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: '选择目录…' }))
+    await userEvent.click(screen.getByRole('button', { name: '安装' }))
+
+    expect(await screen.findByText(/安装完成，可继续部署到多个工具/)).toBeInTheDocument()
+    expect(onDone).toHaveBeenCalledWith(installResult)
+    expect(screen.getByRole('radio', { name: 'symlink' })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalled())
+    expect(screen.getByText(/安装完成，可继续部署到多个工具/)).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('shows per-target status badges in the deploy matrix', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = [{
+      id: 1, skill_id: skill.id, target_tool: 'trae', target_path: '/trae/skill',
+      mode: 'symlink' as const, management: 'managed' as const,
+      source_path: '/repo/skill', deployed_at: new Date().toISOString(),
+      source_hash_at_deploy: 'hash0', status: 'normal' as const, target_id: 'trae-user',
+      source_id: skill.sources[0].id
+    }]
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([
+        { targetId: 'trae-user', targetTool: 'trae', displayName: 'Trae', eligible: true, reason: null },
+        { targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex', eligible: true, reason: null },
+        { targetId: 'cursor-user', targetTool: 'cursor', displayName: 'Cursor', eligible: false, reason: '已有外部订阅' }
+      ]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{
+          key: 'codex-user',
+          status: 'completed',
+          outcome: { status: 'completed', deploymentId: 2, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } }
+        }]
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeInTheDocument())
+    expect(screen.getByRole('checkbox', { name: 'Trae' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).toBeDisabled()
+    expect(screen.getByText('已部署')).toBeInTheDocument()
+    expect(screen.getAllByText('未部署')).toHaveLength(2)
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalled())
+    expect(screen.getAllByText('已部署')).toHaveLength(2)
+  })
+
+  it('keeps the deploy dialog open after a successful deployment and allows continuing', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
+    const onDone = vi.fn().mockResolvedValue(undefined)
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([
+        { targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex', eligible: true, reason: null },
+        { targetId: 'cursor-user', targetTool: 'cursor', displayName: 'Cursor', eligible: true, reason: null }
+      ]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 2,
+        completed: 2,
+        failed: 0,
+        items: [
+          { key: 'codex-user', status: 'completed', outcome: { status: 'completed', deploymentId: 1, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } } },
+          { key: 'cursor-user', status: 'completed', outcome: { status: 'completed', deploymentId: 2, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Cursor' } } }
+        ]
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={onDone} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked())
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('完成 2，失败 0')).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ action: 'created', targetDisplayName: 'Codex' }))
+    expect(onDone).not.toHaveBeenCalledWith(null)
+    expect(screen.getByRole('checkbox', { name: 'Codex' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).not.toBeChecked()
+  })
+
+  it('allows retrying failed targets after a batch deploy', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([
+        { targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex', eligible: true, reason: null },
+        { targetId: 'cursor-user', targetTool: 'cursor', displayName: 'Cursor', eligible: true, reason: null }
+      ]),
+      bulkDeploy: vi.fn()
+        .mockResolvedValueOnce({
+          total: 2,
+          completed: 1,
+          failed: 1,
+          items: [
+            { key: 'codex-user', status: 'completed', outcome: { status: 'completed', deploymentId: 1, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } } },
+            { key: 'cursor-user', status: 'rejected', message: 'target busy' }
+          ]
+        })
+        .mockResolvedValueOnce({
+          total: 1,
+          completed: 1,
+          failed: 0,
+          items: [
+            { key: 'cursor-user', status: 'completed', outcome: { status: 'completed', deploymentId: 2, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Cursor' } } }
+          ]
+        })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked())
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('完成 1，失败 1')).toBeInTheDocument()
+    expect(screen.getByText(/target busy/)).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Codex' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Cursor' })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('完成 2，失败 0')).toBeInTheDocument()
+  })
+
+  it('completes confirmation-required targets via bulkConfirmDeploy in the single deploy matrix', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    skill.deployments = []
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user', targetTool: 'codex', displayName: 'Codex',
+        eligible: true, reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 0,
+        failed: 1,
+        items: [{
+          key: 'codex-user',
+          status: 'confirmation-required',
+          outcome: {
+            status: 'confirmation-required',
+            confirmationId: 'confirm-1',
+            expiresAt: Date.now() + 60_000,
+            facts: {
+              skillName: skill.name,
+              targetDisplayName: 'Codex',
+              reasons: ['external-overwrite'],
+              requestedMode: 'symlink',
+              actualMode: 'symlink',
+              backup: { required: true, directory: '/backups' }
+            }
+          }
+        }]
+      }),
+      bulkConfirmDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{ key: 'codex-user', status: 'completed', outcome: { status: 'completed', deploymentId: 1, result: { action: 'created', mode: 'symlink', targetDisplayName: 'Codex' } } }]
+      })
+    })
+
+    render(<DeployDialogContent skill={skill} sourceId={skill.sources[0].id} onDone={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Codex' })).toBeChecked())
+    await userEvent.click(screen.getByRole('button', { name: '部署' }))
+    expect(await screen.findByText('将覆盖目标中不受管理的现有内容')).toBeInTheDocument()
+    expect(screen.getByText('备份：/backups')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '确认并继续' }))
+    await waitFor(() => expect(api.bulkConfirmDeploy).toHaveBeenCalledWith([
+      { key: 'codex-user', confirmationId: 'confirm-1' }
+    ]))
+    expect(await screen.findByText('完成 1，失败 0')).toBeInTheDocument()
+  })
+
+  it('runs selected skill-target pairs as a symlink batch and keeps per-item results visible', async () => {
+    const skills = buildFakeSkills(2)
+    skills.forEach((skill) => {
+      skill.sources[0].source_role = 'canonical'
+      skill.conflict.primarySource = skill.sources[0]
+    })
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user',
+        targetTool: 'codex',
+        displayName: 'Codex',
+        eligible: true,
+        reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 2,
+        completed: 1,
+        failed: 1,
+        items: [
+          { key: `${skills[0].id}:codex-user`, status: 'completed' },
+          { key: `${skills[1].id}:codex-user`, status: 'rejected', message: 'target busy' }
+        ]
+      })
+    })
+
+    const view = render(<BulkSkillActionsDialog skills={skills} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
+    await waitFor(() => expect(screen.getAllByRole('checkbox', { name: /Codex/ })).toHaveLength(2))
+    await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
+
+    await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalledWith([
+      { key: `${skills[0].id}:codex-user`, sourceId: skills[0].sources[0].id, targetId: 'codex-user', requestedMode: 'symlink' },
+      { key: `${skills[1].id}:codex-user`, sourceId: skills[1].sources[0].id, targetId: 'codex-user', requestedMode: 'symlink' }
+    ]))
+    expect(await screen.findByText('完成 1，失败 1')).toBeInTheDocument()
+    expect(screen.getByText(/target busy/)).toBeInTheDocument()
+    view.rerender(<BulkSkillActionsDialog skills={skills.map((skill) => ({ ...skill }))} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByText('完成 1，失败 1')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: `${skills[0].name} → Codex` })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: `${skills[1].name} → Codex` })).toBeChecked()
+  })
+
+  it('completes confirmation-required items inside the batch deployment flow', async () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.sources[0].source_role = 'canonical'
+    skill.conflict.primarySource = skill.sources[0]
+    const key = `${skill.id}:codex-user`
+    const api = mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([{
+        targetId: 'codex-user',
+        targetTool: 'codex',
+        displayName: 'Codex',
+        eligible: true,
+        reason: null
+      }]),
+      bulkDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 0,
+        failed: 1,
+        items: [{
+          key,
+          status: 'confirmation-required',
+          outcome: {
+            status: 'confirmation-required',
+            confirmationId: 'confirm-1',
+            expiresAt: Date.now() + 60_000,
+            facts: {
+              skillName: skill.name,
+              targetDisplayName: 'Codex',
+              reasons: ['external-overwrite'],
+              requestedMode: 'symlink',
+              actualMode: 'symlink',
+              backup: { required: true, directory: '/backups' }
+            }
+          }
+        }]
+      }),
+      bulkConfirmDeploy: vi.fn().mockResolvedValue({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        items: [{ key, status: 'completed' }]
+      })
+    })
+
+    render(<BulkSkillActionsDialog skills={[skill]} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    await screen.findByRole('checkbox', { name: `${skill.name} → Codex` })
+    await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
+    expect(await screen.findByText('将覆盖目标中不受管理的现有内容')).toBeInTheDocument()
+    expect(screen.getByText('备份：/backups')).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: '确认并继续' }))
+
+    await waitFor(() => expect(api.bulkConfirmDeploy).toHaveBeenCalledWith([
+      { key, confirmationId: 'confirm-1' }
+    ]))
+    expect(await screen.findByText('完成 1，失败 0')).toBeInTheDocument()
+  })
+
   it('mounts without throwing (regression: white screen from useToast outside ToastProvider)', async () => {
     mockWindowApi()
     // 不应用 catch 兜底,抛错即测试失败
@@ -82,8 +497,11 @@ describe('App (integration)', () => {
     expect(screen.getByText('skill-switch')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '技能' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '工具' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '备份' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '恢复' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '设置' })).toBeInTheDocument()
+    // #116: 来源归档与备份合并到恢复页的标签, 不再是并列一级入口
+    expect(screen.queryByRole('button', { name: '来源归档' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '备份' })).not.toBeInTheDocument()
     // 首次 refresh 触发
     await waitFor(() => {
       expect(window.api.getSkills).toHaveBeenCalledTimes(1)
@@ -96,7 +514,7 @@ describe('App (integration)', () => {
     render(<App />)
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     await userEvent.click(screen.getByRole('button', { name: '工具' }))
-    await userEvent.click(screen.getByRole('button', { name: '来源归档' }))
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
     await userEvent.click(screen.getByRole('button', { name: '技能' }))
     // 切回 skills 时不抛错即可
     expect(screen.getByRole('button', { name: '技能' })).toBeInTheDocument()
@@ -129,14 +547,20 @@ describe('App (integration)', () => {
       })
     })
     render(<App />)
-    await userEvent.click(screen.getByRole('button', { name: '来源归档' }))
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
 
     expect(await screen.findByText('demo')).toBeInTheDocument()
+    // #116: UUID/哈希/完整路径默认隐藏, 需要展开技术详情
+    expect(screen.queryByText('/imports/demo')).not.toBeInTheDocument()
+    expect(screen.queryByText('/imports/demo-copy')).not.toBeInTheDocument()
+    expect(screen.queryByText('/tools/codex/demo')).not.toBeInTheDocument()
+    expect(screen.getByText('归档占用：2 KB')).toBeInTheDocument()
+    expect(screen.getByText('可恢复')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '技术详情' }))
     expect(screen.getByText('/imports/demo')).toBeInTheDocument()
     expect(screen.getByText('/imports/demo-copy')).toBeInTheDocument()
     expect(screen.getByText('/tools/codex/demo')).toBeInTheDocument()
-    expect(screen.getByText('归档占用：2 KB')).toBeInTheDocument()
-    expect(screen.getByText('可恢复')).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: '永久清理' }))
     await userEvent.click(screen.getByRole('button', { name: '预览清理' }))
@@ -146,7 +570,7 @@ describe('App (integration)', () => {
     expect(api.confirmSourceArchivePurge).toHaveBeenCalledWith('purge-88')
   })
 
-  it('shows the fixed Canonical Repository separately from Candidate Source directories', async () => {
+  it('keeps the fixed Canonical Repository in 设置 and Candidate Source directories in 工具 (regression: #116)', async () => {
     mockWindowApi({
       getSkillLibrary: vi.fn().mockResolvedValue({
         canonicalRepository: { path: '/canonical/skills' },
@@ -161,13 +585,38 @@ describe('App (integration)', () => {
       }])
     })
     render(<App />)
+    // #116: 设置页只保留全局偏好与平台能力, 候选来源目录已迁至工具页
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     expect(await screen.findByText('权威源码库')).toBeInTheDocument()
     expect(screen.getByText('/canonical/skills')).toBeInTheDocument()
-    expect(screen.getByText('候选来源目录')).toBeInTheDocument()
+    expect(screen.getByText('skill-switch v1.0.0')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '检查更新' })).toBeInTheDocument()
+    expect(screen.queryByText('候选来源目录')).not.toBeInTheDocument()
+    expect(screen.queryByText('/imports/team-skills')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    expect(await screen.findByText('发现目录')).toBeInTheDocument()
     expect(screen.getByText('/imports/team-skills')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重新扫描' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '解除登记' })).toBeInTheDocument()
+  })
+
+  it('checks for updates from Settings and reports that a newer release opened on GitHub', async () => {
+    const api = mockWindowApi({
+      checkForUpdates: vi.fn().mockResolvedValue({
+        status: 'update-available',
+        currentVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        releaseUrl: 'https://github.com/xijuangu/skill-switch/releases/tag/v1.1.0'
+      })
+    })
+    render(<App />)
+
+    await userEvent.click(screen.getByRole('button', { name: '设置' }))
+    await userEvent.click(await screen.findByRole('button', { name: '检查更新' }))
+
+    await waitFor(() => expect(api.checkForUpdates).toHaveBeenCalledWith())
+    expect(screen.getByText('发现新版本 v1.1.0，已在浏览器打开 GitHub。')).toBeInTheDocument()
   })
 
   it('shows observed subscriptions as read-only with an explicit adopt action', async () => {
@@ -213,6 +662,43 @@ describe('App (integration)', () => {
     await waitFor(() => expect(api.adoptDeployment).toHaveBeenCalledWith(9))
     await waitFor(() => expect(screen.queryByRole('button', { name: '一键接管 1 个外部订阅' })).not.toBeInTheDocument())
     expect(api.getBulkAdoptionFacts).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows a stale observed relation for a removed Discovery Target to be detached', async () => {
+    const api = mockWindowApi({
+      detachStaleDeployment: vi.fn().mockResolvedValue({ status: 'completed', deploymentId: 29 }),
+      getTools: vi.fn().mockResolvedValue([{
+        config: {
+          key: 'trae', displayName: 'TRAE', enabled: true,
+          paths: ['/trae-cn'], existingPaths: ['/trae-cn'],
+          targets: [{ id: 'trae-current', path: '/trae-cn' }],
+          existingTargets: [{ id: 'trae-current', path: '/trae-cn' }],
+          isCustom: false, exists: true
+        },
+        drifts: [{
+          skillId: 33, skillName: 'find-skills', targetTool: 'trae',
+          targetPath: '/trae/find-skills', targetExists: false,
+          currentSourceHash: null, currentTargetHash: null, kind: 'target-unconfigured',
+          deployment: {
+            id: 29, skill_id: 33, target_tool: 'trae', target_path: '/trae/find-skills',
+            mode: 'symlink', management: 'observed', source_path: '/agents/find-skills',
+            source_id: 37, target_id: 'trae-removed', deployed_at: '2026-07-15T00:00:00.000Z',
+            source_hash_at_deploy: 'hash'
+          }
+        }]
+      }]) as Window['api']['getTools']
+    })
+
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /TRAE/ }))
+
+    expect(screen.getByText('目标已移除')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '接管' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '解除登记' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('/trae/find-skills')
+    await userEvent.click(screen.getByRole('button', { name: '确认解除登记' }))
+    await waitFor(() => expect(api.detachStaleDeployment).toHaveBeenCalledWith(29))
   })
 
   it('previews and confirms every observed subscription globally, then retries only failures', async () => {
@@ -317,6 +803,147 @@ describe('App (integration)', () => {
     expect(await screen.findByRole('button', { name: '一键接管 3 个外部订阅' })).toBeInTheDocument()
   })
 
+  it('lets users manage one external Skill or select several for bulk management', async () => {
+    const externalDrift = (skillName: string, targetId: string) => ({
+      skillId: -1,
+      skillName,
+      targetTool: 'agents',
+      targetId,
+      targetEntryName: skillName,
+      targetPath: `/agents/${skillName}`,
+      targetExists: true,
+      currentSourceHash: null,
+      currentTargetHash: null,
+      kind: 'external' as const,
+      deployment: null
+    })
+    const api = mockWindowApi({
+      getTools: vi.fn().mockResolvedValue([{
+        config: {
+          key: 'agents', displayName: 'Agents', enabled: true,
+          paths: ['/agents'], existingPaths: ['/agents'],
+          targets: [{ id: 'agents-user', path: '/agents' }],
+          existingTargets: [{ id: 'agents-user', path: '/agents' }],
+          isCustom: false, exists: true
+        },
+        drifts: [
+          externalDrift('one', 'agents-user'),
+          externalDrift('two', 'agents-user')
+        ]
+      }]) as Window['api']['getTools'],
+      bulkManageExternalSkills: vi.fn().mockResolvedValue({
+        total: 2,
+        completed: 2,
+        failed: 0,
+        items: [
+          { key: 'external:agents-user:one', status: 'completed' },
+          { key: 'external:agents-user:two', status: 'completed' }
+        ]
+      })
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+
+    expect(screen.getAllByRole('button', { name: '纳入管理' })).toHaveLength(2)
+    await userEvent.click(screen.getByRole('checkbox', { name: '选择外部 Skill one' }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '选择外部 Skill two' }))
+    await userEvent.click(screen.getByRole('button', { name: '批量纳入管理 (2)' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('把 2 个外部 Skill 纳入管理')
+    await userEvent.click(screen.getByRole('button', { name: '确认纳入管理' }))
+
+    await waitFor(() => expect(api.bulkManageExternalSkills).toHaveBeenCalledWith([
+      { key: 'external:agents-user:one', targetId: 'agents-user', entryName: 'one' },
+      { key: 'external:agents-user:two', targetId: 'agents-user', entryName: 'two' }
+    ]))
+  })
+
+  it('keeps an external Skill with an invalid identity visible but not manageable', async () => {
+    mockWindowApi({
+      getTools: vi.fn().mockResolvedValue([{
+        config: {
+          key: 'agents', displayName: 'Agents', enabled: true,
+          paths: ['/agents'], existingPaths: ['/agents'],
+          targets: [{ id: 'agents-user', path: '/agents' }],
+          existingTargets: [{ id: 'agents-user', path: '/agents' }],
+          isCustom: false, exists: true
+        },
+        drifts: [{
+          skillId: -1,
+          skillName: 'invalid-external',
+          targetTool: 'agents',
+          targetId: 'agents-user',
+          targetEntryName: 'invalid-external',
+          targetPath: '/agents/invalid-external',
+          targetExists: true,
+          currentSourceHash: null,
+          currentTargetHash: null,
+          kind: 'external',
+          deployment: null,
+          externalError: '无法解析 Skill 身份：Skill name is invalid.'
+        }]
+      }]) as Window['api']['getTools']
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+
+    expect(screen.getByText('invalid-external')).toBeInTheDocument()
+    expect(screen.getByText('无法纳入管理')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '纳入管理' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: '选择外部 Skill invalid-external' })).not.toBeInTheDocument()
+  })
+
+  it('supports bulk undeploy and bulk registration detach in deployment relationships', async () => {
+    const managedDrift = (id: number, skillName: string) => ({
+      skillId: id,
+      skillName,
+      targetTool: 'agents',
+      targetId: 'agents-user',
+      targetPath: `/agents/${skillName}`,
+      targetExists: true,
+      currentSourceHash: 'hash',
+      currentTargetHash: null,
+      kind: 'normal' as const,
+      deployment: {
+        id, skill_id: id, target_tool: 'agents', target_path: `/agents/${skillName}`,
+        mode: 'symlink' as const, management: 'managed' as const,
+        source_path: `/canonical/${skillName}`, source_id: id, target_id: 'agents-user',
+        deployed_at: '2026-07-20T00:00:00.000Z', source_hash_at_deploy: 'hash'
+      }
+    })
+    const api = mockWindowApi({
+      getTools: vi.fn().mockResolvedValue([{
+        config: {
+          key: 'agents', displayName: 'Agents', enabled: true,
+          paths: ['/agents'], existingPaths: ['/agents'],
+          targets: [{ id: 'agents-user', path: '/agents' }],
+          existingTargets: [{ id: 'agents-user', path: '/agents' }],
+          isCustom: false, exists: true
+        },
+        drifts: [managedDrift(11, 'one'), managedDrift(12, 'two')]
+      }]) as Window['api']['getTools'],
+      bulkUndeploy: vi.fn().mockResolvedValue({
+        total: 2, completed: 2, failed: 0,
+        items: [{ key: 'deployment:11', status: 'completed' }, { key: 'deployment:12', status: 'completed' }]
+      })
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '选择部署 one' }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '选择部署 two' }))
+
+    expect(screen.getByRole('button', { name: '批量解除登记 (2)' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '批量取消部署 (2)' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认批量取消部署' }))
+
+    await waitFor(() => expect(api.bulkUndeploy).toHaveBeenCalledWith([
+      { key: 'deployment:11', deploymentId: 11 },
+      { key: 'deployment:12', deploymentId: 12 }
+    ]))
+  })
+
   it('renders empty state on Skills page when no skills', async () => {
     mockWindowApi()
     render(<App />)
@@ -337,6 +964,135 @@ describe('App (integration)', () => {
       expect(screen.getByText('加载失败')).toBeInTheDocument()
     })
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+  })
+
+  // #116: 恢复页与工具页信息架构回归
+  it('switches between 来源归档 and 备份 tabs on the Recovery page', async () => {
+    mockWindowApi()
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    // 默认显示来源归档 tab
+    const archiveTab = await screen.findByRole('tab', { name: '来源归档' })
+    expect(archiveTab).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: '备份' })).toHaveAttribute('aria-selected', 'false')
+    expect(await screen.findByText('暂无来源归档')).toBeInTheDocument()
+    // 切到备份 tab
+    await userEvent.click(screen.getByRole('tab', { name: '备份' }))
+    expect(screen.getByRole('tab', { name: '来源归档' })).toHaveAttribute('aria-selected', 'false')
+    expect(screen.getByRole('tab', { name: '备份' })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByText('暂无备份')).toBeInTheDocument()
+  })
+
+  it('shows recovery state badges and recommendations on source archive batches', async () => {
+    const recoverableBatch = {
+      id: 'batch-r', status: 'completed' as const, phase: null,
+      items: [{
+        skillId: 1, skillName: 'demo', canonicalPath: '/canonical/demo',
+        archivePath: '/archive/batch-r/demo', originalPath: '/imports/demo',
+        originalPaths: ['/imports/demo'], originalHash: 'hash-r',
+        originalHashes: ['hash-r'], archivedToolPaths: ['/tools/codex/demo']
+      }, {
+        skillId: 4, skillName: 'demo-two', canonicalPath: '/canonical/demo-two',
+        archivePath: '/archive/batch-r/demo-two', originalPath: '/imports/demo-two',
+        originalPaths: ['/imports/demo-two'], originalHash: 'hash-r-two',
+        originalHashes: ['hash-r-two'], archivedToolPaths: []
+      }],
+      archive: { sizeBytes: 1024, recoverable: true, purgeable: true, purgedAt: null, recoveryBlockedReason: null },
+      createdAt: '2026-07-16T00:00:00.000Z', completedAt: '2026-07-16T00:01:00.000Z',
+      undoneAt: null, failureMessage: null, recoveryDirection: null,
+      evidenceSummary: { itemCount: 1, phases: [] }
+    }
+    const cleanedBatch = {
+      id: 'batch-c', status: 'completed' as const, phase: null,
+      items: [{
+        skillId: 2, skillName: 'cleaned-skill', canonicalPath: '/canonical/cleaned',
+        archivePath: '/archive/batch-c/cleaned', originalPath: '/imports/cleaned',
+        originalPaths: ['/imports/cleaned'], originalHash: 'hash-c',
+        originalHashes: ['hash-c'], archivedToolPaths: []
+      }],
+      archive: { sizeBytes: 1024, recoverable: false, purgeable: false, purgedAt: '2026-07-16T02:00:00.000Z', recoveryBlockedReason: null },
+      createdAt: '2026-07-15T00:00:00.000Z', completedAt: '2026-07-15T00:01:00.000Z',
+      undoneAt: null, failureMessage: null, recoveryDirection: null,
+      evidenceSummary: { itemCount: 1, phases: [] }
+    }
+    const needsHandlingBatch = {
+      id: 'batch-n', status: 'recovery-required' as const, phase: null,
+      items: [{
+        skillId: 3, skillName: 'pending-skill', canonicalPath: '/canonical/pending',
+        archivePath: '/archive/batch-n/pending', originalPath: '/imports/pending',
+        originalPaths: ['/imports/pending'], originalHash: 'hash-n',
+        originalHashes: ['hash-n'], archivedToolPaths: []
+      }],
+      archive: { sizeBytes: 1024, recoverable: false, purgeable: true, purgedAt: null, recoveryBlockedReason: '部分归档载荷缺失' },
+      createdAt: '2026-07-14T00:00:00.000Z', completedAt: '2026-07-14T00:01:00.000Z',
+      undoneAt: null, failureMessage: null, recoveryDirection: null,
+      evidenceSummary: { itemCount: 1, phases: [] }
+    }
+    mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [],
+        consolidationBatches: [recoverableBatch, cleanedBatch, needsHandlingBatch]
+      })
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    // 三种恢复状态分别可见
+    expect(await screen.findByText('可恢复')).toBeInTheDocument()
+    expect(screen.getByText('已清理')).toBeInTheDocument()
+    expect(screen.getByText('需要处理')).toBeInTheDocument()
+    // 建议动作文案可见
+    expect(screen.getByText(/可恢复原候选来源与旧工具入口/)).toBeInTheDocument()
+    expect(screen.getByText(/归档已永久清理/)).toBeInTheDocument()
+    expect(screen.getByText(/请检查批次状态/)).toBeInTheDocument()
+    // 涉及 Skill 名字默认可见
+    expect(screen.getByText('demo')).toBeInTheDocument()
+    expect(screen.getByText('cleaned-skill')).toBeInTheDocument()
+    expect(screen.getByText('pending-skill')).toBeInTheDocument()
+    expect(screen.getByText((_, element) =>
+      element?.textContent === '涉及 Skill：demo、demo-two'
+    )).toBeInTheDocument()
+  })
+
+  it('hides backupId/hash/path in expandable technical details on the Recovery 备份 tab', async () => {
+    mockWindowApi({
+      listBackups: vi.fn().mockResolvedValue([{
+        backupId: 'backup-uuid-123', skillName: 'demo', targetTool: 'codex',
+        sourcePath: '/canonical/demo', sourceHash: 'hash-abc-def',
+        backupTime: '2026-07-16T00:00:00.000Z'
+      }])
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    await userEvent.click(await screen.findByRole('tab', { name: '备份' }))
+    // 备份条目可见, 但 UUID/哈希/路径默认隐藏
+    expect(await screen.findByText('demo')).toBeInTheDocument()
+    expect(screen.getByText('codex')).toBeInTheDocument()
+    expect(screen.queryByText('backup-uuid-123')).not.toBeInTheDocument()
+    expect(screen.queryByText('hash-abc-def')).not.toBeInTheDocument()
+    expect(screen.queryByText('/canonical/demo')).not.toBeInTheDocument()
+    // 展开技术详情后可见
+    await userEvent.click(screen.getByRole('button', { name: '技术详情' }))
+    expect(screen.getByText('backup-uuid-123')).toBeInTheDocument()
+    expect(screen.getByText('hash-abc-def')).toBeInTheDocument()
+    expect(screen.getByText('/canonical/demo')).toBeInTheDocument()
+  })
+
+  it('shows empty states on the Recovery page tabs when no data', async () => {
+    mockWindowApi()
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+    expect(await screen.findByText('暂无来源归档')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('tab', { name: '备份' }))
+    expect(await screen.findByText('暂无备份')).toBeInTheDocument()
+  })
+
+  it('shows empty states on the Tools page when no tools, source roots, or deployments', async () => {
+    mockWindowApi()
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    expect(await screen.findByText('尚未配置任何工具。')).toBeInTheDocument()
+    expect(screen.getByText('尚未登记候选来源目录。')).toBeInTheDocument()
+    expect(screen.getByText('暂无部署关系')).toBeInTheDocument()
   })
 })
 // #56:1000 条假数据搜索/筛选/选择功能与性能冒烟(不断言毫秒阈值,只确认可用)
@@ -443,7 +1199,7 @@ describe('SkillsPage 1000-row smoke (#56)', () => {
     expect(screen.queryByText('skill-0001')).not.toBeInTheDocument()
   })
 
-  it('distinguishes the Canonical Source from Candidate Sources', () => {
+  it('distinguishes sources and shows the complete path first when expanded', async () => {
     const skill = buildFakeSkills(1)[0]
     skill.sources = [
       {
@@ -486,6 +1242,16 @@ describe('SkillsPage 1000-row smoke (#56)', () => {
 
     expect(screen.getByText('权威来源')).toBeInTheDocument()
     expect(screen.getByText('候选来源')).toBeInTheDocument()
+    const collapsedPath = screen.getByText('/canonical/demo')
+    await userEvent.click(collapsedPath.closest('button')!)
+    const pathLabel = screen.getByText('完整路径')
+    const details = pathLabel.parentElement?.parentElement
+    expect(pathLabel.parentElement).toBe(details?.firstElementChild)
+    expect(pathLabel.parentElement).toHaveTextContent('完整路径/canonical/demo')
+    expect(screen.getByText('内容哈希')).toBeInTheDocument()
+    expect(screen.getByText('修改时间')).toBeInTheDocument()
+    expect(screen.queryByText('hash')).not.toBeInTheDocument()
+    expect(screen.queryByText('mtime')).not.toBeInTheDocument()
   })
 })
 
@@ -581,9 +1347,9 @@ describe('SkillsPage source grouping (#62)', () => {
     // 组标题标注来源数
     expect(screen.getByText('· 2 个来源')).toBeInTheDocument()
     expect(screen.getByText('· 1 个来源')).toBeInTheDocument()
-    // hash 短码显示(带 "hash: " 前缀,与部署弹窗一致)
-    expect(screen.getByText('hash: aaaa1111')).toBeInTheDocument()
-    expect(screen.getByText('hash: bbbb2222')).toBeInTheDocument()
+    // 哈希短码使用中文标签
+    expect(screen.getByText('哈希：aaaa1111')).toBeInTheDocument()
+    expect(screen.getByText('哈希：bbbb2222')).toBeInTheDocument()
   })
 
   it('does not render version group headers for single-version skill', () => {
@@ -1088,5 +1854,56 @@ describe('SkillsPage Source Relocation (#90)', () => {
     await userEvent.click(screen.getByRole('button', { name: '确认撤销移动' }))
     await waitFor(() => expect(api.undoSourceRelocation).toHaveBeenCalledWith('relocation-90'))
     expect(await screen.findByRole('alert')).toHaveTextContent('旧位置已被占用')
+  })
+})
+
+describe('SkillsPage toolbar entry consolidation (#65)', () => {
+  function renderSkillsPage(skills: SkillWithConflictView[] = []) {
+    mockWindowApi()
+    return render(
+      <ToastProvider>
+        <SkillsPage
+          skills={skills}
+          tools={[]}
+          scanning={false}
+          lastScan={null}
+          loading={false}
+          loadError={null}
+          onScan={vi.fn()}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+          onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+  }
+
+  it('removes the duplicate 添加 entry and keeps 扫描/安装/批量 with stable accessible names', () => {
+    renderSkillsPage(buildFakeSkills(1))
+    const toolbar = screen.getByRole('toolbar', { name: 'Skill 操作' })
+    const scan = screen.getByRole('button', { name: '扫描' })
+    const install = screen.getByRole('button', { name: '安装' })
+    const bulk = screen.getByRole('button', { name: '批量' })
+    expect(toolbar).toContainElement(scan)
+    expect(toolbar).toContainElement(install)
+    expect(toolbar).toContainElement(bulk)
+    // 重复的"添加"入口已删除
+    expect(screen.queryByRole('button', { name: '添加' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the Skill list inside the Skills workspace scroll region', () => {
+    renderSkillsPage(buildFakeSkills(20))
+    const workspace = screen.getByRole('region', { name: 'Skills 工作区' })
+    const list = screen.getByRole('listbox', { name: 'Skill 列表' })
+    expect(workspace).toContainElement(list)
+  })
+
+  it('keeps the local directory entry reachable from the unified 安装 dialog', async () => {
+    renderSkillsPage(buildFakeSkills(1))
+    // 工具栏只有一个"安装"入口;点击后弹窗内可切到"本地目录"
+    await userEvent.click(screen.getByRole('button', { name: '安装' }))
+    expect(await screen.findByRole('button', { name: '本地目录' })).toBeInTheDocument()
+    // GitHub 与 ZIP 入口仍在同一弹窗,统一纳入安装
+    expect(screen.getByRole('button', { name: 'GitHub URL' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'ZIP 文件' })).toBeInTheDocument()
   })
 })

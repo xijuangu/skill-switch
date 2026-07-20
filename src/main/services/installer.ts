@@ -7,7 +7,7 @@
 // 三种安装来源:
 // - GitHub:clone 仓库到临时目录 → 拷到 centralSkillsDir/{name} → DB 记 central-repo source
 // - ZIP:解压到临时目录 → 拷到 centralSkillsDir/{name} → DB 记 central-repo source
-// - 本地目录:不搬文件(索引模式)→ DB 记 indexed source
+// - 本地目录:复制到 centralSkillsDir/{name} → DB 记 canonical source
 
 import { execFileSync } from 'child_process'
 import {
@@ -15,18 +15,13 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
-  rmSync,
-  statSync
+  rmSync
 } from 'fs'
 import { tmpdir } from 'os'
 import { basename, join } from 'path'
 import matter from 'gray-matter'
 import AdmZip from 'adm-zip'
 import type { DB } from '../db/database'
-import { runInTransaction } from '../db/database'
-import { upsertSkill } from '../db/dao/skills'
-import { upsertSource } from '../db/dao/skill-sources'
-import { hashDir } from './hash'
 import { resolveWithin, validateSkillName } from './path-safety'
 import { createSkillLibraryFacade } from './skill-library-facade'
 import type {
@@ -238,41 +233,32 @@ export function installFromZip(
 }
 
 /**
- * 从本地目录安装 skill(索引模式,不搬文件)。
- * 幂等:同路径重复 upsert 不重复创建(ON CONFLICT 更新)。
- * opts 接收以保持三个 install 函数签名一致(索引模式无备份需求)。
+ * 从本地目录安装权威副本。原目录保持不变，内容通过与 GitHub/ZIP
+ * 相同的 Skill Library 生命周期进入 Canonical Repository。
  */
 export function installFromLocalDir(
   db: DB,
   localPath: string,
   opts: InstallOptions
 ): InstallResult {
-  void opts // 索引模式:不搬文件、不需要 centralSkillsDir / backupsDir
   const skillName = resolveSkillName(localPath)
-  const hash = hashDir(localPath)
-  const mtime = Math.floor(statSync(localPath).mtimeMs)
-
-  const skillId = runInTransaction(db, () => {
-    const id = upsertSkill(db, skillName, localPath)
-    upsertSource(
-      db,
-      id,
-      localPath,
-        hash,
-        mtime,
-        'indexed',
-        { origin: 'local' }
-    )
-    return id
+  const replacement = createSkillLibraryFacade({
+    db,
+    canonicalRepositoryPath: opts.centralSkillsDir,
+    backupsDir: opts.backupsDir
+  }).replaceCanonicalSource({
+    sourceDirectory: localPath,
+    skillName,
+    origin: 'local'
   })
 
   return {
     skillName,
-    skillId,
-    sourcePath: localPath,
-    sourceType: 'indexed',
+    skillId: replacement.skillId,
+    sourcePath: replacement.sourcePath,
+    sourceType: 'central-repo',
     repoUrl: null,
     commitSha: null,
-    overwritten: false
+    overwritten: replacement.overwritten
   }
 }

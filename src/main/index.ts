@@ -4,6 +4,7 @@ import { join } from 'path'
 import { createDatabase, type DB } from './db/database'
 import { ensureCentralDir, DB_PATH } from './paths'
 import { registerIpcHandlers, runStartupSequence } from './ipc'
+import { createSecureWebPreferences, handleWindowOpenRequest } from './external-link-policy'
 
 let db: DB | undefined
 
@@ -15,17 +16,23 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
-    }
+    webPreferences: createSecureWebPreferences(join(__dirname, '../preload/index.js'))
   })
 
   win.on('ready-to-show', () => win.show())
 
+  // Renderer links never become Electron windows; approved destinations open in the OS browser.
   win.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    const { openExternal } = handleWindowOpenRequest(details.url)
+    if (openExternal) {
+      shell.openExternal(openExternal)
+    }
     return { action: 'deny' }
+  })
+
+  // The SPA has no legitimate top-level navigation after its initial load.
+  win.webContents.on('will-navigate', (event) => {
+    event.preventDefault()
   })
 
   // electron-vite dev 模式走 URL,生产模式走打包文件

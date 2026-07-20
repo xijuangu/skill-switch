@@ -1,13 +1,15 @@
 {
   "name": "skill-switch",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A standalone GUI tool to manage AI coding tool skills — scan, index, install, and deploy via copy or symlink.",
   "main": "./out/main/index.js",
   "author": "xijuangu <xijuangu@users.noreply.github.com>",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
-    "native:node": "npm rebuild better-sqlite3",
+    "native:node": "node -e \"require('fs').rmSync('node_modules/better-sqlite3/build',{recursive:true,force:true})\" && npm rebuild better-sqlite3",
     "native:electron": "electron-rebuild -f -w better-sqlite3",
-    "postinstall": "electron-builder install-app-deps",
     "dev": "npm run native:electron && electron-vite dev",
     "build": "electron-vite build",
     "build:electron": "npm run native:electron && npm run build",
@@ -15,7 +17,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "npm run native:node && vitest run",
+    "test": "npm run native:node && vitest run --maxWorkers=1 --minWorkers=1",
     "test:watch": "npm run native:node && vitest",
     "verify": "npm run typecheck && npm test && npm run build",
     "package": "npm run build:electron && electron-builder --publish never",
@@ -26,7 +28,7 @@
   },
   "dependencies": {
     "adm-zip": "^0.5.18",
-    "better-sqlite3": "^11.5.0",
+    "better-sqlite3": "^12.0.0",
     "gray-matter": "^4.0.3"
   },
   "devDependencies": {
@@ -41,7 +43,7 @@
     "@types/react-dom": "^18.2.18",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.16",
-    "electron": "^28.2.0",
+    "electron": "^41.0.0",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.0.0",
     "jsdom": "^27.0.1",
@@ -72,19 +74,25 @@
       "target": [
         "dmg"
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "icon": "resources/icons/icon.icns",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "resources/icons/icon.ico",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
     },
     "linux": {
       "target": [
         "AppImage",
         "deb"
       ],
-      "category": "Development"
+      "category": "Development",
+      "icon": "resources/icons/icon-512.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }

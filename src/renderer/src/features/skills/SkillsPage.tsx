@@ -10,6 +10,7 @@ import {
 import { useToast } from '../../app/Toast'
 import {
   ConflictDialog,
+  BulkSkillActionsDialog,
   DeployDialogContent,
   InstallDialogContent,
   ViewMdDialog,
@@ -74,7 +75,6 @@ export function SkillsPage({
   const [conflictTarget, setConflictTarget] = useState<SkillView | null>(null)
   const [deployTarget, setDeployTarget] = useState<DeployTarget | null>(null)
   const [installOpen, setInstallOpen] = useState(false)
-  const [installInitialTab, setInstallInitialTab] = useState<'github' | 'zip' | 'local-dir'>('github')
   const [contextMenu, setContextMenu] = useState<{ skill: SkillView; x: number; y: number } | null>(null)
   const [visibleMenuAnchor, setVisibleMenuAnchor] = useState<HTMLElement | null>(null)
   const [visibleMenuSkill, setVisibleMenuSkill] = useState<SkillView | null>(null)
@@ -83,6 +83,9 @@ export function SkillsPage({
   const [undeployFromTarget, setUndeployFromTarget] = useState<{ skill: SkillView; deployments: { id: number; target_tool: string; target_path: string | null; mode: string; management: 'managed' | 'observed' }[] } | null>(null)
   const [removeRegistryTarget, setRemoveRegistryTarget] = useState<SkillView | null>(null)
   const [actionBusy, setActionBusy] = useState(false)
+  const [bulkSelecting, setBulkSelecting] = useState(false)
+  const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<number>>(new Set())
+  const [bulkActionsOpen, setBulkActionsOpen] = useState(false)
   // 删除当前 Skill 后选相邻项:记录被删项在旧 filtered 中的索引,refresh 后据此选下一项/上一项
   const pendingAdjacentSelectRef = useRef<number | null>(null)
 
@@ -210,7 +213,6 @@ export function SkillsPage({
       : `已部署 (${result.action}) 到 ${result.targetDisplayName}${degradeNote}`
     success(msg)
     await onRefresh()
-    setDeployTarget(null)
   }
 
   const handleViewMd = async (skill: SkillView) => {
@@ -329,17 +331,12 @@ export function SkillsPage({
     }
   }
 
-  const handleInstallDone = async (result: InstallResultView | null) => {
-    if (!result) {
-      setInstallOpen(false)
-      return
-    }
+  const handleInstalled = async (result: InstallResultView) => {
     const msg = result.overwritten
       ? `已安装「${result.skillName}」(覆盖了已有版本)`
       : `已安装「${result.skillName}」`
     success(msg)
     await onRefresh()
-    setInstallOpen(false)
   }
 
   const getMenuActions = (skill: SkillView) => [
@@ -360,6 +357,15 @@ export function SkillsPage({
       if (dep.target_tool.toLowerCase().includes(q)) return `工具: ${dep.target_tool}`
     }
     return null
+  }
+
+  const toggleBulkSkill = (skillId: number) => {
+    setBulkSelectedIds((current) => {
+      const next = new Set(current)
+      if (next.has(skillId)) next.delete(skillId)
+      else next.add(skillId)
+      return next
+    })
   }
 
   if (loading) {
@@ -394,8 +400,12 @@ export function SkillsPage({
   }
 
   return (
-    <div className="flex gap-0 h-full -mx-6 -my-6">
-      <div className="w-72 shrink-0 border-r border-border flex flex-col bg-surface">
+    <div
+      role="region"
+      aria-label="Skills 工作区"
+      className="flex h-full min-h-0 min-w-0 w-full overflow-hidden"
+    >
+      <div className="w-72 shrink-0 border-r border-border flex flex-col bg-surface min-h-0">
         <div className="p-3 space-y-2 border-b border-border">
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
@@ -426,29 +436,58 @@ export function SkillsPage({
           </div>
         </div>
 
-        <div className="p-2 border-b border-border flex gap-1">
+        <div
+          role="toolbar"
+          aria-label="Skill 操作"
+          className="grid grid-cols-3 gap-1 p-2 border-b border-border"
+        >
           <Button
             variant="secondary" size="sm"
             onClick={onScan}
             loading={scanning}
-            className="flex-1"
+            className="w-full"
           >
             {scanning ? '扫描中…' : '扫描'}
           </Button>
           <Button
             variant="secondary" size="sm"
-            onClick={() => { setInstallInitialTab('github'); setInstallOpen(true) }}
-            className="flex-1"
+            onClick={() => setInstallOpen(true)}
+            className="w-full"
           >
             安装
           </Button>
           <Button
-            variant="secondary" size="sm"
-            onClick={() => { setInstallInitialTab('local-dir'); setInstallOpen(true) }}
+            variant={bulkSelecting ? 'primary' : 'secondary'}
+            size="sm"
+            className="w-full"
+            onClick={() => {
+              setBulkSelecting((current) => !current)
+              if (bulkSelecting) setBulkSelectedIds(new Set())
+            }}
           >
-            添加
+            批量
           </Button>
         </div>
+
+        {bulkSelecting && (
+          <div className="p-2 border-b border-border flex items-center gap-2">
+            <button
+              className="text-2xs text-primary"
+              onClick={() => setBulkSelectedIds(new Set(filtered.map((skill) => skill.id)))}
+            >
+              全选当前
+            </button>
+            <span className="text-2xs text-foreground-muted flex-1">已选 {bulkSelectedIds.size}</span>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={bulkSelectedIds.size === 0}
+              onClick={() => setBulkActionsOpen(true)}
+            >
+              操作
+            </Button>
+          </div>
+        )}
 
         {batchFlow.plan.length > 0 && (
           <div className="p-2 border-b border-border">
@@ -464,7 +503,11 @@ export function SkillsPage({
           </div>
         )}
 
-        <div className="flex-1 overflow-auto" role="listbox" aria-label="Skill 列表">
+        <div
+          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-2"
+          role="listbox"
+          aria-label="Skill 列表"
+        >
           {filtered.length === 0 ? (
             <div className="p-6 text-center">
               <p className="text-xs text-foreground-muted mb-2">
@@ -489,8 +532,11 @@ export function SkillsPage({
                 key={skill.id}
                 skill={skill}
                 selected={selectedId === skill.id}
+                selecting={bulkSelecting}
+                checked={bulkSelectedIds.has(skill.id)}
                 matchReason={getMatchReason(skill)}
-                onSelect={() => setSelectedId(skill.id)}
+                onSelect={() => bulkSelecting ? toggleBulkSkill(skill.id) : setSelectedId(skill.id)}
+                onToggleChecked={() => toggleBulkSkill(skill.id)}
                 onContextMenu={(e) => {
                   e.preventDefault()
                   setContextMenu({ skill, x: e.clientX, y: e.clientY })
@@ -501,7 +547,7 @@ export function SkillsPage({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 min-w-0 min-h-0 overflow-auto">
         {selected ? (
           <SkillDetail
             skill={selected}
@@ -544,8 +590,10 @@ export function SkillsPage({
 
       {installOpen && (
         <InstallDialogContent
-          initialTab={installInitialTab}
-          onDone={handleInstallDone}
+          initialTab="github"
+          onInstalled={handleInstalled}
+          onRefresh={onRefresh}
+          onClose={() => setInstallOpen(false)}
         />
       )}
 
@@ -600,6 +648,14 @@ export function SkillsPage({
           busy={actionBusy}
           onConfirm={handleRemoveFromRegistryConfirm}
           onCancel={() => setRemoveRegistryTarget(null)}
+        />
+      )}
+
+      {bulkActionsOpen && (
+        <BulkSkillActionsDialog
+          skills={skills.filter((skill) => bulkSelectedIds.has(skill.id))}
+          onRefresh={onRefresh}
+          onClose={() => setBulkActionsOpen(false)}
         />
       )}
 
@@ -676,14 +732,20 @@ export function SkillsPage({
 function SkillMasterItem({
   skill,
   selected,
+  selecting,
+  checked,
   matchReason,
   onSelect,
+  onToggleChecked,
   onContextMenu
 }: {
   skill: SkillView
   selected: boolean
+  selecting: boolean
+  checked: boolean
   matchReason: string | null
   onSelect: () => void
+  onToggleChecked: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }) {
   const managedCount = managedDeploymentCount(skill)
@@ -706,6 +768,15 @@ function SkillMasterItem({
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          {selecting && (
+            <input
+              type="checkbox"
+              aria-label={`选择 ${skill.name}`}
+              checked={checked}
+              onClick={(event) => event.stopPropagation()}
+              onChange={onToggleChecked}
+            />
+          )}
           <StatusDot
             variant={deployed ? 'success' : observedCount > 0 ? 'warning' : 'neutral'}
             label={deployed
@@ -894,7 +965,7 @@ function SourcePanel({
                 · {sources.length} 个来源
               </span>
               <code className="text-2xs font-mono text-foreground-muted ml-auto">
-                hash: {shortHash(hash)}
+                哈希：{shortHash(hash)}
               </code>
             </div>
             <div className="p-2 space-y-2 bg-surface">
@@ -938,37 +1009,42 @@ function SourceItem({
           onClick={() => setExpanded(!expanded)}
         >
         <div className="flex items-center gap-2 min-w-0">
-          <span className={`text-2xs px-1.5 py-0.5 rounded-full border ${
+          <span className={`text-2xs px-1.5 py-0.5 rounded-full border shrink-0 whitespace-nowrap ${
             source.source_role === 'canonical'
               ? 'bg-primary-subtle text-primary border-primary/20'
               : 'bg-warning-subtle text-warning border-warning/20'
           }`}>
             {sourceRoleLabel(source.source_role)}
           </span>
-          <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface-secondary text-foreground-secondary border border-border-subtle">
+          <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface-secondary text-foreground-secondary border border-border-subtle shrink-0 whitespace-nowrap">
             {sourceOriginLabel(source.source_origin)}
           </span>
           <code className="text-xs font-mono text-foreground truncate">{source.path}</code>
         </div>
           {expanded ? <ChevronDown className="h-3.5 w-3.5 text-foreground-muted shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-foreground-muted shrink-0" />}
         </button>
-        {canConsolidate && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={onConsolidate}>整理</Button>
-        )}
-        {undoBatch && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoConsolidation(undoBatch)}>撤销整理</Button>
-        )}
-        {canRelocate && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={onRelocate}>移动权威 Source</Button>
-        )}
-        {undoRelocation && (
-          <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoRelocation(undoRelocation)}>撤销移动</Button>
+        {(canConsolidate || undoBatch || canRelocate || undoRelocation) && (
+          <div className="flex items-center shrink-0">
+            {canConsolidate && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={onConsolidate}>整理</Button>
+            )}
+            {undoBatch && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoConsolidation(undoBatch)}>撤销整理</Button>
+            )}
+            {canRelocate && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={onRelocate}>移动权威 Source</Button>
+            )}
+            {undoRelocation && (
+              <Button variant="secondary" size="sm" className="mr-2" onClick={() => onUndoRelocation(undoRelocation)}>撤销移动</Button>
+            )}
+          </div>
         )}
       </div>
       {expanded && (
         <div className="border-t border-border p-2.5 space-y-1">
-          <MetaRow icon={Hash} label="hash" value={source.hash} />
-          <MetaRow icon={Calendar} label="mtime" value={new Date(source.mtime).toLocaleString()} />
+          <MetaRow icon={FolderOpen} label="完整路径" value={source.path} />
+          <MetaRow icon={Hash} label="内容哈希" value={source.hash} />
+          <MetaRow icon={Calendar} label="修改时间" value={new Date(source.mtime).toLocaleString()} />
           {source.repo_url && <MetaRow icon={GitBranch} label="repo" value={source.repo_url} />}
           {source.commit_sha && <MetaRow icon={GitBranch} label="sha" value={source.commit_sha.slice(0, 12)} />}
           <MetaRow icon={Calendar} label="发现时间" value={new Date(source.discovered_at).toLocaleString()} />
@@ -982,7 +1058,7 @@ function MetaRow({ icon: Icon, label, value }: { icon: typeof Hash; label: strin
   return (
     <div className="flex items-start gap-2 text-2xs">
       <span className="text-foreground-muted w-14 shrink-0">{label}</span>
-      <code className="font-mono text-foreground-secondary break-all">{value}</code>
+      <code className="font-mono text-foreground-secondary break-all select-text">{value}</code>
     </div>
   )
 }

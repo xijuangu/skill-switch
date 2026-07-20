@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Button, Input, Dialog } from '../../shared'
+import { Button, Input, Dialog, StatusDot } from '../../shared'
 import { completeMutation } from '../../async-state'
 import { groupByHash, shortHash, findSourceGroup } from './sourceGrouping'
 
@@ -33,6 +33,7 @@ export type ConflictResolutionEditor = {
 export type UndoBatch = { batch: ConsolidationBatch; item: ConsolidationBatch['items'][number] }
 export type SourceRelocationPreview = Awaited<ReturnType<typeof window.api.previewSourceRelocation>>
 export type SourceRelocation = Awaited<ReturnType<typeof window.api.getSkillLibrary>>['sourceRelocations'][number]
+type BulkMutationResultView = Awaited<ReturnType<typeof window.api.bulkDeploy>>
 
 export function sourceOriginLabel(origin: SkillSourceView['source_origin']): string {
   const labels: Record<SkillSourceView['source_origin'], string> = {
@@ -47,6 +48,316 @@ export function sourceOriginLabel(origin: SkillSourceView['source_origin']): str
 
 export function sourceRoleLabel(role: SkillSourceView['source_role']): string {
   return role === 'canonical' ? '权威来源' : '候选来源'
+}
+
+type BulkAction = 'deploy' | 'undeploy' | 'remove'
+type BulkDeployPair = {
+  key: string
+  skillName: string
+  sourceId: number
+  targetId: string
+  targetName: string
+  eligible: boolean
+  reason: string | null
+}
+type BulkUndeployItem = {
+  key: string
+  skillName: string
+  deploymentId: number
+  targetTool: string
+  targetPath: string | null
+}
+
+function deploymentRiskLabel(reason: string): string {
+  return {
+    'external-overwrite': '将覆盖目标中不受管理的现有内容',
+    'target-modified': '受管目标已被修改',
+    'mode-degraded': '当前平台需要降级部署模式',
+    'source-updated': '权威来源已更新',
+    'bidirectional': '来源与目标均发生变化'
+  }[reason] ?? reason
+}
+
+export function BulkSkillActionsDialog({
+  skills,
+  onRefresh,
+  onClose
+}: {
+  skills: SkillView[]
+  onRefresh: () => Promise<void>
+  onClose: () => void
+}) {
+  const [action, setAction] = useState<BulkAction>('deploy')
+  const [mode, setMode] = useState<DeployMode>('symlink')
+  const [deployPairs, setDeployPairs] = useState<BulkDeployPair[]>([])
+  const [undeployItems, setUndeployItems] = useState<BulkUndeployItem[]>([])
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
+  const [toolFilter, setToolFilter] = useState('all')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<BulkMutationResultView | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const skillsKey = skills.map((skill) => skill.id).join(',')
+
+  useEffect(() => {
+    let cancelled = false
+    setLoadError(null)
+    if (action === 'remove') {
+      setBusy(false)
+      setSelectedKeys((current) => current.size > 0
+        ? current
+        : new Set(skills.map((skill) => String(skill.id))))
+      return () => { cancelled = true }
+    }
+    setBusy(true)
+    if (action === 'deploy') {
+      Promise.all(skills.map(async (skill) => {
+        const canonical = skill.sources.find((source) => source.source_role === 'canonical')
+        if (!canonical) return []
+        const targets = await window.api.getDeployTargets(canonical.id)
+        return targets.map((target) => ({
+          key: `${skill.id}:${target.targetId}`,
+          skillName: skill.name,
+          sourceId: canonical.id,
+          targetId: target.targetId,
+          targetName: target.displayName,
+          eligible: target.eligible,
+          reason: target.reason
+        }))
+      })).then((groups) => {
+        if (cancelled) return
+        const pairs = groups.flat()
+        setDeployPairs(pairs)
+        setSelectedKeys((current) => current.size > 0
+          ? current
+          : new Set(pairs.filter((pair) => pair.eligible).map((pair) => pair.key)))
+      }).catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
+      }).finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+    } else {
+      Promise.all(skills.map(async (skill) => {
+        const deployments = await window.api.getDeploymentsForSkill(skill.id)
+        return deployments
+          .filter((deployment) => deployment.management === 'managed')
+          .map((deployment) => ({
+            key: String(deployment.id),
+            skillName: skill.name,
+            deploymentId: deployment.id,
+            targetTool: deployment.target_tool,
+            targetPath: deployment.target_path
+          }))
+      })).then((groups) => {
+        if (cancelled) return
+        const items = groups.flat()
+        setUndeployItems(items)
+        setSelectedKeys((current) => current.size > 0
+          ? current
+          : new Set(items.map((item) => item.key)))
+      }).catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
+      }).finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+    }
+    return () => { cancelled = true }
+  }, [action, skillsKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggle = (key: string) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const visibleUndeployItems = toolFilter === 'all'
+    ? undeployItems
+    : undeployItems.filter((item) => item.targetTool === toolFilter)
+  const selectedCount = action === 'undeploy'
+    ? visibleUndeployItems.filter((item) => selectedKeys.has(item.key)).length
+    : selectedKeys.size
+
+  const run = async () => {
+    setBusy(true)
+    try {
+      let outcome: BulkMutationResultView
+      if (action === 'deploy') {
+        const pendingConfirmations = (result?.items ?? []).flatMap((item) =>
+          item.status === 'confirmation-required' &&
+          selectedKeys.has(item.key) &&
+          item.outcome != null &&
+          'status' in item.outcome &&
+          item.outcome?.status === 'confirmation-required'
+            ? [{ key: item.key, confirmationId: item.outcome.confirmationId }]
+            : []
+        )
+        if (pendingConfirmations.length > 0) {
+          const confirmed = await window.api.bulkConfirmDeploy(pendingConfirmations)
+          const confirmedByKey = new Map(confirmed.items.map((item) => [item.key, item]))
+          const items = (result?.items ?? []).map((item) => confirmedByKey.get(item.key) ?? item)
+          outcome = {
+            total: items.length,
+            completed: items.filter((item) => item.status === 'completed').length,
+            failed: items.filter((item) => item.status !== 'completed').length,
+            items
+          }
+        } else {
+          outcome = await window.api.bulkDeploy(
+            deployPairs
+              .filter((pair) => pair.eligible && selectedKeys.has(pair.key))
+              .map((pair) => ({
+                key: pair.key,
+                sourceId: pair.sourceId,
+                targetId: pair.targetId,
+                requestedMode: mode
+              }))
+          )
+        }
+      } else if (action === 'undeploy') {
+        outcome = await window.api.bulkUndeploy(
+          visibleUndeployItems
+            .filter((item) => selectedKeys.has(item.key))
+            .map((item) => ({ key: item.key, deploymentId: item.deploymentId }))
+        )
+      } else {
+        outcome = await window.api.bulkRemoveFromRegistry(
+          skills
+            .filter((skill) => selectedKeys.has(String(skill.id)))
+            .map((skill) => ({ key: String(skill.id), skillId: skill.id }))
+        )
+      }
+      setResult(outcome)
+      setSelectedKeys(new Set(outcome.items.filter((item) => item.status !== 'completed').map((item) => item.key)))
+      await onRefresh()
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resultByKey = new Map(result?.items.map((item) => [item.key, item]) ?? [])
+  const hasPendingConfirmation = action === 'deploy' && (result?.items ?? []).some((item) =>
+    item.status === 'confirmation-required' && selectedKeys.has(item.key)
+  )
+  const actionLabel = action === 'deploy'
+    ? hasPendingConfirmation ? '确认并继续' : '批量部署'
+    : action === 'undeploy' ? '批量取消部署' : '批量从注册表移除'
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`批量操作 · ${skills.length} 个 Skill`}
+      description="成功项会从选择中移除；失败项保留，修正后可直接重试。"
+      confirmLabel={actionLabel}
+      busy={busy}
+      onConfirm={() => { if (selectedCount > 0) run() }}
+      closeOnOverlay={false}
+    >
+      <div className="space-y-4">
+        <div className="flex gap-2">
+          {([
+            ['deploy', '部署'],
+            ['undeploy', '取消部署'],
+            ['remove', '从注册表移除']
+          ] as const).map(([value, label]) => (
+            <Button
+              key={value}
+              size="sm"
+              variant={action === value ? 'primary' : 'secondary'}
+              onClick={() => {
+                setAction(value)
+                setResult(null)
+                setSelectedKeys(new Set())
+              }}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+
+        {action === 'deploy' && (
+          <div>
+            <p className="text-xs font-medium text-foreground mb-2">模式</p>
+            <div className="flex gap-3">
+              {(['symlink', 'copy'] as const).map((value) => (
+                <label key={value} className="flex items-center gap-1.5 text-xs">
+                  <input type="radio" name="bulk-deploy-mode" checked={mode === value} onChange={() => setMode(value)} />
+                  {value}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {action === 'undeploy' && (
+          <label className="block text-xs">
+            目标工具
+            <select className="ml-2 border border-border rounded bg-surface px-2 py-1" value={toolFilter} onChange={(event) => setToolFilter(event.target.value)}>
+              <option value="all">全部工具</option>
+              {[...new Set(undeployItems.map((item) => item.targetTool))].map((tool) => <option key={tool} value={tool}>{tool}</option>)}
+            </select>
+          </label>
+        )}
+
+        {loadError && <p className="text-xs text-danger">{loadError}</p>}
+        {result && (
+          <div className="rounded border border-border p-2 text-xs">
+            <p className="font-medium">完成 {result.completed}，失败 {result.failed}</p>
+            {result.items.filter((item) => item.status !== 'completed').map((item) => {
+              const confirmation = item.outcome != null &&
+                'status' in item.outcome &&
+                item.outcome.status === 'confirmation-required'
+                ? item.outcome
+                : null
+              return confirmation ? (
+                <div key={item.key} className="mt-2 rounded border border-warning/30 bg-warning-subtle p-2">
+                  <p className="font-medium text-warning">{confirmation.facts.skillName} → {confirmation.facts.targetDisplayName}</p>
+                  <ul className="list-disc pl-4 mt-1 text-foreground-secondary">
+                    {confirmation.facts.reasons.map((reason) => <li key={reason}>{deploymentRiskLabel(reason)}</li>)}
+                  </ul>
+                  <p className="mt-1">
+                    模式：{confirmation.facts.requestedMode}
+                    {confirmation.facts.actualMode !== confirmation.facts.requestedMode
+                      ? ` → ${confirmation.facts.actualMode}`
+                      : ''}
+                  </p>
+                  <p>备份：{confirmation.facts.backup.required ? confirmation.facts.backup.directory ?? '会创建备份' : '不需要'}</p>
+                </div>
+              ) : (
+                <p key={item.key} className="text-danger mt-1">{item.key}: {item.message ?? item.status}</p>
+              )
+            })}
+          </div>
+        )}
+
+        <div className="max-h-72 overflow-auto space-y-1">
+          {action === 'deploy' && deployPairs.map((pair) => (
+            <label key={pair.key} className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!pair.eligible ? 'opacity-50' : ''}`}>
+              <input type="checkbox" aria-label={`${pair.skillName} → ${pair.targetName}`} checked={selectedKeys.has(pair.key)} disabled={!pair.eligible || busy} onChange={() => toggle(pair.key)} />
+              <span><strong>{pair.skillName}</strong> → {pair.targetName}{pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}</span>
+            </label>
+          ))}
+          {action === 'undeploy' && visibleUndeployItems.map((item) => (
+            <label key={item.key} className="flex items-start gap-2 rounded border border-border p-2 text-xs">
+              <input type="checkbox" aria-label={`${item.skillName} → ${item.targetTool}`} checked={selectedKeys.has(item.key)} disabled={busy} onChange={() => toggle(item.key)} />
+              <span><strong>{item.skillName}</strong> → {item.targetTool}<span className="block text-foreground-muted break-all">{item.targetPath}</span></span>
+            </label>
+          ))}
+          {action === 'remove' && skills.map((skill) => (
+            <label key={skill.id} className="flex items-center gap-2 rounded border border-border p-2 text-xs">
+              <input type="checkbox" aria-label={`移除 ${skill.name}`} checked={selectedKeys.has(String(skill.id))} disabled={busy} onChange={() => toggle(String(skill.id))} />
+              <span>{skill.name}</span>
+              {resultByKey.get(String(skill.id))?.message && <span className="text-danger ml-auto">{resultByKey.get(String(skill.id))?.message}</span>}
+            </label>
+          ))}
+        </div>
+      </div>
+    </Dialog>
+  )
 }
 
 function conflictFileStatusLabel(status: 'added' | 'deleted' | 'modified'): string {
@@ -119,112 +430,184 @@ export function ConflictDialog({
 export function DeployDialogContent({
   skill,
   sourceId,
+  contextMessage,
   onDone
 }: {
   skill: SkillView
   sourceId: number
+  contextMessage?: string
   onDone: (result: DeployResultView | null) => Promise<void>
 }) {
   const source = skill.sources.find((candidate) => candidate.id === sourceId)
   const [targetOptions, setTargetOptions] = useState<DeployTargetOptionView[]>([])
-  const [selectedTargetId, setSelectedTargetId] = useState('')
-  const [mode, setMode] = useState<DeployMode>('copy')
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
+  const [mode, setMode] = useState<DeployMode>('symlink')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [confirmationPlan, setConfirmationPlan] = useState<{
-    targetDisplayName: string
-    confirmationId: string
-    reasons: Array<'external-overwrite' | 'target-modified' | 'mode-degraded'>
-    requestedMode: 'copy' | 'symlink' | 'junction'
-    actualMode: 'copy' | 'symlink' | 'junction'
-    backup: { required: boolean; directory: string | null }
-  } | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [sessionResults, setSessionResults] = useState<Map<string, BulkMutationResultView['items'][number]>>(new Map())
 
   useEffect(() => {
+    let cancelled = false
+    setBusy(true)
+    setLoadError(null)
     window.api.getDeployTargets(sourceId)
       .then((options) => {
+        if (cancelled) return
         setTargetOptions(options)
-        const existing = options.find(
-          (o) => o.eligible &&
-            skill.deployments.some((d) => d.target_id === o.targetId)
+        setSelectedKeys((current) =>
+          current.size > 0
+            ? current
+            : new Set(
+                options
+                  .filter(
+                    (o) =>
+                      o.eligible &&
+                      !skill.deployments.some(
+                        (d) => d.target_id === o.targetId && d.management === 'managed'
+                      )
+                  )
+                  .map((o) => o.targetId)
+              )
         )
-        const firstSafe = options.find((o) => o.eligible)
-        if (existing) {
-          setSelectedTargetId(existing.targetId)
-        } else if (firstSafe) {
-          setSelectedTargetId(firstSafe.targetId)
+      })
+      .catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [skill.id, sourceId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggle = (key: string) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function statusFor(targetId: string): 'undeployed' | 'deployed' | 'needs-confirmation' | 'failed' {
+    const session = sessionResults.get(targetId)
+    if (session) {
+      if (session.status === 'completed') return 'deployed'
+      if (session.status === 'confirmation-required') return 'needs-confirmation'
+      return 'failed'
+    }
+    const existing = skill.deployments.find(
+      (d) => d.target_id === targetId && d.management === 'managed'
+    )
+    return existing ? 'deployed' : 'undeployed'
+  }
+
+  const statusLabel: Record<string, string> = {
+    undeployed: '未部署',
+    deployed: '已部署',
+    'needs-confirmation': '需要确认',
+    failed: '失败'
+  }
+  const statusVariant: Record<string, 'neutral' | 'success' | 'warning' | 'danger'> = {
+    undeployed: 'neutral',
+    deployed: 'success',
+    'needs-confirmation': 'warning',
+    failed: 'danger'
+  }
+
+  const run = async () => {
+    if (!source) {
+      setLoadError('所选来源已失效，请刷新后重试')
+      return
+    }
+    setBusy(true)
+    setLoadError(null)
+    try {
+      const pendingConfirmations = [...sessionResults.values()]
+        .filter((item) => item.status === 'confirmation-required' && selectedKeys.has(item.key))
+        .flatMap((item) =>
+          item.outcome != null &&
+          'status' in item.outcome &&
+          item.outcome.status === 'confirmation-required'
+            ? [{ key: item.key, confirmationId: item.outcome.confirmationId }]
+            : []
+        )
+      let outcome: BulkMutationResultView
+      if (pendingConfirmations.length > 0) {
+        outcome = await window.api.bulkConfirmDeploy(pendingConfirmations)
+      } else {
+        outcome = await window.api.bulkDeploy(
+          targetOptions
+            .filter((o) => o.eligible && selectedKeys.has(o.targetId))
+            .map((o) => ({
+              key: o.targetId,
+              sourceId: source.id,
+              targetId: o.targetId,
+              requestedMode: mode
+            }))
+        )
+      }
+      const nextResults = new Map(sessionResults)
+      for (const item of outcome.items) {
+        nextResults.set(item.key, item)
+      }
+      setSessionResults(nextResults)
+      setSelectedKeys(
+        new Set(
+          [...nextResults.values()]
+            .filter((item) => item.status !== 'completed' && selectedKeys.has(item.key))
+            .map((item) => item.key)
+        )
+      )
+      const firstCompleted = outcome.items.find((item) => item.status === 'completed')
+      if (firstCompleted) {
+        const completedOutcome = firstCompleted.outcome
+        if (
+          completedOutcome != null &&
+          'status' in completedOutcome &&
+          completedOutcome.status === 'completed' &&
+          'result' in completedOutcome
+        ) {
+          await onDone(completedOutcome.result)
+        } else {
+          await onDone({
+            action: 'created',
+            mode,
+            targetDisplayName:
+              targetOptions.find((o) => o.targetId === firstCompleted.key)?.displayName ??
+              firstCompleted.key
+          })
         }
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error ? loadError.message : String(loadError))
-      })
-  }, [skill.id, skill.deployments, sourceId])
-
-  const targetSelectionValid = targetOptions.some(
-    (o) => o.targetId === selectedTargetId && o.eligible
-  )
-  const selectedDeployment = skill.deployments.find(
-    (d) => d.target_id === selectedTargetId
-  )
-
-  const handleDeploy = async () => {
-    if (!selectedTargetId || !targetSelectionValid) return
-    setBusy(true)
-    setError(null)
-    try {
-      if (!source) throw new Error('所选来源已失效，请刷新后重试')
-      const outcome = await window.api.deploymentDeploy({
-        sourceId: source.id,
-        targetId: selectedTargetId,
-        requestedMode: mode
-      })
-      if (outcome.status === 'confirmation-required') {
-        setConfirmationPlan({
-          targetDisplayName: outcome.facts.targetDisplayName,
-          confirmationId: outcome.confirmationId,
-          reasons: outcome.facts.reasons,
-          requestedMode: outcome.facts.requestedMode,
-          actualMode: outcome.facts.actualMode,
-          backup: outcome.facts.backup
-        })
-        setBusy(false)
-        return
       }
-      if (outcome.status === 'rejected') throw new Error(outcome.message)
-      if (outcome.status === 'recovery-required') throw new Error(`需要人工恢复：${outcome.message}\n${outcome.evidence.targetPath}`)
-      await completeMutation(outcome.result, onDone)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(false)
     }
   }
 
-  const handleExternalOverwriteConfirm = async () => {
-    if (!confirmationPlan) return
-    setBusy(true)
-    setError(null)
-    try {
-      const outcome = await window.api.deploymentConfirm(confirmationPlan.confirmationId)
-      if (outcome.status !== 'completed') {
-        throw new Error(outcome.status === 'confirmation-required' ? '部署计划已变化，请重新确认' : outcome.message)
-      }
-      setConfirmationPlan(null)
-      await completeMutation(outcome.result, onDone)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const hasPendingConfirmation = [...sessionResults.values()].some(
+    (item) => item.status === 'confirmation-required' && selectedKeys.has(item.key)
+  )
+  const actionLabel = hasPendingConfirmation ? '确认并继续' : '部署'
+  const selectedCount = selectedKeys.size
+  const completedCount = [...sessionResults.values()].filter((item) => item.status === 'completed').length
+  const failedCount = [...sessionResults.values()].filter(
+    (item) => item.status !== 'completed' && item.status !== 'confirmation-required'
+  ).length
+  const hasRun = sessionResults.size > 0
 
   return (
     <Dialog
       open
       onClose={() => !busy && onDone(null)}
       title={`部署 ${skill.name}`}
-      confirmLabel="部署"
-      onConfirm={handleDeploy}
+      description={contextMessage}
+      confirmLabel={actionLabel}
+      onConfirm={() => {
+        if (selectedCount > 0) run()
+      }}
       busy={busy}
       closeOnOverlay={!busy}
     >
@@ -233,61 +616,76 @@ export function DeployDialogContent({
           {source?.path ?? '来源已失效'}
         </p>
 
-        {skill.conflict.hasConflict && (() => {
-          // 一次 groupByHash 派生当前组与其他版本数,避免重复遍历(#62 review)
-          const groups = groupByHash(skill.sources)
-          const currentGroup = source == null ? null : findSourceGroup(skill.sources, source.path)
-          const otherVersions = groups.size - (currentGroup ? 1 : 0)
-          return (
-            <div className="px-3 py-2 rounded border border-warning-subtle bg-warning-subtle space-y-0.5">
-              {currentGroup ? (
-                <div className="text-2xs text-warning font-medium">
-                  当前来源属于版本组 · {currentGroup.count} 个来源 · hash: {shortHash(currentGroup.hash)}
-                </div>
-              ) : (
-                <div className="text-2xs text-warning font-medium">
-                  当前来源未匹配任何版本组
-                </div>
-              )}
-              {otherVersions > 0 && (
-                <div className="text-2xs text-warning">
-                  另有 {otherVersions} 个不同版本
-                </div>
-              )}
-            </div>
-          )
-        })()}
+        {skill.conflict.hasConflict &&
+          (() => {
+            const groups = groupByHash(skill.sources)
+            const currentGroup = source == null ? null : findSourceGroup(skill.sources, source.path)
+            const otherVersions = groups.size - (currentGroup ? 1 : 0)
+            return (
+              <div className="px-3 py-2 rounded border border-warning-subtle bg-warning-subtle space-y-0.5">
+                {currentGroup ? (
+                  <div className="text-2xs text-warning font-medium">
+                    当前来源属于版本组 · {currentGroup.count} 个来源 · 哈希：{shortHash(currentGroup.hash)}
+                  </div>
+                ) : (
+                  <div className="text-2xs text-warning font-medium">当前来源未匹配任何版本组</div>
+                )}
+                {otherVersions > 0 && (
+                  <div className="text-2xs text-warning">另有 {otherVersions} 个不同版本</div>
+                )}
+              </div>
+            )
+          })()}
 
-        {error && (
-          <div className="px-3 py-2 rounded border border-danger-subtle bg-danger-subtle text-danger text-xs">{error}</div>
+        {loadError && (
+          <div className="px-3 py-2 rounded border border-danger-subtle bg-danger-subtle text-danger text-xs">
+            {loadError}
+          </div>
         )}
 
-        <div>
-          <label className="block text-xs font-medium text-foreground mb-1">目标工具</label>
-          <select
-            value={selectedTargetId}
-            onChange={(e) => {
-              setSelectedTargetId(e.target.value)
-            }}
-            disabled={busy}
-            className="w-full h-8 border border-border rounded bg-surface px-2.5 text-xs text-foreground focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
-          >
-            {targetOptions.length === 0 && (
-              <option value="" disabled>无可用工具目标</option>
-            )}
-            {targetOptions.map((o) => (
-              <option key={o.targetId} value={o.targetId} disabled={!o.eligible}>
-                {o.displayName}
-                {!o.eligible ? ` (不可用：${o.reason})` : ''}
-              </option>
-            ))}
-          </select>
-          {selectedDeployment && (
-            <p className="text-2xs text-foreground-muted mt-1">
-              此工具已有部署，只能更新原目标
-            </p>
-          )}
-        </div>
+        {hasRun && (
+          <div className="rounded border border-border p-2 text-xs">
+            <p className="font-medium">完成 {completedCount}，失败 {failedCount}</p>
+            {[...sessionResults.values()]
+              .filter((item) => item.status !== 'completed')
+              .map((item) => {
+                const confirmation =
+                  item.outcome != null &&
+                  'status' in item.outcome &&
+                  item.outcome.status === 'confirmation-required'
+                    ? item.outcome
+                    : null
+                return confirmation ? (
+                  <div key={item.key} className="mt-2 rounded border border-warning/30 bg-warning-subtle p-2">
+                    <p className="font-medium text-warning">
+                      {confirmation.facts.skillName} → {confirmation.facts.targetDisplayName}
+                    </p>
+                    <ul className="list-disc pl-4 mt-1 text-foreground-secondary">
+                      {confirmation.facts.reasons.map((reason) => (
+                        <li key={reason}>{deploymentRiskLabel(reason)}</li>
+                      ))}
+                    </ul>
+                    <p className="mt-1">
+                      模式：{confirmation.facts.requestedMode}
+                      {confirmation.facts.actualMode !== confirmation.facts.requestedMode
+                        ? ` → ${confirmation.facts.actualMode}`
+                        : ''}
+                    </p>
+                    <p>
+                      备份：
+                      {confirmation.facts.backup.required
+                        ? confirmation.facts.backup.directory ?? '会创建备份'
+                        : '不需要'}
+                    </p>
+                  </div>
+                ) : (
+                  <p key={item.key} className="text-danger mt-1">
+                    {item.key}: {item.message ?? item.status}
+                  </p>
+                )
+              })}
+          </div>
+        )}
 
         <div>
           <label className="block text-xs font-medium text-foreground mb-1">模式</label>
@@ -319,39 +717,52 @@ export function DeployDialogContent({
               : '快照副本 — 源更新需手动重新部署'}
           </p>
         </div>
-      </div>
 
-      <Dialog
-        open={confirmationPlan !== null}
-        onClose={() => !busy && setConfirmationPlan(null)}
-        title={`确认部署风险「${skill.name}」?`}
-        description={confirmationPlan == null ? '' : [
-          ...confirmationPlan.reasons.map((reason) => ({
-            'external-overwrite': '目标包含非本应用管理的内容，将覆盖现有内容。',
-            'target-modified': '已部署目标被外部修改，将用当前来源覆盖。',
-            'mode-degraded': `请求模式 ${confirmationPlan.requestedMode} 不可用，实际将使用 ${confirmationPlan.actualMode}。`
-          })[reason]),
-          `目标：${confirmationPlan.targetDisplayName}`,
-          confirmationPlan.backup.required
-            ? `覆盖前会备份到：${confirmationPlan.backup.directory ?? '应用备份目录'}`
-            : '本次不会创建外部内容备份。'
-        ].join('\n')}
-        variant="danger"
-        confirmLabel="确认并部署"
-        onConfirm={handleExternalOverwriteConfirm}
-        busy={busy}
-        closeOnOverlay={false}
-      />
+        <div className="max-h-72 overflow-auto space-y-1">
+          {targetOptions.map((o) => {
+            const status = statusFor(o.targetId)
+            return (
+              <label
+                key={o.targetId}
+                className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!o.eligible ? 'opacity-50' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  aria-label={o.displayName}
+                  checked={selectedKeys.has(o.targetId)}
+                  disabled={!o.eligible || busy}
+                  onChange={() => toggle(o.targetId)}
+                />
+                <span className="flex-1">
+                  <span className="flex items-center gap-2">
+                    <strong>{o.displayName}</strong>
+                    <StatusDot variant={statusVariant[status]} label={statusLabel[status]} />
+                  </span>
+                  {o.reason ? <span className="block text-foreground-muted">{o.reason}</span> : null}
+                </span>
+              </label>
+            )
+          })}
+          {targetOptions.length === 0 && !busy && (
+            <p className="text-xs text-foreground-muted">无可用工具目标</p>
+          )}
+        </div>
+      </div>
     </Dialog>
   )
 }
 
+
 export function InstallDialogContent({
   initialTab,
-  onDone
+  onInstalled,
+  onRefresh,
+  onClose
 }: {
   initialTab: 'github' | 'zip' | 'local-dir'
-  onDone: (result: InstallResultView | null) => Promise<void>
+  onInstalled: (result: InstallResultView) => Promise<void>
+  onRefresh: () => Promise<void>
+  onClose: () => void
 }) {
   const [tab, setTab] = useState<'github' | 'zip' | 'local-dir'>(initialTab)
   const [githubUrl, setGithubUrl] = useState('')
@@ -359,6 +770,7 @@ export function InstallDialogContent({
   const [localPath, setLocalPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [installedSkill, setInstalledSkill] = useState<SkillView | null>(null)
 
   const handleSelectZip = async () => {
     const path = await window.api.selectZipFile()
@@ -397,7 +809,11 @@ export function InstallDialogContent({
         }
         result = await window.api.installFromLocalDir(localPath)
       }
-      await completeMutation(result, onDone)
+      await completeMutation(result, onInstalled)
+      const skills = await window.api.getSkills()
+      const installed = skills.find((skill) => skill.id === result.skillId)
+      if (!installed) throw new Error('安装已完成，但刷新后未找到对应 Skill')
+      setInstalledSkill(installed)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -405,12 +821,45 @@ export function InstallDialogContent({
     }
   }
 
+  if (installedSkill) {
+    const canonical = installedSkill.sources.find((source) => source.source_role === 'canonical')
+    if (!canonical) {
+      return (
+        <Dialog
+          open
+          onClose={onClose}
+          title={`已安装 ${installedSkill.name}`}
+          description="安装已完成，但未找到可部署的权威 Source。"
+          hideCancel
+          confirmLabel="关闭"
+          onConfirm={onClose}
+        />
+      )
+    }
+    return (
+      <DeployDialogContent
+        skill={installedSkill}
+        sourceId={canonical.id}
+        contextMessage="安装完成，可继续部署到多个工具；每次成功后弹窗会保持打开。"
+        onDone={async (result) => {
+          if (!result) {
+            onClose()
+            return
+          }
+          await onRefresh()
+          const refreshed = (await window.api.getSkills()).find((skill) => skill.id === installedSkill.id)
+          if (refreshed) setInstalledSkill(refreshed)
+        }}
+      />
+    )
+  }
+
   return (
     <Dialog
       open
-      onClose={() => !busy && onDone(null)}
+      onClose={() => !busy && onClose()}
       title="安装 Skill"
-      confirmLabel={tab === 'local-dir' ? '添加' : '安装'}
+      confirmLabel="安装"
       onConfirm={handleInstall}
       busy={busy}
     >
@@ -465,7 +914,7 @@ export function InstallDialogContent({
 
         {tab === 'local-dir' && (
           <div>
-            <label className="block text-xs text-foreground-secondary mb-1">本地目录（索引模式，不搬文件）</label>
+            <label className="block text-xs text-foreground-secondary mb-1">本地目录</label>
             <div className="flex items-center gap-2">
               <Button variant="secondary" onClick={handleSelectDir} disabled={busy} size="sm">
                 选择目录…
@@ -473,7 +922,7 @@ export function InstallDialogContent({
               {localPath && <code className="text-xs font-mono text-foreground-secondary truncate">{localPath}</code>}
             </div>
             <p className="text-2xs text-foreground-muted mt-1">
-              将目录登记为索引 source，文件保留在原位。
+              将内容复制到权威源码库；原目录保持不变。
             </p>
           </div>
         )}
@@ -618,9 +1067,9 @@ export function RemoveRegistryDialog({
     <Dialog
       open
       onClose={onCancel}
-      title={`从注册表移除「${skill.name}」?`}
+      title={`从注册表移除「${skill.name}」？`}
       variant="danger"
-      description="此操作将永久从注册表移除该 skill：将中央仓库实体备份（如有），从所有工具取消部署，并删除注册表记录。此操作不可撤销。"
+      description={`这会彻底删除 skill-switch 对「${skill.name}」的管理记录。执行前会备份权威源码目录（如存在），然后从所有已接管工具中取消部署，并删除权威源码目录、来源记录和 Skill 记录。若仍有未接管的外部订阅，操作会被拒绝。删除后不能一键撤销；备份仅可用于恢复文件内容，原部署关系需要重新建立。`}
       confirmLabel="从注册表移除"
       onConfirm={onConfirm}
       busy={busy}

@@ -203,7 +203,7 @@ export interface SkillLibraryFacade {
   replaceCanonicalSource(request: {
     sourceDirectory: string
     skillName: string
-    origin: Extract<SourceOrigin, 'github' | 'zip'>
+    origin: Extract<SourceOrigin, 'github' | 'zip' | 'local'>
     repoUrl?: string
     commitSha?: string
   }): { skillId: number; sourcePath: string; overwritten: boolean }
@@ -1821,7 +1821,7 @@ export function createSkillLibraryFacade(options: {
   function replaceCanonicalSource(request: {
     sourceDirectory: string
     skillName: string
-    origin: Extract<SourceOrigin, 'github' | 'zip'>
+    origin: Extract<SourceOrigin, 'github' | 'zip' | 'local'>
     repoUrl?: string
     commitSha?: string
   }) {

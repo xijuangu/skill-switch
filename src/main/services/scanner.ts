@@ -16,7 +16,7 @@ import { hashDir } from './hash'
 import { validateSkillName } from './path-safety'
 
 /** 从 SKILL.md frontmatter 解析 name;无则回退目录名 */
-function resolveSkillName(skillDir: string): string {
+export function resolveSkillName(skillDir: string): string {
   const skillMdPath = join(skillDir, 'SKILL.md')
   if (existsSync(skillMdPath)) {
     const content = readFileSync(skillMdPath, 'utf-8')

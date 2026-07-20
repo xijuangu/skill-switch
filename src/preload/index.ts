@@ -42,6 +42,7 @@ const api = {
   undoSourceRelocation: (relocationId: string) =>
     ipcRenderer.invoke('skillLibrary:undoSourceRelocation', relocationId),
   getSettings: () => ipcRenderer.invoke('getSettings'),
+  checkForUpdates: () => ipcRenderer.invoke('checkForUpdates'),
   getSourceRoots: () => ipcRenderer.invoke('getSourceRoots'),
   registerSourceRoot: (path: string) => ipcRenderer.invoke('registerSourceRoot', path),
   rescanSourceRoot: (rootId: number) => ipcRenderer.invoke('rescanSourceRoot', rootId),
@@ -68,6 +69,18 @@ const api = {
   // renderer 不传任何路径。
   redeploy: (deploymentId: number) => ipcRenderer.invoke('redeploy', deploymentId),
   undeploy: (deploymentId: number) => ipcRenderer.invoke('undeploy', deploymentId),
+  bulkDeploy: (requests: Array<{ key: string; sourceId: number; targetId: string; requestedMode: 'copy' | 'symlink' | 'junction' }>) =>
+    ipcRenderer.invoke('bulk:deploy', requests),
+  bulkConfirmDeploy: (requests: Array<{ key: string; confirmationId: string }>) =>
+    ipcRenderer.invoke('bulk:confirmDeploy', requests),
+  bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) =>
+    ipcRenderer.invoke('bulk:undeploy', requests),
+  bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) =>
+    ipcRenderer.invoke('bulk:removeFromRegistry', requests),
+  bulkDetachDeployments: (requests: Array<{ key: string; deploymentId: number }>) =>
+    ipcRenderer.invoke('bulk:detachDeployments', requests),
+  bulkManageExternalSkills: (requests: Array<{ key: string; targetId: string; entryName: string }>) =>
+    ipcRenderer.invoke('bulk:manageExternalSkills', requests),
   adoptDeployment: (deploymentId: number) => ipcRenderer.invoke('adoptDeployment', deploymentId),
   adoptTargetAsCandidate: (deploymentId: number) => ipcRenderer.invoke('adoptTargetAsCandidate', deploymentId),
   getBulkAdoptionFacts: () => ipcRenderer.invoke('getBulkAdoptionFacts'),
@@ -77,6 +90,8 @@ const api = {
   // Drift + Remove from Registry(#8)
   removeFromManifest: (deploymentId: number) =>
     ipcRenderer.invoke('removeFromManifest', deploymentId),
+  detachStaleDeployment: (deploymentId: number) =>
+    ipcRenderer.invoke('detachStaleDeployment', deploymentId),
   getDeploymentsForSkill: (skillId: number) =>
     ipcRenderer.invoke('getDeploymentsForSkill', skillId),
   viewSkillMd: (skillId: number, sourcePath?: string) =>

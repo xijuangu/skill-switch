@@ -14,6 +14,7 @@ export const DRIFT_STATUS_MAP: Record<string, DriftStatusMeta> = {
   'target-modified': { variant: 'warning', label: '目标已修改' },
   'link-mismatch': { variant: 'danger', label: '链接异常' },
   'source-missing': { variant: 'danger', label: '源缺失' },
+  'target-unconfigured': { variant: 'danger', label: '目标已移除' },
   unresolved: { variant: 'danger', label: '待确认' },
   drift: { variant: 'danger', label: '漂移' },
   external: { variant: 'neutral', label: '外部' },

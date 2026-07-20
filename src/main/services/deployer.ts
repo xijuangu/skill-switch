@@ -45,6 +45,7 @@ import { getSkillById } from '../db/dao/skills'
 import { hashDir } from './hash'
 import { createBackup } from './backup'
 import { assertAbsolutePath, assertSafeDeployTarget } from './path-safety'
+import { resolveSkillName } from './scanner'
 
 /**
  * 按已知 mode 清理 targetPath。
@@ -121,7 +122,7 @@ export class ModeDegradationRequiredError extends Error {
   }
 }
 
-function markerForTarget(targetPath: string, operationId: string): RecoveryEvidence {
+export function markerForTarget(targetPath: string, operationId: string): RecoveryEvidence {
   const parent = dirname(targetPath)
   const name = basename(targetPath)
   return {
@@ -134,7 +135,7 @@ function markerForTarget(targetPath: string, operationId: string): RecoveryEvide
   }
 }
 
-function writeMarker(evidence: RecoveryEvidence, phase: string): void {
+export function writeMarker(evidence: RecoveryEvidence, phase: string): void {
   evidence.phase = phase
   writeFileSync(evidence.markerPath, JSON.stringify(evidence, null, 2) + '\n', 'utf-8')
 }
@@ -571,16 +572,27 @@ export function readToolDrifts(
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
       const targetPath = join(toolSkillDir, entry.name)
       if (managedTargetPaths.has(targetPath)) continue
+      const recovery = inspectRecoveryEvidence(targetPath)
+      let skillName = entry.name
+      let externalError: string | undefined
+      try {
+        skillName = resolveSkillName(targetPath)
+      } catch (error) {
+        externalError = `无法解析 Skill 身份：${error instanceof Error ? error.message : String(error)}`
+      }
       results.push({
         skillId: -1,
-        skillName: entry.name,
+        skillName,
+        targetEntryName: entry.name,
+        ...(externalError ? { externalError } : {}),
         targetTool,
         targetPath,
         deployment: null,
         targetExists: true,
         currentSourceHash: null,
         currentTargetHash: null,
-        kind: 'external'
+        kind: recovery ? 'recovery-required' : 'external',
+        ...(recovery ? { recovery } : {})
       })
     }
   }
