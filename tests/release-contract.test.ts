@@ -1,4 +1,4 @@
-// issue #119: v1.0.0 Draft Release 自动合同 — 版本一致性、资产校验、Draft Release 配置的结构性验证。
+// issue #119: Draft Release 自动合同 — 版本一致性、资产校验、版本化说明与 Draft Release 配置的结构性验证。
 // 只做结构性验证，不对文案做脆弱快照。
 import { test, expect, describe } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
@@ -22,19 +22,23 @@ const lockfile = JSON.parse(readFileSync(resolve(repoRoot, 'package-lock.json'),
   version: string
   packages?: Record<string, { version?: string }>
 }
+const releaseNotesRelativePath = `docs/release-notes/v${pkg.version}.md`
+const releaseNotesPath = resolve(repoRoot, releaseNotesRelativePath)
+const ciPath = resolve(repoRoot, '.github/workflows/ci.yml')
+const ciText = readFileSync(ciPath, 'utf8')
 
-describe('issue #119: v1.0.0 Draft Release 自动合同', () => {
-  test('package.json 版本为 1.0.0', () => {
-    expect(pkg.version).toBe('1.0.0')
+describe('issue #119: Draft Release 自动合同', () => {
+  test('package.json 使用可发布的稳定语义版本', () => {
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/)
   })
 
   test('package-lock.json 顶层版本与 package.json 一致', () => {
-    expect(lockfile.version).toBe('1.0.0')
+    expect(lockfile.version).toBe(pkg.version)
   })
 
   test('package-lock.json 根包条目版本与 package.json 一致', () => {
     const root = lockfile.packages?.['']
-    expect(root?.version, 'package-lock.json packages[""].version').toBe('1.0.0')
+    expect(root?.version, 'package-lock.json packages[""].version').toBe(pkg.version)
   })
 
   test('应用元数据 appId/productName 稳定（不依赖版本号，但需存在）', () => {
@@ -42,15 +46,9 @@ describe('issue #119: v1.0.0 Draft Release 自动合同', () => {
     expect(pkg.build?.productName, 'build.productName').toBeTruthy()
   })
 
-  test('不创建公开 v1.0.0-rc.1 预发布标识', () => {
-    // #114: 拟发布源码版本直接设为 1.0.0；不创建公开 v1.0.0-rc.1
-    expect(pkg.version).not.toMatch(/-rc\./)
-  })
-
-  test('Release Notes 文件存在且包含中文正文与英文摘要', () => {
-    const notesPath = resolve(repoRoot, 'docs/release-notes/v1.0.0.md')
-    expect(existsSync(notesPath), 'docs/release-notes/v1.0.0.md should exist').toBe(true)
-    const text = readFileSync(notesPath, 'utf8')
+  test('与 package.json version 对应的 Release Notes 存在且包含中文正文与英文摘要', () => {
+    expect(existsSync(releaseNotesPath), `${releaseNotesRelativePath} should exist`).toBe(true)
+    const text = readFileSync(releaseNotesPath, 'utf8')
     // 中文正文标记
     expect(text).toContain('中文发布说明')
     // 英文摘要标记
@@ -71,58 +69,51 @@ describe('issue #119: v1.0.0 Draft Release 自动合同', () => {
   })
 
   test('CI workflow 包含版本一致性校验步骤', () => {
-    const ciPath = resolve(repoRoot, '.github/workflows/ci.yml')
-    const text = readFileSync(ciPath, 'utf8')
-    expect(text).toContain('Validate version consistency')
-    expect(text).toContain('PKG_VERSION')
-    expect(text).toContain('Version mismatch')
+    expect(ciText).toContain('Validate version consistency')
+    expect(ciText).toContain('PKG_VERSION')
+    expect(ciText).toContain('Version mismatch')
   })
 
   test('CI workflow 包含要求内资产校验步骤', () => {
-    const ciPath = resolve(repoRoot, '.github/workflows/ci.yml')
-    const text = readFileSync(ciPath, 'utf8')
-    expect(text).toContain('Collect and validate required assets')
-    expect(text).toContain('Missing required macOS DMG')
-    expect(text).toContain('Missing required Windows x64 NSIS installer')
-    expect(text).toContain('Missing required Linux x64 installer')
-    expect(text).toContain('Required asset contract not satisfied')
+    expect(ciText).toContain('Collect and validate required assets')
+    expect(ciText).toContain('Missing required macOS DMG')
+    expect(ciText).toContain('Missing required Windows x64 NSIS installer')
+    expect(ciText).toContain('Missing required Linux x64 installer')
+    expect(ciText).toContain('Required asset contract not satisfied')
   })
 
   test('CI workflow 创建 Draft Release 而非自动 publish', () => {
-    const ciPath = resolve(repoRoot, '.github/workflows/ci.yml')
-    const text = readFileSync(ciPath, 'utf8')
-    expect(text).toContain('draft: true')
-    expect(text).toContain('prerelease: false')
-    expect(text).toContain('body_path: docs/release-notes/v1.0.0.md')
-    expect(text).toContain('generate_release_notes: false')
+    expect(ciText).toContain('draft: true')
+    expect(ciText).toContain('prerelease: false')
+    expect(ciText).toContain('body_path: ${{ env.RELEASE_NOTES_PATH }}')
+    expect(ciText).toContain('generate_release_notes: false')
+  })
+
+  test('CI workflow 从 package.json version 解析 Release Notes 路径', () => {
+    expect(ciText).toContain('RELEASE_NOTES_PATH="docs/release-notes/v${PKG_VERSION}.md"')
+    expect(ciText).toContain('body_path: ${{ env.RELEASE_NOTES_PATH }}')
   })
 
   test('Draft Release 同时依赖三平台 verify 与 package', () => {
-    const text = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8')
-    expect(text).toMatch(/release:[\s\S]*?needs:\s*\[verify,\s*package\]/)
+    expect(ciText).toMatch(/release:[\s\S]*?needs:\s*\[verify,\s*package\]/)
   })
 
   test('要求内资产校验版本、架构与非空文件', () => {
-    const text = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8')
-    expect(text).toContain('Asset version mismatch')
-    expect(text).toContain('Missing required Windows x64 NSIS installer')
-    expect(text).toContain('Missing required Linux x64 installer')
-    expect(text).toContain('find release-assets -type f -size 0')
+    expect(ciText).toContain('Asset version mismatch')
+    expect(ciText).toContain('Missing required Windows x64 NSIS installer')
+    expect(ciText).toContain('Missing required Linux x64 installer')
+    expect(ciText).toContain('find release-assets -type f -size 0')
   })
 
   test('CI workflow verify job 在三平台原生 runner 上运行', () => {
-    const ciPath = resolve(repoRoot, '.github/workflows/ci.yml')
-    const text = readFileSync(ciPath, 'utf8')
-    expect(text).toContain('ubuntu-latest')
-    expect(text).toContain('macos-latest')
-    expect(text).toContain('windows-latest')
+    expect(ciText).toContain('ubuntu-latest')
+    expect(ciText).toContain('macos-latest')
+    expect(ciText).toContain('windows-latest')
   })
 
   test('CI workflow package job 为三平台分别配置 mac/win/linux 打包', () => {
-    const ciPath = resolve(repoRoot, '.github/workflows/ci.yml')
-    const text = readFileSync(ciPath, 'utf8')
-    expect(text).toContain('package:mac')
-    expect(text).toContain('package:win')
-    expect(text).toContain('package:linux')
+    expect(ciText).toContain('package:mac')
+    expect(ciText).toContain('package:win')
+    expect(ciText).toContain('package:linux')
   })
 })

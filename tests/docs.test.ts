@@ -7,12 +7,16 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url)) // tests/
 const repoRoot = resolve(here, '..')
+const packageVersion = (
+  JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8')) as { version: string }
+).version
 
 const requiredFiles = [
   'README.md',
   'LICENSE',
   'SECURITY.md',
   'CONTRIBUTING.md',
+  'RELEASING.md',
   'CONTEXT.md',
   'docs/user-guide.md',
   'docs/development.md',
@@ -26,6 +30,7 @@ const docsToScan = [
   'README.md',
   'SECURITY.md',
   'CONTRIBUTING.md',
+  'RELEASING.md',
   'docs/user-guide.md',
   'docs/development.md',
   'docs/THIRD_PARTY_LICENSES.md'
@@ -73,7 +78,10 @@ describe('issue #118: 最小开源仓库信任面', () => {
 
   test('用户指南使用 v1 信息架构与正确的未签名说明', () => {
     const guide = readFileSync(resolve(repoRoot, 'docs/user-guide.md'), 'utf8')
-    const notes = readFileSync(resolve(repoRoot, 'docs/release-notes/v1.0.0.md'), 'utf8')
+    const notes = readFileSync(
+      resolve(repoRoot, `docs/release-notes/v${packageVersion}.md`),
+      'utf8'
+    )
     expect(guide).toContain('在“工具”中启用需要管理的工具')
     expect(guide).toContain('“恢复”页的“来源归档”')
     expect(guide).toContain('“恢复”页的“备份”')
@@ -99,6 +107,17 @@ describe('issue #118: 最小开源仓库信任面', () => {
     for (const section of ['安装 Skill', '整理', '部署模式', '批量操作', '外部订阅、接管与旧目标', '检查更新', '取消部署与从注册表移除', '漂移与恢复']) {
       expect(text, `expected section header: ${section}`).toContain(section)
     }
+  })
+
+  test('维护者文档持久化最小发版清单并从贡献指南链接', () => {
+    const releasing = readFileSync(resolve(repoRoot, 'RELEASING.md'), 'utf8')
+    const contributing = readFileSync(resolve(repoRoot, 'CONTRIBUTING.md'), 'utf8')
+    expect(releasing).toContain('npm version <version> --no-git-tag-version')
+    expect(releasing).toContain('docs/release-notes/v<version>.md')
+    expect(releasing).toContain('git tag v<version>')
+    expect(releasing).toContain('Draft Release')
+    expect(releasing).toContain('不得直接公开发布')
+    expect(contributing).toContain('[RELEASING.md](RELEASING.md)')
   })
 
   test('文档中的相对链接可解析到已存在文件', () => {

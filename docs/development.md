@@ -103,6 +103,8 @@ Node 运行时加载时触发段错误（exit 139），表现为 macOS verify �
 - `npm run package:win` → NSIS 安装包
 - `npm run package:linux` → AppImage 和 DEB
 
+正式版本的版本号、Release Notes、tag、三平台 CI、Draft Release 与人工发布顺序统一记录在根目录 [RELEASING.md](../RELEASING.md)。发布流程不得从历史 issue 或旧版本说明中推断。
+
 ## 测试与手工验收
 
 - 测试接缝与策略见仓库根的 `vitest.workspace.ts`：`node` 环境（主进程领域）与 `jsdom` 环境（renderer 行为）。

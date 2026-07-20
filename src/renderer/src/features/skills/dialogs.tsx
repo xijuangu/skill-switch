@@ -1067,9 +1067,9 @@ export function RemoveRegistryDialog({
     <Dialog
       open
       onClose={onCancel}
-      title={`从注册表移除「${skill.name}」?`}
+      title={`从注册表移除「${skill.name}」？`}
       variant="danger"
-      description="此操作将永久从注册表移除该 skill：将中央仓库实体备份（如有），从所有工具取消部署，并删除注册表记录。此操作不可撤销。"
+      description={`这会彻底删除 skill-switch 对「${skill.name}」的管理记录。执行前会备份权威源码目录（如存在），然后从所有已接管工具中取消部署，并删除权威源码目录、来源记录和 Skill 记录。若仍有未接管的外部订阅，操作会被拒绝。删除后不能一键撤销；备份仅可用于恢复文件内容，原部署关系需要重新建立。`}
       confirmLabel="从注册表移除"
       onConfirm={onConfirm}
       busy={busy}

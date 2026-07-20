@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import App from '../../src/renderer/src/app/App'
 import { ToastProvider } from '../../src/renderer/src/app/Toast'
 import { SkillsPage } from '../../src/renderer/src/features/skills/SkillsPage'
-import { BulkSkillActionsDialog, DeployDialogContent, InstallDialogContent } from '../../src/renderer/src/features/skills/dialogs'
+import { BulkSkillActionsDialog, DeployDialogContent, InstallDialogContent, RemoveRegistryDialog } from '../../src/renderer/src/features/skills/dialogs'
 import type { SkillWithConflictView } from '../../src/preload'
 
 // 回归 #52:App 必须在 ToastProvider 之内消费 useToast,
@@ -87,6 +87,33 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
 }
 
 describe('App (integration)', () => {
+  it('explains registry removal in user-visible actions and recovery limits', () => {
+    const skill = buildFakeSkills(1)[0]
+    skill.name = '.system'
+
+    render(
+      <RemoveRegistryDialog
+        skill={skill}
+        busy={false}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '这会彻底删除 skill-switch 对「.system」的管理记录'
+    )
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '备份权威源码目录（如存在）'
+    )
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '若仍有未接管的外部订阅，操作会被拒绝'
+    )
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      '备份仅可用于恢复文件内容，原部署关系需要重新建立'
+    )
+  })
+
   it('defaults a new deployment request to symlink while still allowing copy', async () => {
     const skill = buildFakeSkills(1)[0]
     skill.sources[0].source_role = 'canonical'

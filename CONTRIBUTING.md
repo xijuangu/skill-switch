@@ -41,7 +41,7 @@ npm run package     # 为当前平台构建安装包
 - 主进程领域测试通过真实临时 SQLite 与临时文件系统运行；renderer 测试渲染真实页面或对话框，只 mock preload 暴露的 `window.api`。
 - 不引入 Contributor Covenant、Issue Forms、PR 模板、CLA、DCO 或复杂治理流程。
 
-更多架构、流程与历史 issue 索引见 [docs/development.md](docs/development.md)。
+更多架构、流程与历史 issue 索引见 [docs/development.md](docs/development.md)。维护者准备正式版本时，请严格遵循根目录的 [RELEASING.md](RELEASING.md)。
 
 ## Getting started (English)
 
@@ -53,4 +53,4 @@ npm run dev       # launch the Electron dev app (rebuilds Electron ABI first)
 npm run verify    # typecheck + tests + build main/renderer bundles
 ```
 
-Open a Pull Request against the baseline branch, reference the related issue, and explain the *why* in your commit message. No CLA or DCO is required; contributions are licensed under MIT. See [docs/development.md](docs/development.md) for architecture and the historical issue index.
+Open a Pull Request against the baseline branch, reference the related issue, and explain the *why* in your commit message. No CLA or DCO is required; contributions are licensed under MIT. See [docs/development.md](docs/development.md) for architecture and the historical issue index, and [RELEASING.md](RELEASING.md) for the maintainer release checklist.
