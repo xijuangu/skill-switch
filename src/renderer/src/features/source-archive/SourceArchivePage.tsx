@@ -143,7 +143,7 @@ export function SourceArchiveContent() {
                       {batch.items.length === 0
                         ? '无'
                         : batch.items.map((item, i) => (
-                            <span key={item.skillId}>{item.skillName}{i > 0 ? '、' : ''}</span>
+                            <span key={item.skillId}>{i > 0 ? '、' : ''}{item.skillName}</span>
                           ))}
                     </p>
                   </div>

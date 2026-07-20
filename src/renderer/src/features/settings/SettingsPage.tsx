@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Database, Monitor } from 'lucide-react'
 import { Button, Input } from '../../shared'
+import packageJson from '../../../../../package.json'
 
 type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 type SkillLibraryView = Awaited<ReturnType<typeof window.api.getSkillLibrary>>
@@ -117,7 +118,7 @@ export function SettingsPage() {
       </section>
 
       <div className="text-2xs text-foreground-muted mt-2">
-        skill-switch v0.1.0
+        skill-switch v{packageJson.version}
       </div>
     </div>
   )

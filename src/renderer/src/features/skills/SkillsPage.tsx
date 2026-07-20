@@ -400,7 +400,11 @@ export function SkillsPage({
   }
 
   return (
-    <div className="flex gap-0 h-full -mx-6 -my-6 overflow-hidden">
+    <div
+      role="region"
+      aria-label="Skills 工作区"
+      className="flex h-full min-h-0 min-w-0 w-full overflow-hidden"
+    >
       <div className="w-72 shrink-0 border-r border-border flex flex-col bg-surface min-h-0">
         <div className="p-3 space-y-2 border-b border-border">
           <div className="flex items-center gap-2">
@@ -432,25 +436,30 @@ export function SkillsPage({
           </div>
         </div>
 
-        <div className="p-2 border-b border-border flex gap-1">
+        <div
+          role="toolbar"
+          aria-label="Skill 操作"
+          className="grid grid-cols-3 gap-1 p-2 border-b border-border"
+        >
           <Button
             variant="secondary" size="sm"
             onClick={onScan}
             loading={scanning}
-            className="flex-1"
+            className="w-full"
           >
             {scanning ? '扫描中…' : '扫描'}
           </Button>
           <Button
             variant="secondary" size="sm"
             onClick={() => setInstallOpen(true)}
-            className="flex-1"
+            className="w-full"
           >
             安装
           </Button>
           <Button
             variant={bulkSelecting ? 'primary' : 'secondary'}
             size="sm"
+            className="w-full"
             onClick={() => {
               setBulkSelecting((current) => !current)
               if (bulkSelecting) setBulkSelectedIds(new Set())
@@ -494,7 +503,11 @@ export function SkillsPage({
           </div>
         )}
 
-        <div className="flex-1 overflow-auto min-h-0" role="listbox" aria-label="Skill 列表">
+        <div
+          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pb-2"
+          role="listbox"
+          aria-label="Skill 列表"
+        >
           {filtered.length === 0 ? (
             <div className="p-6 text-center">
               <p className="text-xs text-foreground-muted mb-2">
@@ -534,7 +547,7 @@ export function SkillsPage({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 min-w-0 min-h-0 overflow-auto">
         {selected ? (
           <SkillDetail
             skill={selected}
@@ -1029,6 +1042,7 @@ function SourceItem({
       </div>
       {expanded && (
         <div className="border-t border-border p-2.5 space-y-1">
+          <MetaRow icon={FolderOpen} label="完整路径" value={source.path} />
           <MetaRow icon={Hash} label="hash" value={source.hash} />
           <MetaRow icon={Calendar} label="mtime" value={new Date(source.mtime).toLocaleString()} />
           {source.repo_url && <MetaRow icon={GitBranch} label="repo" value={source.repo_url} />}
@@ -1044,7 +1058,7 @@ function MetaRow({ icon: Icon, label, value }: { icon: typeof Hash; label: strin
   return (
     <div className="flex items-start gap-2 text-2xs">
       <span className="text-foreground-muted w-14 shrink-0">{label}</span>
-      <code className="font-mono text-foreground-secondary break-all">{value}</code>
+      <code className="font-mono text-foreground-secondary break-all select-text">{value}</code>
     </div>
   )
 }

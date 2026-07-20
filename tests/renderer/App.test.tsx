@@ -555,6 +555,7 @@ describe('App (integration)', () => {
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     expect(await screen.findByText('权威源码库')).toBeInTheDocument()
     expect(screen.getByText('/canonical/skills')).toBeInTheDocument()
+    expect(screen.getByText('skill-switch v1.0.0')).toBeInTheDocument()
     expect(screen.queryByText('候选来源目录')).not.toBeInTheDocument()
     expect(screen.queryByText('/imports/team-skills')).not.toBeInTheDocument()
 
@@ -796,6 +797,11 @@ describe('App (integration)', () => {
         archivePath: '/archive/batch-r/demo', originalPath: '/imports/demo',
         originalPaths: ['/imports/demo'], originalHash: 'hash-r',
         originalHashes: ['hash-r'], archivedToolPaths: ['/tools/codex/demo']
+      }, {
+        skillId: 4, skillName: 'demo-two', canonicalPath: '/canonical/demo-two',
+        archivePath: '/archive/batch-r/demo-two', originalPath: '/imports/demo-two',
+        originalPaths: ['/imports/demo-two'], originalHash: 'hash-r-two',
+        originalHashes: ['hash-r-two'], archivedToolPaths: []
       }],
       archive: { sizeBytes: 1024, recoverable: true, purgeable: true, purgedAt: null, recoveryBlockedReason: null },
       createdAt: '2026-07-16T00:00:00.000Z', completedAt: '2026-07-16T00:01:00.000Z',
@@ -848,6 +854,9 @@ describe('App (integration)', () => {
     expect(screen.getByText('demo')).toBeInTheDocument()
     expect(screen.getByText('cleaned-skill')).toBeInTheDocument()
     expect(screen.getByText('pending-skill')).toBeInTheDocument()
+    expect(screen.getByText((_, element) =>
+      element?.textContent === '涉及 Skill：demo、demo-two'
+    )).toBeInTheDocument()
   })
 
   it('hides backupId/hash/path in expandable technical details on the Recovery 备份 tab', async () => {
@@ -996,7 +1005,7 @@ describe('SkillsPage 1000-row smoke (#56)', () => {
     expect(screen.queryByText('skill-0001')).not.toBeInTheDocument()
   })
 
-  it('distinguishes the Canonical Source from Candidate Sources', () => {
+  it('distinguishes sources and shows the complete path first when expanded', async () => {
     const skill = buildFakeSkills(1)[0]
     skill.sources = [
       {
@@ -1039,6 +1048,12 @@ describe('SkillsPage 1000-row smoke (#56)', () => {
 
     expect(screen.getByText('权威来源')).toBeInTheDocument()
     expect(screen.getByText('候选来源')).toBeInTheDocument()
+    const collapsedPath = screen.getByText('/canonical/demo')
+    await userEvent.click(collapsedPath.closest('button')!)
+    const pathLabel = screen.getByText('完整路径')
+    const details = pathLabel.parentElement?.parentElement
+    expect(pathLabel.parentElement).toBe(details?.firstElementChild)
+    expect(pathLabel.parentElement).toHaveTextContent('完整路径/canonical/demo')
   })
 })
 
@@ -1666,11 +1681,22 @@ describe('SkillsPage toolbar entry consolidation (#65)', () => {
 
   it('removes the duplicate 添加 entry and keeps 扫描/安装/批量 with stable accessible names', () => {
     renderSkillsPage(buildFakeSkills(1))
-    expect(screen.getByRole('button', { name: '扫描' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '安装' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '批量' })).toBeInTheDocument()
+    const toolbar = screen.getByRole('toolbar', { name: 'Skill 操作' })
+    const scan = screen.getByRole('button', { name: '扫描' })
+    const install = screen.getByRole('button', { name: '安装' })
+    const bulk = screen.getByRole('button', { name: '批量' })
+    expect(toolbar).toContainElement(scan)
+    expect(toolbar).toContainElement(install)
+    expect(toolbar).toContainElement(bulk)
     // 重复的"添加"入口已删除
     expect(screen.queryByRole('button', { name: '添加' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the Skill list inside the Skills workspace scroll region', () => {
+    renderSkillsPage(buildFakeSkills(20))
+    const workspace = screen.getByRole('region', { name: 'Skills 工作区' })
+    const list = screen.getByRole('listbox', { name: 'Skill 列表' })
+    expect(workspace).toContainElement(list)
   })
 
   it('keeps the local directory entry reachable from the unified 安装 dialog', async () => {

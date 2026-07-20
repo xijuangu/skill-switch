@@ -72,13 +72,15 @@
         "dmg"
       ],
       "category": "public.app-category.developer-tools",
-      "icon": "resources/icons/icon.icns"
+      "icon": "resources/icons/icon.icns",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "resources/icons/icon.ico"
+      "icon": "resources/icons/icon.ico",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
     },
     "linux": {
       "target": [
@@ -86,7 +88,8 @@
         "deb"
       ],
       "category": "Development",
-      "icon": "resources/icons/icon-512.png"
+      "icon": "resources/icons/icon-512.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }

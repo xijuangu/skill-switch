@@ -67,6 +67,20 @@ describe('issue #118: 最小开源仓库信任面', () => {
     expect(text).toContain('未签名')
     expect(text).toContain('Gatekeeper')
     expect(text).toContain('SmartScreen')
+    expect(text).toContain('在「工具」中启用 / 禁用或自定义路径')
+    expect(text).not.toContain('在「设置」中启用 / 禁用或自定义路径')
+  })
+
+  test('用户指南使用 v1 信息架构与正确的未签名说明', () => {
+    const guide = readFileSync(resolve(repoRoot, 'docs/user-guide.md'), 'utf8')
+    const notes = readFileSync(resolve(repoRoot, 'docs/release-notes/v1.0.0.md'), 'utf8')
+    expect(guide).toContain('在“工具”中启用需要管理的工具')
+    expect(guide).toContain('“恢复”页的“来源归档”')
+    expect(guide).toContain('“恢复”页的“备份”')
+    expect(guide).not.toContain('在“设置”中启用需要管理的工具')
+    expect(notes).toContain('unsigned and unnotarized')
+    expect(notes).not.toContain('unsigned and notarized')
+    expect(notes).not.toContain('Intel Mac 可运行')
   })
 
   test('内部架构与历史 issue 清单已移出 README', () => {

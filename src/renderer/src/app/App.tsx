@@ -106,7 +106,11 @@ function AppShell() {
         </ul>
       </nav>
 
-      <main className="flex-1 p-6 overflow-hidden">
+      <main
+        className={`flex-1 min-w-0 min-h-0 overflow-hidden ${
+          page === 'skills' ? 'p-0' : 'p-6'
+        }`}
+      >
         {page === 'skills' && (
             <SkillsPage
               skills={skills}

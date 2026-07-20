@@ -97,6 +97,19 @@ describe('issue #119: v1.0.0 Draft Release 自动合同', () => {
     expect(text).toContain('generate_release_notes: false')
   })
 
+  test('Draft Release 同时依赖三平台 verify 与 package', () => {
+    const text = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8')
+    expect(text).toMatch(/release:[\s\S]*?needs:\s*\[verify,\s*package\]/)
+  })
+
+  test('要求内资产校验版本、架构与非空文件', () => {
+    const text = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8')
+    expect(text).toContain('Asset version mismatch')
+    expect(text).toContain('Missing required Windows x64 NSIS installer')
+    expect(text).toContain('Missing required Linux x64 installer')
+    expect(text).toContain('find release-assets -type f -size 0')
+  })
+
   test('CI workflow verify job 在三平台原生 runner 上运行', () => {
     const ciPath = resolve(repoRoot, '.github/workflows/ci.yml')
     const text = readFileSync(ciPath, 'utf8')
