@@ -22,11 +22,19 @@ interface PackageScripts {
 }
 interface PackageJson {
   scripts?: PackageScripts
+  engines?: { node?: string }
 }
 const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8')) as PackageJson
 const scripts = pkg.scripts ?? {}
+const workflow = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8')
 
 describe('issue #64: native ABI 准备流程互不污染', () => {
+  test('开发与 CI 使用 Electron 41 支持且有 better-sqlite3 预编译包的 Node 22', () => {
+    expect(pkg.engines?.node).toBe('>=22.12.0')
+    expect(workflow.match(/node-version:\s*22/g)).toHaveLength(2)
+    expect(workflow).not.toMatch(/node-version:\s*20/)
+  })
+
   test('native:node 为当前 Node 运行时强制重建 better-sqlite3', () => {
     const node = scripts['native:node']
     expect(node, 'scripts.native:node must exist').toBeTruthy()
