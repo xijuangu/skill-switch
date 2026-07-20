@@ -136,8 +136,8 @@ jobs:
             echo "::error::Missing required Windows x64 NSIS installer"
             missing=1
           fi
-          if ! ls release-assets/*-"${PKG_VERSION}"-x64.AppImage >/dev/null 2>&1 \
-            && ! ls release-assets/*-"${PKG_VERSION}"-x64.deb >/dev/null 2>&1; then
+          if ! ls release-assets/*-"${PKG_VERSION}"-x86_64.AppImage >/dev/null 2>&1 \
+            && ! ls release-assets/*-"${PKG_VERSION}"-amd64.deb >/dev/null 2>&1; then
             echo "::error::Missing required Linux x64 installer (AppImage or DEB)"
             missing=1
           fi
