@@ -965,7 +965,7 @@ function SourcePanel({
                 · {sources.length} 个来源
               </span>
               <code className="text-2xs font-mono text-foreground-muted ml-auto">
-                hash: {shortHash(hash)}
+                哈希：{shortHash(hash)}
               </code>
             </div>
             <div className="p-2 space-y-2 bg-surface">
@@ -1043,8 +1043,8 @@ function SourceItem({
       {expanded && (
         <div className="border-t border-border p-2.5 space-y-1">
           <MetaRow icon={FolderOpen} label="完整路径" value={source.path} />
-          <MetaRow icon={Hash} label="hash" value={source.hash} />
-          <MetaRow icon={Calendar} label="mtime" value={new Date(source.mtime).toLocaleString()} />
+          <MetaRow icon={Hash} label="内容哈希" value={source.hash} />
+          <MetaRow icon={Calendar} label="修改时间" value={new Date(source.mtime).toLocaleString()} />
           {source.repo_url && <MetaRow icon={GitBranch} label="repo" value={source.repo_url} />}
           {source.commit_sha && <MetaRow icon={GitBranch} label="sha" value={source.commit_sha.slice(0, 12)} />}
           <MetaRow icon={Calendar} label="发现时间" value={new Date(source.discovered_at).toLocaleString()} />

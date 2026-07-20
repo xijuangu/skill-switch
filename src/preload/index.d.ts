@@ -436,6 +436,9 @@ export interface DriftStatusView {
   skillName: string
   targetTool: string
   targetPath: string
+  targetId?: string
+  targetEntryName?: string
+  externalError?: string
   deployment: DeploymentView | null
   targetExists: boolean
   currentSourceHash: string | null
@@ -447,6 +450,11 @@ export interface ToolWithDriftsView {
   config: ToolConfigView
   drifts: DriftStatusView[]
 }
+
+export type UpdateCheckResultView =
+  | { status: 'update-available'; currentVersion: string; latestVersion: string; releaseUrl: string }
+  | { status: 'up-to-date'; currentVersion: string; latestVersion: string }
+  | { status: 'unavailable'; currentVersion: string; message: string }
 
 // ===== Install(#7)=====
 
@@ -478,6 +486,7 @@ declare global {
       confirmSourceRelocation: (confirmationId: string) => Promise<SourceRelocationOutcomeView>
       undoSourceRelocation: (relocationId: string) => Promise<SourceRelocationOutcomeView>
       getSettings: () => Promise<SettingsView>
+      checkForUpdates: () => Promise<UpdateCheckResultView>
       getSourceRoots: () => Promise<SourceRootView[]>
       registerSourceRoot: (path: string) => Promise<SourceRootScanResultView>
       rescanSourceRoot: (rootId: number) => Promise<SourceRootScanResultView>
@@ -505,6 +514,8 @@ declare global {
       bulkConfirmDeploy: (requests: Array<{ key: string; confirmationId: string }>) => Promise<BulkMutationResultView>
       bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
       bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) => Promise<BulkMutationResultView>
+      bulkDetachDeployments: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
+      bulkManageExternalSkills: (requests: Array<{ key: string; targetId: string; entryName: string }>) => Promise<BulkMutationResultView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       adoptTargetAsCandidate: (deploymentId: number) => Promise<TargetAdoptionOutcomeView>
       getBulkAdoptionFacts: () => Promise<BulkAdoptionPreviewFactsView>

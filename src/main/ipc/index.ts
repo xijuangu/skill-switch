@@ -5,7 +5,7 @@
 // 启动序列 runStartupSequence:平台检测 + settings 初始化 + 一次性多工具扫描
 // (覆盖本次启动新出现的工具目录)。
 
-import { ipcMain, dialog } from 'electron'
+import { app, ipcMain, dialog, shell } from 'electron'
 import { homedir, tmpdir } from 'os'
 import { readFileSync } from 'fs'
 import type { DB } from '../db/database'
@@ -52,6 +52,8 @@ import { readToolDrifts } from '../services/deployer'
 import { installFromGitHub, installFromZip, installFromLocalDir } from '../services/installer'
 import { createSkillLibraryFacade, type ConflictResolutionDecision } from '../services/skill-library-facade'
 import { createBulkMutationFacade } from '../services/bulk-mutation-facade'
+import { checkForUpdate } from '../services/update-checker'
+import { handleWindowOpenRequest } from '../external-link-policy'
 import {
   detachSourceRoot,
   listSourceRoots,
@@ -164,13 +166,25 @@ export function readToolsView(
 ): ToolWithDriftsView[] {
   return toolConfigs
     .filter((config) => config.enabled)
-    .map((config) => ({
-      config,
-      drifts:
+    .map((config) => {
+      const drifts =
         config.enabled && config.exists
           ? readToolDrifts(db, config.key, config.existingPaths, inspectDeployment)
           : []
-    }))
+      return {
+        config,
+        drifts: drifts.map((drift) => {
+          if (drift.kind !== 'external') return drift
+          const target = config.existingTargets.find(
+            (candidate) => resolveWithin(
+              candidate.path,
+              drift.targetEntryName ?? drift.skillName
+            ) === drift.targetPath
+          )
+          return target ? { ...drift, targetId: target.id } : drift
+        })
+      }
+    })
 }
 
 function buildSettingsView(settings: AppSettings): SettingsView {
@@ -272,7 +286,9 @@ export function registerIpcHandlers(db: DB): void {
     deploy: deploymentFacade.deploy,
     confirmDeploy: deploymentFacade.confirm,
     undeploy: deploymentFacade.undeploy,
-    removeFromRegistry: removeSkillFromRegistry
+    removeFromRegistry: removeSkillFromRegistry,
+    detachRegistration: async (deploymentId) => deploymentFacade.detachRegistration(deploymentId),
+    manageExternal: deploymentFacade.manageExternal
   })
 
   ipcMain.handle('scan', async () => {
@@ -377,6 +393,22 @@ export function registerIpcHandlers(db: DB): void {
   ipcMain.handle('getSettings', async () => {
     const settings = readSettings(SETTINGS_PATH)
     return buildSettingsView(settings)
+  })
+
+  ipcMain.handle('checkForUpdates', async () => {
+    const result = await checkForUpdate(app.getVersion())
+    if (result.status === 'update-available') {
+      const { openExternal } = handleWindowOpenRequest(result.releaseUrl)
+      if (!openExternal) {
+        return {
+          status: 'unavailable' as const,
+          currentVersion: result.currentVersion,
+          message: 'GitHub Release 地址未通过安全校验。'
+        }
+      }
+      await shell.openExternal(openExternal)
+    }
+    return result
   })
 
   ipcMain.handle('getSourceRoots', async () => listSourceRoots(db))
@@ -553,6 +585,31 @@ export function registerIpcHandlers(db: DB): void {
       return {
         key: assertNonEmptyString(dto.key, `bulk remove item ${index} key`),
         skillId: assertInteger(dto.skillId, `bulk remove item ${index} skillId`)
+      }
+    }))
+  })
+
+  ipcMain.handle('bulk:detachDeployments', async (_e, requests: unknown) => {
+    if (!Array.isArray(requests)) throw new Error('bulk detach requests must be an array')
+    return bulkMutationFacade.detach(requests.map((request, index) => {
+      if (typeof request !== 'object' || request === null) throw new Error(`bulk detach item ${index} must be an object`)
+      const dto = request as Record<string, unknown>
+      return {
+        key: assertNonEmptyString(dto.key, `bulk detach item ${index} key`),
+        deploymentId: assertInteger(dto.deploymentId, `bulk detach item ${index} deploymentId`)
+      }
+    }))
+  })
+
+  ipcMain.handle('bulk:manageExternalSkills', async (_e, requests: unknown) => {
+    if (!Array.isArray(requests)) throw new Error('bulk external management requests must be an array')
+    return bulkMutationFacade.manageExternal(requests.map((request, index) => {
+      if (typeof request !== 'object' || request === null) throw new Error(`bulk external item ${index} must be an object`)
+      const dto = request as Record<string, unknown>
+      return {
+        key: assertNonEmptyString(dto.key, `bulk external item ${index} key`),
+        targetId: assertNonEmptyString(dto.targetId, `bulk external item ${index} targetId`),
+        entryName: validateSkillName(assertNonEmptyString(dto.entryName, `bulk external item ${index} entryName`))
       }
     }))
   })

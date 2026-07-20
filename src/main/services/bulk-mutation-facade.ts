@@ -1,7 +1,8 @@
 import type {
   DeploymentMutationOutcome,
   DeploymentOutcome,
-  DeploymentRequest
+  DeploymentRequest,
+  ExternalManagementOutcome
 } from './deployment-facade'
 import {
   RegistryMutationRejectedError,
@@ -19,7 +20,7 @@ export interface BulkMutationItem {
   key: string
   status: BulkItemStatus
   message?: string
-  outcome?: DeploymentOutcome | DeploymentMutationOutcome | RemoveFromRegistryResult
+  outcome?: DeploymentOutcome | DeploymentMutationOutcome | ExternalManagementOutcome | RemoveFromRegistryResult
 }
 
 export interface BulkMutationResult {
@@ -43,11 +44,19 @@ export interface BulkRemoveRequest {
   skillId: number
 }
 
+export interface BulkExternalManagementRequest {
+  key: string
+  targetId: string
+  entryName: string
+}
+
 interface BulkMutationDependencies {
   deploy: (request: DeploymentRequest) => Promise<DeploymentOutcome>
   confirmDeploy: (confirmationId: string) => Promise<DeploymentOutcome>
   undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcome>
   removeFromRegistry: (skillId: number) => Promise<RemoveFromRegistryResult>
+  detachRegistration?: (deploymentId: number) => Promise<DeploymentMutationOutcome>
+  manageExternal?: (request: { targetId: string; entryName: string }) => Promise<ExternalManagementOutcome>
 }
 
 function summarize(items: BulkMutationItem[]): BulkMutationResult {
@@ -161,5 +170,42 @@ export function createBulkMutationFacade(deps: BulkMutationDependencies) {
     return summarize(items)
   }
 
-  return { deploy, confirmDeploy, undeploy, remove }
+  async function detach(requests: BulkUndeployRequest[]): Promise<BulkMutationResult> {
+    if (!deps.detachRegistration) throw new Error('bulk detach is unavailable')
+    const items: BulkMutationItem[] = []
+    for (const request of requests) {
+      const outcome = await deps.detachRegistration(request.deploymentId)
+      items.push({
+        key: request.key,
+        status: outcome.status,
+        ...('message' in outcome ? { message: outcome.message } : {}),
+        outcome
+      })
+    }
+    return summarize(items)
+  }
+
+  async function manageExternal(
+    requests: BulkExternalManagementRequest[]
+  ): Promise<BulkMutationResult> {
+    if (!deps.manageExternal) throw new Error('bulk external management is unavailable')
+    const items: BulkMutationItem[] = []
+    for (const { key, ...request } of requests) {
+      try {
+        const outcome = await deps.manageExternal(request)
+        items.push({
+          key,
+          status: outcome.status,
+          ...('message' in outcome ? { message: outcome.message } : {}),
+          outcome
+        })
+      } catch (error) {
+        if (!isPerItemOperationalError(error)) throw error
+        items.push({ key, status: 'rejected', message: messageOf(error) })
+      }
+    }
+    return summarize(items)
+  }
+
+  return { deploy, confirmDeploy, undeploy, remove, detach, manageExternal }
 }

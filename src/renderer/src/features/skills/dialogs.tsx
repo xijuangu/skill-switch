@@ -625,7 +625,7 @@ export function DeployDialogContent({
               <div className="px-3 py-2 rounded border border-warning-subtle bg-warning-subtle space-y-0.5">
                 {currentGroup ? (
                   <div className="text-2xs text-warning font-medium">
-                    当前来源属于版本组 · {currentGroup.count} 个来源 · hash: {shortHash(currentGroup.hash)}
+                    当前来源属于版本组 · {currentGroup.count} 个来源 · 哈希：{shortHash(currentGroup.hash)}
                   </div>
                 ) : (
                   <div className="text-2xs text-warning font-medium">当前来源未匹配任何版本组</div>

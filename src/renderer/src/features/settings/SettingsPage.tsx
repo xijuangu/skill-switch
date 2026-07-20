@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Database, Monitor } from 'lucide-react'
+import { Database, Monitor, RefreshCw } from 'lucide-react'
 import { Button, Input } from '../../shared'
 import packageJson from '../../../../../package.json'
 
@@ -13,6 +13,8 @@ export function SettingsPage() {
   const [busy, setBusy] = useState(false)
   const [retention, setRetention] = useState<number>(20)
   const [skillLibrary, setSkillLibrary] = useState<SkillLibraryView | null>(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     const [s, library] = await Promise.all([
@@ -41,6 +43,23 @@ export function SettingsPage() {
 
   const handleSaveRetention = () =>
     run(() => window.api.setBackupRetention(retention))
+
+  const handleCheckForUpdates = async () => {
+    setUpdateBusy(true)
+    setUpdateMessage(null)
+    try {
+      const result = await window.api.checkForUpdates()
+      if (result.status === 'update-available') {
+        setUpdateMessage(`发现新版本 v${result.latestVersion}，已在浏览器打开 GitHub。`)
+      } else if (result.status === 'up-to-date') {
+        setUpdateMessage(`当前已是最新版本 v${result.currentVersion}。`)
+      } else {
+        setUpdateMessage(`检查更新失败：${result.message}`)
+      }
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
 
   if (!settings || !skillLibrary) {
     return (
@@ -117,9 +136,31 @@ export function SettingsPage() {
         </div>
       </section>
 
-      <div className="text-2xs text-foreground-muted mt-2">
-        skill-switch v{packageJson.version}
-      </div>
+      <section className="mb-8">
+        <div className="flex items-center gap-2 mb-3">
+          <RefreshCw className="h-4 w-4 text-foreground-secondary" />
+          <h2 className="text-sm font-semibold">版本与更新</h2>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-foreground-secondary">
+            skill-switch v{packageJson.version}
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleCheckForUpdates}
+            disabled={updateBusy}
+          >
+            {updateBusy ? '正在检查…' : '检查更新'}
+          </Button>
+        </div>
+        {updateMessage && (
+          <p className="mt-2 text-2xs text-foreground-muted">{updateMessage}</p>
+        )}
+        <p className="mt-2 text-2xs text-foreground-muted">
+          发现新版本时只会打开 GitHub Release 页面，不会自动下载或安装。
+        </p>
+      </section>
     </div>
   )
 }

@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
+import { lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { upsertSkill } from '../src/main/db/dao/skills'
+import { getSkillByName, upsertSkill } from '../src/main/db/dao/skills'
 import { getSourceByPath, upsertSource } from '../src/main/db/dao/skill-sources'
 import { createDeploymentFacade } from '../src/main/services/deployment-facade'
 import { hashDir } from '../src/main/services/hash'
@@ -65,6 +65,123 @@ function setup() {
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
 
 describe('Deployment Facade', () => {
+  test('adopts an external directory as a managed copy using only target identity and Skill name', async () => {
+    const env = setup()
+    const externalPath = join(env.targetRoot, 'external-one')
+    mkdirSync(externalPath)
+    writeFileSync(join(externalPath, 'SKILL.md'), '---\nname: external-one\n---\n# external')
+
+    const result = await env.create().manageExternal({
+      targetId: env.targetId,
+      entryName: 'external-one'
+    })
+
+    expect(result).toMatchObject({ status: 'completed', skillName: 'external-one' })
+    const skill = getSkillByName(env.db, 'external-one')!
+    const deployment = getDeploymentBySkillAndTargetId(env.db, skill.id, env.targetId)!
+    expect(deployment).toMatchObject({
+      management: 'managed',
+      mode: 'copy',
+      target_path: externalPath
+    })
+    expect(readFileSync(join(externalPath, 'SKILL.md'), 'utf8')).toContain('# external')
+    expect(readFileSync(join(env.canonicalRepositoryPath, 'external-one', 'SKILL.md'), 'utf8')).toContain('# external')
+  })
+
+  test('uses SKILL.md frontmatter as the identity when the external directory name differs', async () => {
+    const env = setup()
+    const externalPath = join(env.targetRoot, 'folder-name')
+    mkdirSync(externalPath)
+    writeFileSync(join(externalPath, 'SKILL.md'), '---\nname: declared-name\n---\n# external')
+
+    const result = await env.create().manageExternal({
+      targetId: env.targetId,
+      entryName: 'folder-name'
+    })
+
+    expect(result).toMatchObject({ status: 'completed', skillName: 'declared-name' })
+    expect(readFileSync(join(env.canonicalRepositoryPath, 'declared-name', 'SKILL.md'), 'utf8')).toContain('# external')
+  })
+
+  test.runIf(process.platform !== 'win32')('rejects an external symlink instead of creating a canonical Source that still depends on it', async () => {
+    const env = setup()
+    const realSource = join(dirname(env.targetRoot), 'external-real')
+    const linkedEntry = join(env.targetRoot, 'external-link')
+    mkdirSync(realSource)
+    writeFileSync(join(realSource, 'SKILL.md'), '---\nname: linked-skill\n---\n# linked content')
+    symlinkSync(realSource, linkedEntry)
+
+    await expect(env.create().manageExternal({
+      targetId: env.targetId,
+      entryName: 'external-link'
+    })).resolves.toMatchObject({ status: 'rejected', reason: 'external-invalid' })
+    const canonical = join(env.canonicalRepositoryPath, 'linked-skill')
+    expect(() => lstatSync(canonical)).toThrow()
+  })
+
+  test('rejects an external Skill that conflicts with an existing canonical Source', async () => {
+    const env = setup()
+    const externalPath = join(env.targetRoot, 'demo')
+    mkdirSync(externalPath)
+    writeFileSync(join(externalPath, 'SKILL.md'), '# conflicting external content')
+
+    await expect(env.create().manageExternal({
+      targetId: env.targetId,
+      entryName: 'demo'
+    })).resolves.toMatchObject({
+      status: 'rejected',
+      reason: 'canonical-conflict'
+    })
+    expect(readFileSync(join(env.sourcePath, 'SKILL.md'), 'utf8')).toBe('# demo')
+  })
+
+  test('does not overwrite an existing relationship when two directories declare the same Skill', async () => {
+    const env = setup()
+    for (const entryName of ['first-folder', 'second-folder']) {
+      const path = join(env.targetRoot, entryName)
+      mkdirSync(path)
+      writeFileSync(join(path, 'SKILL.md'), '---\nname: shared-external\n---\n# same content')
+    }
+    const facade = env.create()
+    await expect(facade.manageExternal({
+      targetId: env.targetId,
+      entryName: 'first-folder'
+    })).resolves.toMatchObject({ status: 'completed' })
+    await expect(facade.manageExternal({
+      targetId: env.targetId,
+      entryName: 'second-folder'
+    })).resolves.toMatchObject({ status: 'rejected', reason: 'already-managed' })
+
+    const skill = getSkillByName(env.db, 'shared-external')!
+    expect(getDeploymentBySkillAndTargetId(env.db, skill.id, env.targetId)?.target_path)
+      .toBe(join(env.targetRoot, 'first-folder'))
+  })
+
+  test('removes a newly staged canonical directory when registration fails', async () => {
+    const env = setup()
+    const externalPath = join(env.targetRoot, 'rollback-me')
+    mkdirSync(externalPath)
+    writeFileSync(join(externalPath, 'SKILL.md'), '---\nname: rollback-me\n---\n# external')
+    env.db.exec(`
+      CREATE TRIGGER reject_rollback_me
+      BEFORE INSERT ON deployments
+      WHEN NEW.target_path = '${externalPath.replaceAll("'", "''")}'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected registration failure');
+      END;
+    `)
+
+    await expect(env.create().manageExternal({
+      targetId: env.targetId,
+      entryName: 'rollback-me'
+    })).rejects.toThrow('injected registration failure')
+    expect(() => readFileSync(
+      join(env.canonicalRepositoryPath, 'rollback-me', 'SKILL.md'),
+      'utf8'
+    )).toThrow()
+    expect(readFileSync(join(externalPath, 'SKILL.md'), 'utf8')).toContain('# external')
+  })
+
   test('reports a configured-target relation as target-unconfigured after that target is removed', () => {
     const env = setup()
     const oldTargetPath = join(env.targetRoot, 'demo')

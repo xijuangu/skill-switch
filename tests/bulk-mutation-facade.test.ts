@@ -3,6 +3,36 @@ import { createBulkMutationFacade } from '../src/main/services/bulk-mutation-fac
 import { RegistryMutationRejectedError, RegistryRecoveryRequiredError } from '../src/main/services/registry'
 
 describe('BulkMutationFacade', () => {
+  test('bulk-detaches registrations and manages external Skills independently', async () => {
+    const detachRegistration = vi.fn()
+      .mockResolvedValueOnce({ status: 'completed', deploymentId: 1 })
+      .mockResolvedValueOnce({ status: 'rejected', reason: 'deployment-not-found', message: 'missing' })
+    const manageExternal = vi.fn()
+      .mockResolvedValueOnce({ status: 'rejected', reason: 'external-invalid', message: 'invalid frontmatter' })
+      .mockResolvedValueOnce({ status: 'completed', deploymentId: 3, skillId: 3, skillName: 'external' })
+    const facade = createBulkMutationFacade({
+      deploy: vi.fn(),
+      confirmDeploy: vi.fn(),
+      undeploy: vi.fn(),
+      removeFromRegistry: vi.fn(),
+      detachRegistration,
+      manageExternal
+    })
+
+    await expect(facade.detach([
+      { key: 'one', deploymentId: 1 },
+      { key: 'two', deploymentId: 2 }
+    ])).resolves.toMatchObject({ total: 2, completed: 1, failed: 1 })
+    await expect(facade.manageExternal([
+      { key: 'invalid', targetId: 'agents-user', entryName: 'invalid' },
+      { key: 'external', targetId: 'agents-user', entryName: 'external' }
+    ])).resolves.toMatchObject({ total: 2, completed: 1, failed: 1 })
+    expect(manageExternal).toHaveBeenLastCalledWith({
+      targetId: 'agents-user',
+      entryName: 'external'
+    })
+  })
+
   test('preserves item order and reports mixed deploy outcomes without aborting later items', async () => {
     const deploy = vi.fn()
       .mockResolvedValueOnce({ status: 'completed', deploymentId: 11, result: {} })

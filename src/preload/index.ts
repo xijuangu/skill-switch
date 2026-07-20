@@ -42,6 +42,7 @@ const api = {
   undoSourceRelocation: (relocationId: string) =>
     ipcRenderer.invoke('skillLibrary:undoSourceRelocation', relocationId),
   getSettings: () => ipcRenderer.invoke('getSettings'),
+  checkForUpdates: () => ipcRenderer.invoke('checkForUpdates'),
   getSourceRoots: () => ipcRenderer.invoke('getSourceRoots'),
   registerSourceRoot: (path: string) => ipcRenderer.invoke('registerSourceRoot', path),
   rescanSourceRoot: (rootId: number) => ipcRenderer.invoke('rescanSourceRoot', rootId),
@@ -76,6 +77,10 @@ const api = {
     ipcRenderer.invoke('bulk:undeploy', requests),
   bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) =>
     ipcRenderer.invoke('bulk:removeFromRegistry', requests),
+  bulkDetachDeployments: (requests: Array<{ key: string; deploymentId: number }>) =>
+    ipcRenderer.invoke('bulk:detachDeployments', requests),
+  bulkManageExternalSkills: (requests: Array<{ key: string; targetId: string; entryName: string }>) =>
+    ipcRenderer.invoke('bulk:manageExternalSkills', requests),
   adoptDeployment: (deploymentId: number) => ipcRenderer.invoke('adoptDeployment', deploymentId),
   adoptTargetAsCandidate: (deploymentId: number) => ipcRenderer.invoke('adoptTargetAsCandidate', deploymentId),
   getBulkAdoptionFacts: () => ipcRenderer.invoke('getBulkAdoptionFacts'),

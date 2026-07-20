@@ -96,7 +96,7 @@ describe('issue #118: 最小开源仓库信任面', () => {
 
   test('中文用户指南覆盖安装、整理、接管、部署、取消部署、批量操作与恢复', () => {
     const text = readFileSync(resolve(repoRoot, 'docs/user-guide.md'), 'utf8')
-    for (const section of ['安装 Skill', '整理', '部署模式', '批量操作', '外部订阅、接管与旧目标', '取消部署与从注册表移除', '漂移与恢复']) {
+    for (const section of ['安装 Skill', '整理', '部署模式', '批量操作', '外部订阅、接管与旧目标', '检查更新', '取消部署与从注册表移除', '漂移与恢复']) {
       expect(text, `expected section header: ${section}`).toContain(section)
     }
   })
