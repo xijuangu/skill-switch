@@ -837,13 +837,13 @@ describe('App (integration)', () => {
     expect(screen.getByRole('button', { name: '取消部署所选 (2)' })).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('checkbox', { name: '全选外部 skill' }))
-    expect(screen.getByRole('button', { name: '纳入管理所选 (1)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '纳入管理 (触发全量扫描)' })).toBeInTheDocument()
 
     const card = screen.getByRole('button', { name: /Agents/ }).closest('li')!
     expect(within(card).getByRole('button', { name: '取消部署所选 (2)' })).toBeInTheDocument()
     expect(within(card).getByRole('button', { name: '重新部署所选 (2)' })).toBeInTheDocument()
     expect(within(card).getByRole('button', { name: '接管所选 (1)' })).toBeInTheDocument()
-    expect(within(card).getByRole('button', { name: '纳入管理所选 (1)' })).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: '纳入管理 (触发全量扫描)' })).toBeInTheDocument()
   })
 
   it('runs bulk undeploy per item after one confirmation listing the targets (#127)', async () => {
@@ -914,10 +914,11 @@ describe('App (integration)', () => {
     await userEvent.click(screen.getByRole('button', { name: '工具' }))
     await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
     await userEvent.click(screen.getByRole('checkbox', { name: '全选外部 skill' }))
-    await userEvent.click(screen.getByRole('button', { name: '纳入管理所选 (1)' }))
+    await userEvent.click(screen.getByRole('button', { name: '纳入管理 (触发全量扫描)' }))
 
     const dialog = screen.getByRole('dialog')
-    expect(dialog).toHaveTextContent('将 1 个外部 skill 原地注册为候选来源?')
+    expect(dialog).toHaveTextContent('纳入管理:重新扫描工具目录?')
+    expect(dialog).toHaveTextContent('此操作是全量扫描')
     expect(dialog).toHaveTextContent('/agents/delta')
     await userEvent.click(within(dialog).getByRole('button', { name: '纳入管理' }))
 

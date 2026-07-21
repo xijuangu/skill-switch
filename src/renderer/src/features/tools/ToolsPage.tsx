@@ -808,14 +808,15 @@ export function ToolsPage({
       <Dialog
         open={bulkManageConfirm !== null}
         onClose={() => setBulkManageConfirm(null)}
-        title={`将 ${bulkManageConfirm?.length ?? 0} 个外部 skill 原地注册为候选来源?`}
-        description="将重新扫描工具目录，把其中发现的外部 skill（含所选）原地登记为候选来源，不移动文件。登记后可在 Skills 页查看并整理或部署。"
+        title="纳入管理:重新扫描工具目录?"
+        description="将重新扫描所有已启用工具目录,把其中发现的外部 skill 原地登记为候选来源(不移动文件)。此操作是全量扫描,不限于所选条目;所选条目仅作为参考列在下方。登记后可在 Skills 页查看并整理或部署。"
         confirmLabel="纳入管理"
         onConfirm={handleBulkManage}
         busy={bulkBusy}
         closeOnOverlay={false}
       >
         <ul className="space-y-1">
+          <li className="text-2xs text-foreground-muted">所选外部 skill(参考,扫描会覆盖工具目录下全部外部 skill):</li>
           {bulkManageConfirm?.map((drift) => (
             <li key={drift.targetPath} className="text-xs text-foreground-secondary">
               {drift.skillName}
@@ -1086,7 +1087,7 @@ function ToolCard({
                   )}
                   {selectedExternalDrifts.length > 0 && (
                     <Button variant="secondary" size="sm" onClick={() => onBulkManage(selectedExternalDrifts)}>
-                      纳入管理所选 ({selectedExternalDrifts.length})
+                      纳入管理 (触发全量扫描)
                     </Button>
                   )}
                 </div>
