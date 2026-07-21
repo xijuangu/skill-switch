@@ -126,6 +126,7 @@ skill-switch 的产品化历史以 issue 为单位推进；以下是主要里程
 - 安装、批量部署与安全移除工作流：[issue #97](https://github.com/xijuangu/skill-switch/issues/97)
 - 公开 v1.0 产品化与发布规格：[issue #114](https://github.com/xijuangu/skill-switch/issues/114)
 - 建立最小开源仓库信任面：[issue #118](https://github.com/xijuangu/skill-switch/issues/118)
+- 批量 UX 与受管部署重定向：[issues #123–#127](https://github.com/xijuangu/skill-switch/issues)（整理时原地迁移受管部署、卡片式整理预览、批量操作对话框整合、工具页分组多选）
 
 ## ADR
 

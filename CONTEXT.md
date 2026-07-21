@@ -28,7 +28,7 @@ _Avoid_: Skill rename, Deployment target, absolute destination path
 _Avoid_: version replacement, Skill rename, consolidation
 
 **Consolidation（整理）**:
-用户选择 Candidate Source 并解决去重或版本冲突后，将其归并到 Canonical Repository 中指定位置，使每个已整理 Skill 只保留权威 Source。原 Candidate Source 从原位置移除必须可恢复。整理不创建 Deployment；用户之后另行将权威 Source 手动部署到选定的 Discovery Target。完整性承诺仅覆盖已登记关系和已配置 Discovery Target；系统不全盘搜索未知引用，也不在原位置留下兼容链接。
+用户选择 Candidate Source 并解决去重或版本冲突后，将其归并到 Canonical Repository 中指定位置，使每个已整理 Skill 只保留权威 Source。原 Candidate Source 从原位置移除必须可恢复。整理不创建 Deployment；批次已通过 Durable Lock 独占的 Managed Deployment 会被原子迁移到新权威 Source（只 UPDATE 现有记录的指向，不创建或删除 Deployment 记录），避免清单与文件系统漂移。用户之后另行将权威 Source 手动部署到选定的 Discovery Target。完整性承诺仅覆盖已登记关系和已配置 Discovery Target；系统不全盘搜索未知引用，也不在原位置留下兼容链接。
 _Avoid_: scan, adoption, deployment, irreversible deletion
 
 **Source Archive（来源归档区）**:

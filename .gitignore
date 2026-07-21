@@ -33,5 +33,8 @@ pnpm-debug.log*
 # Test coverage
 coverage/
 
+# TypeScript incremental build cache
+*.tsbuildinfo
+
 # Local skill-switch runtime (中央仓库实体,不入库)
 # 注意:settings.json 和 ccswitch.db 是用户本地状态,不入库
