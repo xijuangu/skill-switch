@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { RefreshCw, ChevronRight, ChevronDown, Wrench, FolderTree, Plus } from 'lucide-react'
+import { RotateCcw, Trash2, RefreshCw, ChevronRight, ChevronDown, Wrench, FolderTree, Plus, AlertCircle } from 'lucide-react'
 import { Button, Input, StatusDot, EmptyState, Skeleton, Dialog, getDriftStatus } from '../../shared'
 import { useToast } from '../../app/Toast'
 import { type DriftKey, driftKeyEquals } from './driftKey'
@@ -12,46 +12,7 @@ type BulkAdoptionResultView = Extract<Awaited<ReturnType<typeof window.api.confi
 type SettingsView = Awaited<ReturnType<typeof window.api.getSettings>>
 type ToolConfigView = SettingsView['tools'][number]
 type SourceRootView = Awaited<ReturnType<typeof window.api.getSourceRoots>>[number]
-type BulkRelationshipAction = 'undeploy' | 'detach' | 'manage'
 
-function relationshipKey(drift: DriftStatusView): string {
-  return drift.deployment
-    ? `deployment:${drift.deployment.id}`
-    : `external:${drift.targetId ?? 'unresolved'}:${drift.targetEntryName ?? drift.skillName}`
-}
-
-function relationshipDialogTitle(
-  pending: { action: BulkRelationshipAction; items: DriftStatusView[] } | null
-): string {
-  if (!pending) return ''
-  if (pending.action === 'undeploy') return `批量取消 ${pending.items.length} 个部署`
-  if (pending.action === 'detach') return `批量解除 ${pending.items.length} 条登记`
-  return `把 ${pending.items.length} 个外部 Skill 纳入管理`
-}
-
-function relationshipDialogDescription(
-  pending: { action: BulkRelationshipAction; items: DriftStatusView[] } | null
-): string {
-  if (!pending) return ''
-  if (pending.action === 'undeploy') {
-    return '将移除所选工具中的链接或副本，但保留权威 Source。'
-  }
-  if (pending.action === 'detach') {
-    return '只删除所选部署关系的登记，不修改工具目录或权威 Source。'
-  }
-  return '将当前内容复制到权威源码库，并把工具目录中的现有副本登记为受管 copy Deployment；原目录内容不会被删除。同名权威 Source 内容一致时直接建立关系，内容不同时会拒绝并要求先解决版本冲突。'
-}
-
-function relationshipDialogConfirmLabel(
-  pending: { action: BulkRelationshipAction; items: DriftStatusView[] } | null
-): string {
-  if (pending?.action === 'undeploy') return '确认批量取消部署'
-  if (pending?.action === 'detach') return '确认批量解除登记'
-  return '确认纳入管理'
-}
-
-// #116:工具页集中「工具启用 / 发现目录 / 外部订阅 / 受管 Deployment 状态」,
-// 让工具相关配置不再混入全局设置。
 export function ToolsPage({
   tools,
   loading,
@@ -72,14 +33,14 @@ export function ToolsPage({
   const [bulkResult, setBulkResult] = useState<BulkAdoptionResultView | null>(null)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkFacts, setBulkFacts] = useState<Awaited<ReturnType<typeof window.api.getBulkAdoptionFacts>>>({ total: 0, tools: [] })
-  const [selectedRelationships, setSelectedRelationships] = useState<Set<string>>(new Set())
-  const [pendingRelationshipAction, setPendingRelationshipAction] = useState<{
-    action: BulkRelationshipAction
-    items: DriftStatusView[]
-  } | null>(null)
-  const [relationshipBusy, setRelationshipBusy] = useState(false)
-
-  // 工具配置 + 发现目录(原设置页内容)
+  // #127 分组多选批量操作:四类批量确认 + 批量重新部署的汇总风险弹窗。
+  const [bulkUndeployConfirm, setBulkUndeployConfirm] = useState<DriftStatusView[] | null>(null)
+  const [bulkRedeployConfirm, setBulkRedeployConfirm] = useState<DriftStatusView[] | null>(null)
+  const [bulkAdoptConfirm, setBulkAdoptConfirm] = useState<DriftStatusView[] | null>(null)
+  const [bulkManageConfirm, setBulkManageConfirm] = useState<DriftStatusView[] | null>(null)
+  const [bulkRedeployRisks, setBulkRedeployRisks] = useState<Array<{ drift: DriftStatusView; risk: ConfirmationRequiredView }> | null>(null)
+  const [selectionResetKey, setSelectionResetKey] = useState(0)
+  // 工具配置 + 发现目录(#116)
   const [settings, setSettings] = useState<SettingsView | null>(null)
   const [configBusy, setConfigBusy] = useState(false)
   const [newToolKey, setNewToolKey] = useState('')
@@ -92,17 +53,6 @@ export function ToolsPage({
 
   const { success, error: toastError, info } = useToast()
   const observedCount = bulkFacts.total
-  const allRelationships = tools.flatMap((tool) => tool.drifts)
-  const selectedItems = allRelationships.filter((drift) =>
-    selectedRelationships.has(relationshipKey(drift))
-  )
-  const selectedManaged = selectedItems.filter(
-    (drift) => drift.deployment?.management === 'managed'
-  )
-  const selectedRegistered = selectedItems.filter((drift) => drift.deployment !== null)
-  const selectedExternal = selectedItems.filter(
-    (drift) => drift.deployment === null && drift.kind === 'external' && drift.targetId && !drift.externalError
-  )
 
   const refreshBulkFacts = async () => {
     setBulkFacts(await window.api.getBulkAdoptionFacts())
@@ -373,55 +323,6 @@ export function ToolsPage({
     }
   }
 
-  const toggleRelationshipSelection = (drift: DriftStatusView) => {
-    const key = relationshipKey(drift)
-    setSelectedRelationships((current) => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  const runRelationshipAction = async () => {
-    if (!pendingRelationshipAction) return
-    const { action, items } = pendingRelationshipAction
-    setRelationshipBusy(true)
-    try {
-      const result = action === 'undeploy'
-        ? await window.api.bulkUndeploy(items.map((drift) => ({
-            key: relationshipKey(drift),
-            deploymentId: drift.deployment!.id
-          })))
-        : action === 'detach'
-          ? await window.api.bulkDetachDeployments(items.map((drift) => ({
-              key: relationshipKey(drift),
-              deploymentId: drift.deployment!.id
-            })))
-          : await window.api.bulkManageExternalSkills(items.map((drift) => ({
-              key: relationshipKey(drift),
-              targetId: drift.targetId!,
-              entryName: drift.targetEntryName ?? drift.skillName
-            })))
-      if (result.failed > 0) {
-        info(`完成 ${result.completed} 项，失败 ${result.failed} 项`)
-      } else {
-        success(`已完成 ${result.completed} 项操作`)
-      }
-      const processed = new Set(items.map(relationshipKey))
-      setSelectedRelationships((current) =>
-        new Set([...current].filter((key) => !processed.has(key)))
-      )
-      setPendingRelationshipAction(null)
-      await refreshPage()
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-      await refreshPage()
-    } finally {
-      setRelationshipBusy(false)
-    }
-  }
-
   const redeployRiskDescription = redeployRisk == null ? '' : [
     ...redeployRisk.facts.reasons.map((reason) => ({
       'external-overwrite': '目标包含外部内容，将覆盖现有内容。',
@@ -433,6 +334,117 @@ export function ToolsPage({
       ? `覆盖前会备份到：${redeployRisk.facts.backup.directory ?? '应用备份目录'}`
       : '本次不会创建外部内容备份。'
   ].join('\n')
+
+  const redeployReasonLabel = (reason: string, facts: ConfirmationRequiredView['facts']) =>
+    ({
+      'external-overwrite': '目标包含外部内容，将覆盖现有内容。',
+      'target-modified': '部署目标已被修改，将用当前来源覆盖。',
+      'mode-degraded': `请求模式 ${facts.requestedMode} 不可用，实际将使用 ${facts.actualMode}。`
+    })[reason] ?? reason
+
+  // #127 前端逐条调用现有单条 API 实现批量(不新增后端批量接口)。
+  async function runBulk<T>(
+    items: T[],
+    runItem: (item: T) => Promise<boolean>,
+    label: string
+  ): Promise<void> {
+    setBulkBusy(true)
+    let completed = 0
+    let failed = 0
+    for (const item of items) {
+      try {
+        if (await runItem(item)) completed++
+        else failed++
+      } catch {
+        failed++
+      }
+    }
+    setBulkBusy(false)
+    setSelectionResetKey((key) => key + 1)
+    await refreshPage()
+    if (failed === 0) success(`${label} ${completed} 个`)
+    else toastError(`${label}：${completed} 个成功，${failed} 个失败`)
+  }
+
+  const handleBulkUndeploy = async () => {
+    if (!bulkUndeployConfirm) return
+    const targets = bulkUndeployConfirm.filter((drift) => drift.deployment)
+    await runBulk(
+      targets,
+      async (drift) => (await window.api.undeploy(drift.deployment!.id)).status === 'completed',
+      '已取消部署'
+    )
+    setBulkUndeployConfirm(null)
+  }
+
+  const handleBulkRedeploy = async () => {
+    if (!bulkRedeployConfirm) return
+    const targets = bulkRedeployConfirm.filter((drift) => drift.deployment)
+    setBulkBusy(true)
+    const risks: Array<{ drift: DriftStatusView; risk: ConfirmationRequiredView }> = []
+    let completed = 0
+    let failed = 0
+    for (const drift of targets) {
+      try {
+        const outcome = await window.api.redeploy(drift.deployment!.id)
+        if (outcome.status === 'confirmation-required') risks.push({ drift, risk: outcome })
+        else if (outcome.status === 'completed') completed++
+        else failed++
+      } catch {
+        failed++
+      }
+    }
+    setBulkBusy(false)
+    setBulkRedeployConfirm(null)
+    if (risks.length > 0) {
+      // 有风险项:汇总到一个弹窗一次性确认;无风险项已直接完成。
+      setBulkRedeployRisks(risks)
+    } else {
+      setSelectionResetKey((key) => key + 1)
+      await refreshPage()
+      if (failed === 0) success(`已重新部署 ${completed} 个`)
+      else toastError(`重新部署：${completed} 个成功，${failed} 个失败`)
+    }
+  }
+
+  const handleBulkRedeployRiskConfirm = async () => {
+    if (!bulkRedeployRisks) return
+    const risks = bulkRedeployRisks
+    await runBulk(
+      risks,
+      async ({ risk }) => (await window.api.deploymentConfirm(risk.confirmationId)).status === 'completed',
+      '已重新部署'
+    )
+    setBulkRedeployRisks(null)
+  }
+
+  const handleBulkAdoptSelected = async () => {
+    if (!bulkAdoptConfirm) return
+    const targets = bulkAdoptConfirm.filter((drift) => drift.deployment)
+    await runBulk(
+      targets,
+      async (drift) => (await window.api.adoptDeployment(drift.deployment!.id)).status === 'completed',
+      '已接管'
+    )
+    setBulkAdoptConfirm(null)
+  }
+
+  const handleBulkManage = async () => {
+    if (!bulkManageConfirm) return
+    setBulkBusy(true)
+    try {
+      // 纳入管理 = 触发扫描,把工具目录下未登记的外部 skill 原地注册为候选来源(不移动文件)。
+      await window.api.scan()
+      setSelectionResetKey((key) => key + 1)
+      await refreshPage()
+      success('已登记为候选来源，可在 Skills 页管理')
+    } catch (e) {
+      toastError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBulkBusy(false)
+      setBulkManageConfirm(null)
+    }
+  }
 
   if (loading) {
     return (
@@ -561,42 +573,9 @@ export function ToolsPage({
       </section>
 
       <section>
-        <div className="flex items-center justify-between gap-3 mb-3">
-          <div className="flex items-center gap-2">
-            <FolderTree className="h-3.5 w-3.5 text-foreground-secondary" />
-            <h3 className="text-xs font-semibold text-foreground">部署关系</h3>
-          </div>
-          {selectedItems.length > 0 && (
-            <div className="flex items-center gap-2" role="toolbar" aria-label="部署关系批量操作">
-              {selectedManaged.length > 0 && (
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => setPendingRelationshipAction({ action: 'undeploy', items: selectedManaged })}
-                >
-                  批量取消部署 ({selectedManaged.length})
-                </Button>
-              )}
-              {selectedRegistered.length > 0 && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setPendingRelationshipAction({ action: 'detach', items: selectedRegistered })}
-                >
-                  批量解除登记 ({selectedRegistered.length})
-                </Button>
-              )}
-              {selectedExternal.length > 0 && (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => setPendingRelationshipAction({ action: 'manage', items: selectedExternal })}
-                >
-                  批量纳入管理 ({selectedExternal.length})
-                </Button>
-              )}
-            </div>
-          )}
+        <div className="flex items-center gap-2 mb-3">
+          <FolderTree className="h-3.5 w-3.5 text-foreground-secondary" />
+          <h3 className="text-xs font-semibold text-foreground">部署关系</h3>
         </div>
         {tools.length === 0 ? (
           <EmptyState
@@ -618,26 +597,16 @@ export function ToolsPage({
                 onRemoveFromManifest={(deploymentId, skillId, targetTool, skillName, targetPath, staleTarget) =>
                   setConfirmRemoveManifest({ deploymentId, skillId, targetTool, skillName, targetPath, staleTarget })}
                 onAdopt={(deploymentId, skillId, targetTool, skillName) => setConfirmAdopt({ deploymentId, skillId, targetTool, skillName })}
-                selectedRelationships={selectedRelationships}
-                onToggleSelection={toggleRelationshipSelection}
-                onManageExternal={(drift) => setPendingRelationshipAction({ action: 'manage', items: [drift] })}
+                selectionResetKey={selectionResetKey}
+                onBulkUndeploy={(drifts) => setBulkUndeployConfirm(drifts)}
+                onBulkRedeploy={(drifts) => setBulkRedeployConfirm(drifts)}
+                onBulkAdopt={(drifts) => setBulkAdoptConfirm(drifts)}
+                onBulkManage={(drifts) => setBulkManageConfirm(drifts)}
               />
             ))}
           </ul>
         )}
       </section>
-
-      <Dialog
-        open={pendingRelationshipAction !== null}
-        onClose={() => setPendingRelationshipAction(null)}
-        title={relationshipDialogTitle(pendingRelationshipAction)}
-        description={relationshipDialogDescription(pendingRelationshipAction)}
-        confirmLabel={relationshipDialogConfirmLabel(pendingRelationshipAction)}
-        onConfirm={runRelationshipAction}
-        variant={pendingRelationshipAction?.action === 'undeploy' ? 'danger' : 'default'}
-        busy={relationshipBusy}
-        closeOnOverlay={false}
-      />
 
       <Dialog
         open={bulkPreview !== null}
@@ -745,7 +714,479 @@ export function ToolsPage({
         busy={driftKeyEquals(busyKey, confirmRedeploy)}
         closeOnOverlay={false}
       />
+
+      <Dialog
+        open={bulkUndeployConfirm !== null}
+        onClose={() => setBulkUndeployConfirm(null)}
+        title={`取消部署所选 ${bulkUndeployConfirm?.length ?? 0} 个?`}
+        description="此操作只移除部署（链接/副本），不删源文件。逐条执行，失败项不影响其他。"
+        variant="danger"
+        confirmLabel="取消部署"
+        onConfirm={handleBulkUndeploy}
+        busy={bulkBusy}
+        closeOnOverlay={false}
+      >
+        <ul className="space-y-1">
+          {bulkUndeployConfirm?.map((drift) => (
+            <li key={drift.deployment?.id ?? drift.targetPath} className="text-xs text-foreground-secondary">
+              {drift.skillName} → {drift.targetTool}
+            </li>
+          ))}
+        </ul>
+      </Dialog>
+
+      <Dialog
+        open={bulkRedeployConfirm !== null}
+        onClose={() => setBulkRedeployConfirm(null)}
+        title={`重新部署所选 ${bulkRedeployConfirm?.length ?? 0} 个?`}
+        description="将用当前来源覆盖部署目标。如存在覆盖风险，会汇总列出供你一次性确认。"
+        confirmLabel="重新部署"
+        onConfirm={handleBulkRedeploy}
+        busy={bulkBusy}
+        closeOnOverlay={false}
+      >
+        <ul className="space-y-1">
+          {bulkRedeployConfirm?.map((drift) => (
+            <li key={drift.deployment?.id ?? drift.targetPath} className="text-xs text-foreground-secondary">
+              {drift.skillName} → {drift.targetTool}
+            </li>
+          ))}
+        </ul>
+      </Dialog>
+
+      <Dialog
+        open={bulkRedeployRisks !== null}
+        onClose={() => {
+          setBulkRedeployRisks(null)
+          setSelectionResetKey((key) => key + 1)
+          void refreshPage()
+        }}
+        title={`确认重新部署风险（${bulkRedeployRisks?.length ?? 0} 项）`}
+        description="以下部署存在覆盖风险，确认后将全部重新部署。"
+        variant="danger"
+        confirmLabel="确认并全部重新部署"
+        onConfirm={handleBulkRedeployRiskConfirm}
+        busy={bulkBusy}
+        closeOnOverlay={false}
+      >
+        <ul className="space-y-2">
+          {bulkRedeployRisks?.map(({ drift, risk }) => (
+            <li key={drift.deployment?.id ?? drift.targetPath} className="text-xs border border-border rounded p-2">
+              <p className="font-medium text-foreground">{risk.facts.skillName} → {risk.facts.targetDisplayName}</p>
+              <ul className="mt-1 space-y-0.5">
+                {risk.facts.reasons.map((reason) => (
+                  <li key={reason} className="text-2xs text-warning">{redeployReasonLabel(reason, risk.facts)}</li>
+                ))}
+              </ul>
+              {risk.facts.backup.required && (
+                <p className="mt-1 text-2xs text-foreground-muted">覆盖前备份到：{risk.facts.backup.directory ?? '应用备份目录'}</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      </Dialog>
+
+      <Dialog
+        open={bulkAdoptConfirm !== null}
+        onClose={() => setBulkAdoptConfirm(null)}
+        title={`接管所选 ${bulkAdoptConfirm?.length ?? 0} 个外部订阅?`}
+        description="接管前会逐条重新校验链接仍指向登记的权威 Source，失败项不影响其他。接管不会重建链接或修改文件。"
+        confirmLabel="接管"
+        onConfirm={handleBulkAdoptSelected}
+        busy={bulkBusy}
+        closeOnOverlay={false}
+      >
+        <ul className="space-y-1">
+          {bulkAdoptConfirm?.map((drift) => (
+            <li key={drift.deployment?.id ?? drift.targetPath} className="text-xs text-foreground-secondary">
+              {drift.skillName} → {drift.targetTool}
+            </li>
+          ))}
+        </ul>
+      </Dialog>
+
+      <Dialog
+        open={bulkManageConfirm !== null}
+        onClose={() => setBulkManageConfirm(null)}
+        title={`将 ${bulkManageConfirm?.length ?? 0} 个外部 skill 原地注册为候选来源?`}
+        description="将重新扫描工具目录，把其中发现的外部 skill（含所选）原地登记为候选来源，不移动文件。登记后可在 Skills 页查看并整理或部署。"
+        confirmLabel="纳入管理"
+        onConfirm={handleBulkManage}
+        busy={bulkBusy}
+        closeOnOverlay={false}
+      >
+        <ul className="space-y-1">
+          {bulkManageConfirm?.map((drift) => (
+            <li key={drift.targetPath} className="text-xs text-foreground-secondary">
+              {drift.skillName}
+              <code className="block text-2xs text-foreground-muted break-all">{drift.targetPath}</code>
+            </li>
+          ))}
+        </ul>
+      </Dialog>
     </div>
+  )
+}
+
+function ToolCard({
+  tool,
+  expanded,
+  onToggleExpand,
+  busyKey,
+  selectionResetKey,
+  onUndeploy,
+  onRedeploy,
+  onRemoveFromManifest,
+  onAdopt,
+  onBulkUndeploy,
+  onBulkRedeploy,
+  onBulkAdopt,
+  onBulkManage
+}: {
+  tool: ToolWithDriftsView
+  expanded: boolean
+  onToggleExpand: () => void
+  busyKey: DriftKey | null
+  selectionResetKey: number
+  onUndeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
+  onRedeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
+  onRemoveFromManifest: (deploymentId: number, skillId: number, targetTool: string, skillName: string, targetPath: string, staleTarget: boolean) => void
+  onAdopt: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
+  onBulkUndeploy: (drifts: DriftStatusView[]) => void
+  onBulkRedeploy: (drifts: DriftStatusView[]) => void
+  onBulkAdopt: (drifts: DriftStatusView[]) => void
+  onBulkManage: (drifts: DriftStatusView[]) => void
+}) {
+  const { config, drifts } = tool
+  const managed = drifts.filter((d) => d.kind !== 'external' && d.deployment?.management !== 'observed')
+  const observed = drifts.filter((d) => d.deployment?.management === 'observed')
+  const external = drifts.filter((d) => d.kind === 'external')
+  const driftCount = managed.filter((d) => d.kind !== 'normal').length
+
+  // #127 分组多选:managed/observed 按 deployment id,external 按 targetPath。
+  const [managedSelected, setManagedSelected] = useState<Set<number>>(new Set())
+  const [observedSelected, setObservedSelected] = useState<Set<number>>(new Set())
+  const [externalSelected, setExternalSelected] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    setManagedSelected(new Set())
+    setObservedSelected(new Set())
+    setExternalSelected(new Set())
+  }, [selectionResetKey])
+
+  const toggleManaged = (id: number) => setManagedSelected((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+  const toggleObserved = (id: number) => setObservedSelected((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+  const toggleExternal = (path: string) => setExternalSelected((prev) => {
+    const next = new Set(prev)
+    if (next.has(path)) next.delete(path)
+    else next.add(path)
+    return next
+  })
+
+  const managedIds = managed.map((d) => d.deployment!.id)
+  const allManagedSelected = managedIds.length > 0 && managedIds.every((id) => managedSelected.has(id))
+  const observedIds = observed.map((d) => d.deployment!.id)
+  const allObservedSelected = observedIds.length > 0 && observedIds.every((id) => observedSelected.has(id))
+  const externalPaths = external.map((d) => d.targetPath)
+  const allExternalSelected = externalPaths.length > 0 && externalPaths.every((path) => externalSelected.has(path))
+
+  const selectedManagedDrifts = managed.filter((d) => managedSelected.has(d.deployment!.id))
+  const selectedObservedDrifts = observed.filter((d) => observedSelected.has(d.deployment!.id))
+  const selectedExternalDrifts = external.filter((d) => externalSelected.has(d.targetPath))
+  const hasSelection = selectedManagedDrifts.length > 0 || selectedObservedDrifts.length > 0 || selectedExternalDrifts.length > 0
+
+  if (!config.enabled || !config.exists) {
+    return (
+      <li className="border border-border rounded-md p-3 bg-surface-secondary opacity-60">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-foreground-secondary">{config.displayName}</span>
+          {!config.exists && (
+            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface text-foreground-muted">缺失</span>
+          )}
+          {config.enabled && config.exists && (
+            <span className="text-xs text-foreground-muted">无 skill 目录</span>
+          )}
+        </div>
+      </li>
+    )
+  }
+
+  return (
+    <li className="border border-border rounded-md">
+      <button
+        className="w-full flex items-center justify-between p-3 text-left hover:bg-surface-hover transition-colors duration-fast"
+        onClick={onToggleExpand}
+      >
+        <div className="flex items-center gap-2">
+          {expanded ? <ChevronDown className="h-3.5 w-3.5 text-foreground-muted" /> : <ChevronRight className="h-3.5 w-3.5 text-foreground-muted" />}
+          <span className="text-sm font-medium text-foreground">{config.displayName}</span>
+          <StatusDot variant="success" label="已发现" />
+          {driftCount > 0 && (
+            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-warning-subtle text-warning font-medium">
+              {driftCount} 个异常
+            </span>
+          )}
+          {external.length > 0 && (
+            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-primary-subtle text-primary font-medium">
+              {external.length} 个外部
+            </span>
+          )}
+          {observed.length > 0 && (
+            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-warning-subtle text-warning font-medium">
+              {observed.length} 个外部订阅
+            </span>
+          )}
+        </div>
+        <span className="text-xs text-foreground-muted">
+          已部署 {managed.length} · 共 {drifts.length}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-border p-3">
+          <div className="text-2xs text-foreground-muted mb-2 space-y-0.5">
+            {config.existingPaths.map((path: string) => (
+              <div key={path} className="font-mono">{path}</div>
+            ))}
+          </div>
+          {drifts.length === 0 ? (
+            <p className="text-xs text-foreground-muted">该工具目录下无 skill。</p>
+          ) : (
+            <>
+              {managed.length > 0 && (
+                <div className="mb-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-2xs font-semibold text-foreground-muted uppercase">受管部署</p>
+                    <label className="flex items-center gap-1 text-2xs text-foreground-secondary cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        aria-label="全选受管部署"
+                        checked={allManagedSelected}
+                        onChange={() => setManagedSelected(allManagedSelected ? new Set() : new Set(managedIds))}
+                      />
+                      全选
+                    </label>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {managed.map((d) => (
+                      <DriftItem
+                        key={`managed:${d.deployment?.id ?? `${d.skillId}:${d.skillName}`}`}
+                        drift={d}
+                        busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
+                        selected={managedSelected.has(d.deployment!.id)}
+                        onToggleSelect={() => toggleManaged(d.deployment!.id)}
+                        onUndeploy={() => d.deployment && onUndeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
+                        onRedeploy={() => d.deployment && onRedeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
+                        onRemoveFromManifest={() => d.deployment && onRemoveFromManifest(
+                          d.deployment.id,
+                          d.skillId,
+                          d.targetTool,
+                          d.skillName,
+                          d.targetPath,
+                          d.kind === 'target-unconfigured'
+                        )}
+                      />
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {observed.length > 0 && (
+                <div className="border-t border-border-subtle pt-2 mb-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-2xs font-semibold text-foreground-muted uppercase">
+                      外部订阅（只读，接管后可变更）
+                    </p>
+                    <label className="flex items-center gap-1 text-2xs text-foreground-secondary cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        aria-label="全选外部订阅"
+                        checked={allObservedSelected}
+                        onChange={() => setObservedSelected(allObservedSelected ? new Set() : new Set(observedIds))}
+                      />
+                      全选
+                    </label>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {observed.map((d) => (
+                      <DriftItem
+                        key={`observed:${d.deployment!.id}`}
+                        drift={d}
+                        busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
+                        selected={observedSelected.has(d.deployment!.id)}
+                        onToggleSelect={() => toggleObserved(d.deployment!.id)}
+                        onRemoveFromManifest={() => onRemoveFromManifest(
+                          d.deployment!.id,
+                          d.skillId,
+                          d.targetTool,
+                          d.skillName,
+                          d.targetPath,
+                          d.kind === 'target-unconfigured'
+                        )}
+                        onAdopt={() => onAdopt(d.deployment!.id, d.skillId, d.targetTool, d.skillName)}
+                      />
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {external.length > 0 && (
+                <div className="border-t border-border-subtle pt-2">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-2xs font-semibold text-foreground-muted uppercase">
+                      外部 skill（skill-switch 未管理）
+                    </p>
+                    <label className="flex items-center gap-1 text-2xs text-foreground-secondary cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        aria-label="全选外部 skill"
+                        checked={allExternalSelected}
+                        onChange={() => setExternalSelected(allExternalSelected ? new Set() : new Set(externalPaths))}
+                      />
+                      全选
+                    </label>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {external.map((d) => (
+                      <DriftItem
+                        key={`ext:${d.skillName}`}
+                        drift={d}
+                        busy={false}
+                        selected={externalSelected.has(d.targetPath)}
+                        onToggleSelect={() => toggleExternal(d.targetPath)}
+                      />
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {hasSelection && (
+                <div className="border-t border-border-subtle mt-3 pt-2 flex items-center gap-2 flex-wrap">
+                  {selectedManagedDrifts.length > 0 && (
+                    <>
+                      <Button variant="danger" size="sm" onClick={() => onBulkUndeploy(selectedManagedDrifts)}>
+                        取消部署所选 ({selectedManagedDrifts.length})
+                      </Button>
+                      <Button variant="primary" size="sm" onClick={() => onBulkRedeploy(selectedManagedDrifts)}>
+                        重新部署所选 ({selectedManagedDrifts.length})
+                      </Button>
+                    </>
+                  )}
+                  {selectedObservedDrifts.length > 0 && (
+                    <Button variant="primary" size="sm" onClick={() => onBulkAdopt(selectedObservedDrifts)}>
+                      接管所选 ({selectedObservedDrifts.length})
+                    </Button>
+                  )}
+                  {selectedExternalDrifts.length > 0 && (
+                    <Button variant="secondary" size="sm" onClick={() => onBulkManage(selectedExternalDrifts)}>
+                      纳入管理所选 ({selectedExternalDrifts.length})
+                    </Button>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </li>
+  )
+}
+
+function DriftItem({
+  drift,
+  busy,
+  selected,
+  onToggleSelect,
+  onUndeploy,
+  onRedeploy,
+  onRemoveFromManifest,
+  onAdopt
+}: {
+  drift: DriftStatusView
+  busy: boolean
+  selected?: boolean
+  onToggleSelect?: () => void
+  onUndeploy?: () => void
+  onRedeploy?: () => void
+  onRemoveFromManifest?: () => void
+  onAdopt?: () => void
+}) {
+  const status = getDriftStatus(drift.kind)
+  const isExternal = drift.kind === 'external'
+  const isDrift = drift.kind === 'drift'
+  const isObserved = drift.deployment?.management === 'observed'
+
+  return (
+    <li className={`flex items-center justify-between bg-surface border border-border rounded px-2.5 py-1.5 ${isDrift ? 'opacity-50' : ''}`}>
+      <div className="flex items-center gap-2 min-w-0">
+        {onToggleSelect && (
+          <input
+            type="checkbox"
+            aria-label={`选择 ${drift.skillName}`}
+            checked={selected ?? false}
+            onChange={onToggleSelect}
+            className="shrink-0"
+          />
+        )}
+        <StatusDot variant={status.variant} label={status.label} />
+        <span className="text-xs font-medium text-foreground truncate">{drift.skillName}</span>
+        {drift.deployment && (
+          <span className="text-2xs text-foreground-secondary">{drift.deployment.mode}</span>
+        )}
+        {isObserved && (
+          <span className="text-2xs px-1.5 py-0.5 rounded bg-warning-subtle text-warning">外部订阅</span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        {!isObserved && onRedeploy && (drift.kind === 'drift' || drift.kind === 'target-modified' || drift.kind === 'link-mismatch') && (
+          <>
+            <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
+              重新部署
+            </Button>
+            {drift.kind === 'drift' && onRemoveFromManifest && (
+              <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
+                从清单移除
+              </Button>
+            )}
+          </>
+        )}
+        {!isObserved && onRedeploy && drift.kind === 'source-updated' && (
+          <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
+            更新
+          </Button>
+        )}
+        {!isObserved && onRemoveFromManifest && drift.kind === 'unresolved' && (
+          <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
+            从清单移除
+          </Button>
+        )}
+        {!isObserved && onUndeploy && drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && drift.kind !== 'target-unconfigured' && (
+          <Button variant="danger" size="sm" onClick={onUndeploy} disabled={busy}>
+            取消部署
+          </Button>
+        )}
+        {drift.kind === 'target-unconfigured' && onRemoveFromManifest && (
+          <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
+            解除登记
+          </Button>
+        )}
+        {isObserved && drift.kind !== 'target-unconfigured' && onAdopt && (
+          <Button variant="primary" size="sm" onClick={onAdopt} disabled={busy}>
+            接管
+          </Button>
+        )}
+        {isExternal && (
+          <span className="text-2xs text-foreground-muted">未管理</span>
+        )}
+      </div>
+    </li>
   )
 }
 
@@ -813,280 +1254,6 @@ function ToolPanel({
             移除
           </Button>
         )}
-      </div>
-    </li>
-  )
-}
-
-function ToolCard({
-  tool,
-  expanded,
-  onToggleExpand,
-  busyKey,
-  onUndeploy,
-  onRedeploy,
-  onRemoveFromManifest,
-  onAdopt,
-  selectedRelationships,
-  onToggleSelection,
-  onManageExternal
-}: {
-  tool: ToolWithDriftsView
-  expanded: boolean
-  onToggleExpand: () => void
-  busyKey: DriftKey | null
-  onUndeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
-  onRedeploy: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
-  onRemoveFromManifest: (deploymentId: number, skillId: number, targetTool: string, skillName: string, targetPath: string, staleTarget: boolean) => void
-  onAdopt: (deploymentId: number, skillId: number, targetTool: string, skillName: string) => void
-  selectedRelationships: Set<string>
-  onToggleSelection: (drift: DriftStatusView) => void
-  onManageExternal: (drift: DriftStatusView) => void
-}) {
-  const { config, drifts } = tool
-  const managed = drifts.filter((d) => d.deployment?.management === 'managed')
-  const observed = drifts.filter((d) => d.deployment?.management === 'observed')
-  const external = drifts.filter((d) => d.deployment === null)
-  const driftCount = drifts.filter(
-    (d) => d.kind === 'recovery-required' || (d.deployment?.management === 'managed' && d.kind !== 'normal')
-  ).length
-
-  if (!config.enabled || !config.exists) {
-    return (
-      <li className="border border-border rounded-md p-3 bg-surface-secondary opacity-60">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-foreground-secondary">{config.displayName}</span>
-          {!config.exists && (
-            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-surface text-foreground-muted">缺失</span>
-          )}
-          {config.enabled && config.exists && (
-            <span className="text-xs text-foreground-muted">无 skill 目录</span>
-          )}
-        </div>
-      </li>
-    )
-  }
-
-  return (
-    <li className="border border-border rounded-md">
-      <button
-        className="w-full flex items-center justify-between p-3 text-left hover:bg-surface-hover transition-colors duration-fast"
-        onClick={onToggleExpand}
-      >
-        <div className="flex items-center gap-2">
-          {expanded ? <ChevronDown className="h-3.5 w-3.5 text-foreground-muted" /> : <ChevronRight className="h-3.5 w-3.5 text-foreground-muted" />}
-          <span className="text-sm font-medium text-foreground">{config.displayName}</span>
-          <StatusDot variant="success" label="已发现" />
-          {driftCount > 0 && (
-            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-warning-subtle text-warning font-medium">
-              {driftCount} 个异常
-            </span>
-          )}
-          {external.length > 0 && (
-            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-primary-subtle text-primary font-medium">
-              {external.length} 个外部
-            </span>
-          )}
-          {observed.length > 0 && (
-            <span className="text-2xs px-1.5 py-0.5 rounded-full bg-warning-subtle text-warning font-medium">
-              {observed.length} 个外部订阅
-            </span>
-          )}
-        </div>
-        <span className="text-xs text-foreground-muted">
-          已部署 {managed.length} · 共 {drifts.length}
-        </span>
-      </button>
-
-      {expanded && (
-        <div className="border-t border-border p-3">
-          <div className="text-2xs text-foreground-muted mb-2 space-y-0.5">
-            {config.existingPaths.map((path: string) => (
-              <div key={path} className="font-mono">{path}</div>
-            ))}
-          </div>
-          {drifts.length === 0 ? (
-            <p className="text-xs text-foreground-muted">该工具目录下无 skill。</p>
-          ) : (
-            <>
-              {managed.length > 0 && (
-                <ul className="space-y-1.5 mb-3">
-                  {managed.map((d) => (
-                    <DriftItem
-                      key={`managed:${d.deployment?.id ?? `${d.skillId}:${d.skillName}`}`}
-                      drift={d}
-                      busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
-                      selected={selectedRelationships.has(relationshipKey(d))}
-                      selectionLabel={`选择部署 ${d.skillName}`}
-                      onToggleSelection={() => onToggleSelection(d)}
-                      onUndeploy={() => d.deployment && onUndeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
-                      onRedeploy={() => d.deployment && onRedeploy(d.deployment.id, d.skillId, d.targetTool, d.skillName)}
-                      onRemoveFromManifest={() => d.deployment && onRemoveFromManifest(
-                        d.deployment.id,
-                        d.skillId,
-                        d.targetTool,
-                        d.skillName,
-                        d.targetPath,
-                        d.kind === 'target-unconfigured'
-                      )}
-                    />
-                  ))}
-                </ul>
-              )}
-              {observed.length > 0 && (
-                <div className="border-t border-border-subtle pt-2 mb-3">
-                  <p className="text-2xs font-semibold text-foreground-muted uppercase mb-1.5">
-                    外部订阅（只读，接管后可变更）
-                  </p>
-                  <ul className="space-y-1.5">
-                    {observed.map((d) => (
-                      <DriftItem
-                        key={`observed:${d.deployment!.id}`}
-                        drift={d}
-                        busy={driftKeyEquals(busyKey, { skillId: d.skillId, targetTool: d.targetTool })}
-                        selected={selectedRelationships.has(relationshipKey(d))}
-                        selectionLabel={`选择外部订阅 ${d.skillName}`}
-                        onToggleSelection={() => onToggleSelection(d)}
-                        onRemoveFromManifest={() => onRemoveFromManifest(
-                          d.deployment!.id,
-                          d.skillId,
-                          d.targetTool,
-                          d.skillName,
-                          d.targetPath,
-                          d.kind === 'target-unconfigured'
-                        )}
-                        onAdopt={() => onAdopt(d.deployment!.id, d.skillId, d.targetTool, d.skillName)}
-                      />
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {external.length > 0 && (
-                <div className="border-t border-border-subtle pt-2">
-                  <p className="text-2xs font-semibold text-foreground-muted uppercase mb-1.5">
-                    外部 skill（skill-switch 未管理）
-                  </p>
-                  <ul className="space-y-1.5">
-                    {external.map((d) => (
-                      <DriftItem
-                        key={`ext:${d.skillName}`}
-                        drift={d}
-                        busy={false}
-                        selected={selectedRelationships.has(relationshipKey(d))}
-                        selectionLabel={`选择外部 Skill ${d.skillName}`}
-                        onToggleSelection={d.targetId && d.kind === 'external' && !d.externalError ? () => onToggleSelection(d) : undefined}
-                        onManage={d.targetId && d.kind === 'external' && !d.externalError ? () => onManageExternal(d) : undefined}
-                      />
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </li>
-  )
-}
-
-function DriftItem({
-  drift,
-  busy,
-  onUndeploy,
-  onRedeploy,
-  onRemoveFromManifest,
-  onAdopt,
-  selected,
-  selectionLabel,
-  onToggleSelection,
-  onManage
-}: {
-  drift: DriftStatusView
-  busy: boolean
-  onUndeploy?: () => void
-  onRedeploy?: () => void
-  onRemoveFromManifest?: () => void
-  onAdopt?: () => void
-  selected?: boolean
-  selectionLabel?: string
-  onToggleSelection?: () => void
-  onManage?: () => void
-}) {
-  const status = getDriftStatus(drift.kind)
-  const isExternal = drift.deployment === null
-  const isDrift = drift.kind === 'drift'
-  const isObserved = drift.deployment?.management === 'observed'
-
-  return (
-    <li className={`flex items-center justify-between bg-surface border border-border rounded px-2.5 py-1.5 ${isDrift ? 'opacity-50' : ''}`}>
-      <div className="flex items-center gap-2 min-w-0">
-        {onToggleSelection && (
-          <input
-            type="checkbox"
-            checked={selected ?? false}
-            onChange={onToggleSelection}
-            aria-label={selectionLabel}
-            className="rounded border-border"
-          />
-        )}
-        <StatusDot variant={status.variant} label={status.label} />
-        <span className="text-xs font-medium text-foreground truncate">{drift.skillName}</span>
-        {drift.deployment && (
-          <span className="text-2xs text-foreground-secondary">{drift.deployment.mode}</span>
-        )}
-        {isObserved && (
-          <span className="text-2xs px-1.5 py-0.5 rounded bg-warning-subtle text-warning">外部订阅</span>
-        )}
-      </div>
-      <div className="flex items-center gap-2 shrink-0">
-        {!isObserved && onRedeploy && (drift.kind === 'drift' || drift.kind === 'target-modified' || drift.kind === 'link-mismatch') && (
-          <>
-            <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
-              重新部署
-            </Button>
-            {drift.kind === 'drift' && onRemoveFromManifest && (
-              <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
-                从清单移除
-              </Button>
-            )}
-          </>
-        )}
-        {!isObserved && onRedeploy && drift.kind === 'source-updated' && (
-          <Button variant="primary" size="sm" onClick={onRedeploy} disabled={busy}>
-            更新
-          </Button>
-        )}
-        {!isObserved && onRemoveFromManifest && drift.kind === 'unresolved' && (
-          <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
-            从清单移除
-          </Button>
-        )}
-        {!isObserved && onUndeploy && drift.deployment !== null && drift.kind !== 'drift' && drift.kind !== 'unresolved' && drift.kind !== 'target-unconfigured' && (
-          <Button variant="danger" size="sm" onClick={onUndeploy} disabled={busy}>
-            取消部署
-          </Button>
-        )}
-        {drift.kind === 'target-unconfigured' && onRemoveFromManifest && (
-          <Button variant="secondary" size="sm" onClick={onRemoveFromManifest} disabled={busy}>
-            解除登记
-          </Button>
-        )}
-        {isObserved && drift.kind !== 'target-unconfigured' && onAdopt && (
-          <Button variant="primary" size="sm" onClick={onAdopt} disabled={busy}>
-            接管
-          </Button>
-        )}
-        {isExternal && drift.externalError ? (
-          <span className="text-2xs text-warning" title={drift.externalError}>无法纳入管理</span>
-        ) : isExternal && drift.kind === 'recovery-required' ? (
-          <span className="text-2xs text-warning">需要恢复</span>
-        ) : isExternal && onManage ? (
-          <Button variant="primary" size="sm" onClick={onManage} disabled={busy}>
-            纳入管理
-          </Button>
-        ) : isExternal ? (
-          <span className="text-2xs text-foreground-muted">目标身份不可用</span>
-        ) : null}
       </div>
     </li>
   )

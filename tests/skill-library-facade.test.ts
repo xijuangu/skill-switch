@@ -1557,6 +1557,115 @@ describe('SkillLibraryFacade', () => {
     fixture.db.close()
     fixture.root.cleanup()
   })
+
+  function managedDeploymentFixture(prefix: string, mode: 'symlink' | 'copy') {
+    const root = createTempDir(prefix)
+    const canonicalRepository = join(root.dir, 'canonical')
+    const sourceArchive = join(root.dir, 'source-archive')
+    const candidatePath = join(root.dir, 'candidates', 'demo')
+    const targetPath = join(root.dir, 'tool', 'demo')
+    mkdirSync(candidatePath, { recursive: true })
+    mkdirSync(join(root.dir, 'tool'), { recursive: true })
+    writeFileSync(join(candidatePath, 'SKILL.md'), '# candidate demo')
+    if (mode === 'symlink') {
+      symlinkSync(candidatePath, targetPath, 'dir')
+    } else {
+      mkdirSync(targetPath, { recursive: true })
+      writeFileSync(join(targetPath, 'SKILL.md'), '# candidate demo')
+    }
+    const db = createDatabase(join(root.dir, 'registry.db'), canonicalRepository)
+    const skillId = upsertSkill(db, 'demo', candidatePath)
+    upsertSource(db, skillId, candidatePath, hashDir(candidatePath), 1, 'indexed', {
+      role: 'candidate', origin: 'scan'
+    })
+    const source = getSourceByPath(db, candidatePath)!
+    upsertDeployment(db, skillId, 'codex', targetPath, mode, candidatePath, source.hash, {
+      sourceId: source.id,
+      targetId: 'codex:demo'
+    }, 'managed')
+    const facade = createSkillLibraryFacade({
+      db,
+      canonicalRepositoryPath: canonicalRepository,
+      sourceArchivePath: sourceArchive
+    })
+    return { root, db, facade, source, candidatePath, targetPath, canonicalRepository, sourceArchive, skillId }
+  }
+
+  test('consolidation redirects a managed symlink deployment to the new canonical path', () => {
+    const fixture = managedDeploymentFixture('skill-library-managed-symlink-', 'symlink')
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: '' }
+    ] })
+
+    // Preview should include a redirect-deployment operation
+    expect(preview.operations).toContainEqual(expect.objectContaining({ kind: 'redirect-deployment', path: fixture.targetPath }))
+
+    const result = fixture.facade.confirmConsolidation(preview.confirmationId)
+    expect(result).toMatchObject({ status: 'completed' })
+
+    const canonicalPath = join(fixture.canonicalRepository, 'demo')
+    // Symlink should now point to canonical
+    expect(lstatSync(fixture.targetPath).isSymbolicLink()).toBe(true)
+    expect(resolve(dirname(fixture.targetPath), readlinkSync(fixture.targetPath))).toBe(canonicalPath)
+    // Deployment record should be updated
+    const deployment = getAllDeployments(fixture.db)[0]
+    expect(deployment.source_path).toBe(canonicalPath)
+    expect(deployment.source_hash_at_deploy).toBe(hashDir(canonicalPath))
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('consolidation redeploys a managed copy deployment with canonical content', () => {
+    const fixture = managedDeploymentFixture('skill-library-managed-copy-', 'copy')
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: '' }
+    ] })
+
+    // Preview should include a redeploy-copy operation
+    expect(preview.operations).toContainEqual(expect.objectContaining({ kind: 'redeploy-copy', path: fixture.targetPath }))
+
+    const result = fixture.facade.confirmConsolidation(preview.confirmationId)
+    expect(result).toMatchObject({ status: 'completed' })
+
+    const canonicalPath = join(fixture.canonicalRepository, 'demo')
+    // Copy target should have canonical content
+    expect(readFileSync(join(fixture.targetPath, 'SKILL.md'), 'utf8')).toBe('# candidate demo')
+    expect(existsSync(fixture.targetPath)).toBe(true)
+    // Deployment record should be updated
+    const deployment = getAllDeployments(fixture.db)[0]
+    expect(deployment.source_path).toBe(canonicalPath)
+    expect(deployment.source_hash_at_deploy).toBe(hashDir(canonicalPath))
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
+
+  test('undo consolidation restores managed symlink to original candidate', () => {
+    const fixture = managedDeploymentFixture('skill-library-managed-undo-', 'symlink')
+
+    const preview = fixture.facade.previewConsolidationBatch({ items: [
+      { candidateSourceId: fixture.source.id, canonicalRelativeParent: '' }
+    ] })
+    fixture.facade.confirmConsolidation(preview.confirmationId)
+
+    // Undo should restore the original link
+    const undoResult = fixture.facade.undoConsolidation(preview.batchId)
+    expect(undoResult).toMatchObject({ status: 'undone' })
+
+    // Symlink should point back to the restored candidate
+    expect(lstatSync(fixture.targetPath).isSymbolicLink()).toBe(true)
+    expect(resolve(dirname(fixture.targetPath), readlinkSync(fixture.targetPath))).toBe(fixture.candidatePath)
+    // Deployment record should be restored
+    const deployment = getAllDeployments(fixture.db)[0]
+    expect(deployment.source_path).toBe(fixture.candidatePath)
+    expect(deployment.source_id).toBe(fixture.source.id)
+
+    fixture.db.close()
+    fixture.root.cleanup()
+  })
 })
 
 describe('SourceRecoveryFacade (#91)', () => {

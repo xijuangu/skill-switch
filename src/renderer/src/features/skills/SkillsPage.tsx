@@ -489,14 +489,6 @@ export function SkillsPage({
           </div>
         )}
 
-        {batchFlow.plan.length > 0 && (
-          <div className="p-2 border-b border-border">
-            <Button variant="primary" size="sm" className="w-full" onClick={batchFlow.open}>
-              批量整理 ({batchFlow.plan.length})
-            </Button>
-          </div>
-        )}
-
         {lastScan && (
           <div className="px-3 py-1.5 text-2xs text-foreground-muted border-b border-border">
             已扫描 {lastScan.totalScanned} 个 skill，登记 {lastScan.totalUpserted} 个
@@ -654,8 +646,16 @@ export function SkillsPage({
       {bulkActionsOpen && (
         <BulkSkillActionsDialog
           skills={skills.filter((skill) => bulkSelectedIds.has(skill.id))}
+          allFilteredSkills={filtered}
+          consolidationPlan={batchFlow.plan}
           onRefresh={onRefresh}
           onClose={() => setBulkActionsOpen(false)}
+          onConsolidate={(skillIds) => {
+            setBulkActionsOpen(false)
+            setBulkSelecting(false)
+            setBulkSelectedIds(new Set())
+            batchFlow.open(skillIds)
+          }}
         />
       )}
 

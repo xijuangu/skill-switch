@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from '../../src/renderer/src/app/App'
 import { ToastProvider } from '../../src/renderer/src/app/Toast'
@@ -416,7 +416,7 @@ describe('App (integration)', () => {
       })
     })
 
-    const view = render(<BulkSkillActionsDialog skills={skills} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    const view = render(<BulkSkillActionsDialog skills={skills} allFilteredSkills={skills} consolidationPlan={[]} onRefresh={vi.fn()} onClose={vi.fn()} onConsolidate={vi.fn()} />)
     expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
     await waitFor(() => expect(screen.getAllByRole('checkbox', { name: /Codex/ })).toHaveLength(2))
     await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
@@ -427,7 +427,7 @@ describe('App (integration)', () => {
     ]))
     expect(await screen.findByText('完成 1，失败 1')).toBeInTheDocument()
     expect(screen.getByText(/target busy/)).toBeInTheDocument()
-    view.rerender(<BulkSkillActionsDialog skills={skills.map((skill) => ({ ...skill }))} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    view.rerender(<BulkSkillActionsDialog skills={skills.map((skill) => ({ ...skill }))} allFilteredSkills={skills} consolidationPlan={[]} onRefresh={vi.fn()} onClose={vi.fn()} onConsolidate={vi.fn()} />)
     expect(screen.getByText('完成 1，失败 1')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: `${skills[0].name} → Codex` })).not.toBeChecked()
     expect(screen.getByRole('checkbox', { name: `${skills[1].name} → Codex` })).toBeChecked()
@@ -476,7 +476,7 @@ describe('App (integration)', () => {
       })
     })
 
-    render(<BulkSkillActionsDialog skills={[skill]} onRefresh={vi.fn()} onClose={vi.fn()} />)
+    render(<BulkSkillActionsDialog skills={[skill]} allFilteredSkills={[skill]} consolidationPlan={[]} onRefresh={vi.fn()} onClose={vi.fn()} onConsolidate={vi.fn()} />)
     await screen.findByRole('checkbox', { name: `${skill.name} → Codex` })
     await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
     expect(await screen.findByText('将覆盖目标中不受管理的现有内容')).toBeInTheDocument()
@@ -790,6 +790,140 @@ describe('App (integration)', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('research')
   })
 
+  // #127 工具页分组多选 + 批量操作
+  function agentsToolWithGroups() {
+    const deployment = (id: number, name: string, management: 'managed' | 'observed', mode: 'symlink' | 'copy') => ({
+      id, skill_id: id, target_tool: 'agents', target_path: `/agents/${name}`,
+      mode, management, source_path: `/source/${name}`,
+      source_id: id, target_id: 'agents-0', deployed_at: '2026-07-15T00:00:00.000Z',
+      source_hash_at_deploy: 'h'
+    })
+    return {
+      config: {
+        key: 'agents', displayName: 'Agents', enabled: true,
+        paths: ['/agents'], existingPaths: ['/agents'],
+        targets: [{ id: 'agents-0', path: '/agents' }],
+        existingTargets: [{ id: 'agents-0', path: '/agents' }],
+        isCustom: false, exists: true
+      },
+      drifts: [
+        { skillId: 1, skillName: 'alpha', targetTool: 'agents', targetPath: '/agents/alpha', targetExists: true, currentSourceHash: 'h', currentTargetHash: 'h', kind: 'normal' as const, deployment: deployment(1, 'alpha', 'managed', 'symlink') },
+        { skillId: 2, skillName: 'beta', targetTool: 'agents', targetPath: '/agents/beta', targetExists: true, currentSourceHash: 'h', currentTargetHash: 'h', kind: 'normal' as const, deployment: deployment(2, 'beta', 'managed', 'copy') },
+        { skillId: 3, skillName: 'gamma', targetTool: 'agents', targetPath: '/agents/gamma', targetExists: true, currentSourceHash: 'h', currentTargetHash: null, kind: 'normal' as const, deployment: deployment(3, 'gamma', 'observed', 'symlink') },
+        { skillId: -1, skillName: 'delta', targetTool: 'agents', targetPath: '/agents/delta', targetExists: true, currentSourceHash: null, currentTargetHash: null, kind: 'external' as const, deployment: null }
+      ]
+    }
+  }
+
+  it('supports per-group select-all with cross-group accumulation and bulk actions at the card bottom (#127)', async () => {
+    mockWindowApi({
+      getTools: vi.fn().mockResolvedValue([agentsToolWithGroups()]) as Window['api']['getTools']
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+
+    expect(screen.getByRole('checkbox', { name: '全选受管部署' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '全选外部订阅' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '全选外部 skill' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消部署所选/ })).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选受管部署' }))
+    expect(screen.getByRole('button', { name: '取消部署所选 (2)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新部署所选 (2)' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选外部订阅' }))
+    expect(screen.getByRole('button', { name: '接管所选 (1)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '取消部署所选 (2)' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选外部 skill' }))
+    expect(screen.getByRole('button', { name: '纳入管理所选 (1)' })).toBeInTheDocument()
+
+    const card = screen.getByRole('button', { name: /Agents/ }).closest('li')!
+    expect(within(card).getByRole('button', { name: '取消部署所选 (2)' })).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: '重新部署所选 (2)' })).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: '接管所选 (1)' })).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: '纳入管理所选 (1)' })).toBeInTheDocument()
+  })
+
+  it('runs bulk undeploy per item after one confirmation listing the targets (#127)', async () => {
+    const api = mockWindowApi({
+      undeploy: vi.fn().mockResolvedValue({ status: 'completed' }),
+      getTools: vi.fn().mockResolvedValue([agentsToolWithGroups()]) as Window['api']['getTools']
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选受管部署' }))
+    await userEvent.click(screen.getByRole('button', { name: '取消部署所选 (2)' }))
+
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('取消部署所选 2 个?')
+    expect(dialog).toHaveTextContent('alpha → agents')
+    expect(dialog).toHaveTextContent('beta → agents')
+    await userEvent.click(within(dialog).getByRole('button', { name: '取消部署' }))
+
+    await waitFor(() => expect(api.undeploy).toHaveBeenCalledTimes(2))
+    expect(api.undeploy).toHaveBeenCalledWith(1)
+    expect(api.undeploy).toHaveBeenCalledWith(2)
+  })
+
+  it('aggregates redeploy risks from all selected items into one confirmation (#127)', async () => {
+    const api = mockWindowApi({
+      redeploy: vi.fn()
+        .mockResolvedValueOnce({ status: 'completed' })
+        .mockResolvedValueOnce({
+          status: 'confirmation-required',
+          confirmationId: 'rc-1',
+          expiresAt: 99_999,
+          facts: {
+            skillName: 'beta', targetDisplayName: 'Agents',
+            reasons: ['target-modified'], requestedMode: 'symlink', actualMode: 'symlink',
+            backup: { required: true, directory: '/backups' }
+          }
+        }),
+      deploymentConfirm: vi.fn().mockResolvedValue({ status: 'completed' }),
+      getTools: vi.fn().mockResolvedValue([agentsToolWithGroups()]) as Window['api']['getTools']
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选受管部署' }))
+    await userEvent.click(screen.getByRole('button', { name: '重新部署所选 (2)' }))
+
+    let dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('重新部署所选 2 个?')
+    await userEvent.click(within(dialog).getByRole('button', { name: '重新部署' }))
+
+    await waitFor(() => expect(api.redeploy).toHaveBeenCalledTimes(2))
+    dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('确认重新部署风险（1 项）')
+    expect(dialog).toHaveTextContent('beta → Agents')
+    expect(dialog).toHaveTextContent('部署目标已被修改，将用当前来源覆盖。')
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认并全部重新部署' }))
+
+    await waitFor(() => expect(api.deploymentConfirm).toHaveBeenCalledWith('rc-1'))
+  })
+
+  it('registers external skills in place via scan when bulk-managing them (#127)', async () => {
+    const api = mockWindowApi({
+      scan: vi.fn().mockResolvedValue({ tools: [], totalScanned: 0, totalUpserted: 0 }),
+      getTools: vi.fn().mockResolvedValue([agentsToolWithGroups()]) as Window['api']['getTools']
+    })
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: '工具' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选外部 skill' }))
+    await userEvent.click(screen.getByRole('button', { name: '纳入管理所选 (1)' }))
+
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('将 1 个外部 skill 原地注册为候选来源?')
+    expect(dialog).toHaveTextContent('/agents/delta')
+    await userEvent.click(within(dialog).getByRole('button', { name: '纳入管理' }))
+
+    await waitFor(() => expect(api.scan).toHaveBeenCalledTimes(1))
+  })
+
   it('uses the global bulk-adoption facts count instead of the enabled-tools read model', async () => {
     mockWindowApi({
       getTools: vi.fn().mockResolvedValue([]),
@@ -801,147 +935,6 @@ describe('App (integration)', () => {
     render(<App />)
     await userEvent.click(screen.getByRole('button', { name: '工具' }))
     expect(await screen.findByRole('button', { name: '一键接管 3 个外部订阅' })).toBeInTheDocument()
-  })
-
-  it('lets users manage one external Skill or select several for bulk management', async () => {
-    const externalDrift = (skillName: string, targetId: string) => ({
-      skillId: -1,
-      skillName,
-      targetTool: 'agents',
-      targetId,
-      targetEntryName: skillName,
-      targetPath: `/agents/${skillName}`,
-      targetExists: true,
-      currentSourceHash: null,
-      currentTargetHash: null,
-      kind: 'external' as const,
-      deployment: null
-    })
-    const api = mockWindowApi({
-      getTools: vi.fn().mockResolvedValue([{
-        config: {
-          key: 'agents', displayName: 'Agents', enabled: true,
-          paths: ['/agents'], existingPaths: ['/agents'],
-          targets: [{ id: 'agents-user', path: '/agents' }],
-          existingTargets: [{ id: 'agents-user', path: '/agents' }],
-          isCustom: false, exists: true
-        },
-        drifts: [
-          externalDrift('one', 'agents-user'),
-          externalDrift('two', 'agents-user')
-        ]
-      }]) as Window['api']['getTools'],
-      bulkManageExternalSkills: vi.fn().mockResolvedValue({
-        total: 2,
-        completed: 2,
-        failed: 0,
-        items: [
-          { key: 'external:agents-user:one', status: 'completed' },
-          { key: 'external:agents-user:two', status: 'completed' }
-        ]
-      })
-    })
-    render(<App />)
-    await userEvent.click(screen.getByRole('button', { name: '工具' }))
-    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
-
-    expect(screen.getAllByRole('button', { name: '纳入管理' })).toHaveLength(2)
-    await userEvent.click(screen.getByRole('checkbox', { name: '选择外部 Skill one' }))
-    await userEvent.click(screen.getByRole('checkbox', { name: '选择外部 Skill two' }))
-    await userEvent.click(screen.getByRole('button', { name: '批量纳入管理 (2)' }))
-    expect(screen.getByRole('dialog')).toHaveTextContent('把 2 个外部 Skill 纳入管理')
-    await userEvent.click(screen.getByRole('button', { name: '确认纳入管理' }))
-
-    await waitFor(() => expect(api.bulkManageExternalSkills).toHaveBeenCalledWith([
-      { key: 'external:agents-user:one', targetId: 'agents-user', entryName: 'one' },
-      { key: 'external:agents-user:two', targetId: 'agents-user', entryName: 'two' }
-    ]))
-  })
-
-  it('keeps an external Skill with an invalid identity visible but not manageable', async () => {
-    mockWindowApi({
-      getTools: vi.fn().mockResolvedValue([{
-        config: {
-          key: 'agents', displayName: 'Agents', enabled: true,
-          paths: ['/agents'], existingPaths: ['/agents'],
-          targets: [{ id: 'agents-user', path: '/agents' }],
-          existingTargets: [{ id: 'agents-user', path: '/agents' }],
-          isCustom: false, exists: true
-        },
-        drifts: [{
-          skillId: -1,
-          skillName: 'invalid-external',
-          targetTool: 'agents',
-          targetId: 'agents-user',
-          targetEntryName: 'invalid-external',
-          targetPath: '/agents/invalid-external',
-          targetExists: true,
-          currentSourceHash: null,
-          currentTargetHash: null,
-          kind: 'external',
-          deployment: null,
-          externalError: '无法解析 Skill 身份：Skill name is invalid.'
-        }]
-      }]) as Window['api']['getTools']
-    })
-    render(<App />)
-    await userEvent.click(screen.getByRole('button', { name: '工具' }))
-    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
-
-    expect(screen.getByText('invalid-external')).toBeInTheDocument()
-    expect(screen.getByText('无法纳入管理')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '纳入管理' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('checkbox', { name: '选择外部 Skill invalid-external' })).not.toBeInTheDocument()
-  })
-
-  it('supports bulk undeploy and bulk registration detach in deployment relationships', async () => {
-    const managedDrift = (id: number, skillName: string) => ({
-      skillId: id,
-      skillName,
-      targetTool: 'agents',
-      targetId: 'agents-user',
-      targetPath: `/agents/${skillName}`,
-      targetExists: true,
-      currentSourceHash: 'hash',
-      currentTargetHash: null,
-      kind: 'normal' as const,
-      deployment: {
-        id, skill_id: id, target_tool: 'agents', target_path: `/agents/${skillName}`,
-        mode: 'symlink' as const, management: 'managed' as const,
-        source_path: `/canonical/${skillName}`, source_id: id, target_id: 'agents-user',
-        deployed_at: '2026-07-20T00:00:00.000Z', source_hash_at_deploy: 'hash'
-      }
-    })
-    const api = mockWindowApi({
-      getTools: vi.fn().mockResolvedValue([{
-        config: {
-          key: 'agents', displayName: 'Agents', enabled: true,
-          paths: ['/agents'], existingPaths: ['/agents'],
-          targets: [{ id: 'agents-user', path: '/agents' }],
-          existingTargets: [{ id: 'agents-user', path: '/agents' }],
-          isCustom: false, exists: true
-        },
-        drifts: [managedDrift(11, 'one'), managedDrift(12, 'two')]
-      }]) as Window['api']['getTools'],
-      bulkUndeploy: vi.fn().mockResolvedValue({
-        total: 2, completed: 2, failed: 0,
-        items: [{ key: 'deployment:11', status: 'completed' }, { key: 'deployment:12', status: 'completed' }]
-      })
-    })
-    render(<App />)
-    await userEvent.click(screen.getByRole('button', { name: '工具' }))
-    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
-    await userEvent.click(screen.getByRole('checkbox', { name: '选择部署 one' }))
-    await userEvent.click(screen.getByRole('checkbox', { name: '选择部署 two' }))
-
-    expect(screen.getByRole('button', { name: '批量解除登记 (2)' })).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: '批量取消部署 (2)' }))
-    await userEvent.click(screen.getByRole('button', { name: '确认批量取消部署' }))
-
-    await waitFor(() => expect(api.bulkUndeploy).toHaveBeenCalledWith([
-      { key: 'deployment:11', deploymentId: 11 },
-      { key: 'deployment:12', deploymentId: 12 }
-    ]))
   })
 
   it('renders empty state on Skills page when no skills', async () => {
@@ -1404,9 +1397,9 @@ describe('SkillsPage consolidation (#84)', () => {
       skillId: skill.id,
       skillName: skill.name,
       operations: [
-        { kind: 'write-canonical' as const, path: '/canonical/team/skill-0001' },
-        { kind: 'archive-candidate' as const, path: '/archive/batch-84/skill-0001' },
-        { kind: 'remove-observed-entry' as const, path: '/agents/skill-0001' }
+        { kind: 'write-canonical' as const, path: '/canonical/team/skill-0001', skillId: skill.id, skillName: skill.name },
+        { kind: 'archive-candidate' as const, path: '/archive/batch-84/skill-0001', skillId: skill.id, skillName: skill.name },
+        { kind: 'remove-observed-entry' as const, path: '/agents/skill-0001', skillId: skill.id, skillName: skill.name }
       ]
     }
     const api = mockWindowApi({
@@ -1437,7 +1430,7 @@ describe('SkillsPage consolidation (#84)', () => {
     expect(dialog).toHaveTextContent('永久归档候选来源')
     expect(dialog).toHaveTextContent('移除外部订阅入口')
     expect(dialog).toHaveTextContent('归档会永久保留')
-    expect(dialog).toHaveTextContent('不会自动部署')
+    expect(dialog).toHaveTextContent('不会新增部署')
 
     await userEvent.click(screen.getByRole('button', { name: '确认整理' }))
     await waitFor(() => expect(api.confirmConsolidation).toHaveBeenCalledWith('confirm-84'))
@@ -1531,9 +1524,13 @@ describe('SkillsPage bulk consolidation planning (#86)', () => {
     await waitFor(() => expect(api.getSkillLibrary).toHaveBeenCalledTimes(1))
 
     rerender(<ToastProvider><SkillsPage {...props} skills={skills} /></ToastProvider>)
+    await waitFor(() => expect(api.getSkillLibrary).toHaveBeenCalledTimes(2))
 
-    expect(await screen.findByRole('button', { name: '批量整理 (1)' })).toBeInTheDocument()
-    expect(api.getSkillLibrary).toHaveBeenCalledTimes(2)
+    await userEvent.click(await screen.findByRole('button', { name: '批量' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选当前' }))
+    await userEvent.click(screen.getByRole('button', { name: '操作' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '整理' }))
+    expect(await screen.findByText('可整理')).toBeInTheDocument()
   })
 
   it('defaults safe version groups to selected and applies batch or per-Skill relative parents', async () => {
@@ -1566,8 +1563,8 @@ describe('SkillsPage bulk consolidation planning (#86)', () => {
         { skillId: skills[1].id, skillName: skills[1].name, canonicalPath: `/canonical/product/${skills[1].name}` }
       ],
       operations: [
-        { kind: 'write-canonical' as const, path: `/canonical/team/${skills[0].name}` },
-        { kind: 'write-canonical' as const, path: `/canonical/product/${skills[1].name}` }
+        { kind: 'write-canonical' as const, path: `/canonical/team/${skills[0].name}`, skillId: skills[0].id, skillName: skills[0].name },
+        { kind: 'write-canonical' as const, path: `/canonical/product/${skills[1].name}`, skillId: skills[1].id, skillName: skills[1].name }
       ]
     }
     const api = mockWindowApi({
@@ -1589,7 +1586,11 @@ describe('SkillsPage bulk consolidation planning (#86)', () => {
       </ToastProvider>
     )
 
-    await userEvent.click(await screen.findByRole('button', { name: '批量整理 (3)' }))
+    await userEvent.click(await screen.findByRole('button', { name: '批量' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选当前' }))
+    await userEvent.click(screen.getByRole('button', { name: '操作' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '整理' }))
+    await userEvent.click(screen.getByRole('button', { name: '下一步' }))
     expect(screen.getByRole('checkbox', { name: `选择 ${skills[0].name}` })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: `选择 ${skills[1].name}` })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: `选择 ${skills[2].name}` })).not.toBeChecked()
@@ -1614,6 +1615,56 @@ describe('SkillsPage bulk consolidation planning (#86)', () => {
     await userEvent.click(screen.getByRole('button', { name: '确认批量整理' }))
     await waitFor(() => expect(api.confirmConsolidation).toHaveBeenCalledWith('confirm-86'))
     expect(await screen.findByRole('alert')).toHaveTextContent('已整理 2 个 Skill')
+  })
+
+  it('shows the consolidation tab scoped by search filter and hands selected Skills to the batch dialog (#126)', async () => {
+    const skills = buildFakeSkills(3)
+    skills[1].name = 'other-skill'
+    const plan = [
+      {
+        skillId: skills[0].id, skillName: skills[0].name,
+        selectedByDefault: true, hasConflict: false, canonicalRelativeParent: '',
+        versions: [{ hash: 'h0', candidateSourceIds: [skills[0].sources[0].id], paths: [skills[0].sources[0].path] }]
+      },
+      {
+        skillId: skills[1].id, skillName: skills[1].name,
+        selectedByDefault: true, hasConflict: false, canonicalRelativeParent: '',
+        versions: [{ hash: 'h1', candidateSourceIds: [skills[1].sources[0].id], paths: [skills[1].sources[0].path] }]
+      }
+    ]
+    mockWindowApi({
+      getSkillLibrary: vi.fn().mockResolvedValue({
+        canonicalRepository: { path: '/canonical' }, skills: [], consolidationPlan: plan, consolidationBatches: []
+      })
+    })
+    render(
+      <ToastProvider>
+        <SkillsPage
+          skills={skills} tools={[]} scanning={false} lastScan={null} loading={false} loadError={null}
+          onScan={vi.fn()} onRefresh={vi.fn().mockResolvedValue(undefined)} onRetry={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>
+    )
+
+    // 搜索约束：只匹配 skills[0] 和 skills[2]（名称含 skill-000）
+    await userEvent.type(await screen.findByPlaceholderText('搜索名称、路径或工具…'), 'skill-000')
+    await userEvent.click(screen.getByRole('button', { name: '批量' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选当前' }))
+    await userEvent.click(screen.getByRole('button', { name: '操作' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '整理' }))
+
+    // 整理 Tab 只展示搜索筛选后的 Skill；skills[2] 不在 plan 中 → 无需整理
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByRole('checkbox', { name: `整理 ${skills[0].name}` })).toBeChecked()
+    expect(within(dialog).getByText('可整理')).toBeInTheDocument()
+    expect(within(dialog).getByRole('checkbox', { name: `整理 ${skills[2].name}` })).toBeDisabled()
+    expect(within(dialog).getByText('无需整理')).toBeInTheDocument()
+    expect(within(dialog).queryByRole('checkbox', { name: `整理 ${skills[1].name}` })).not.toBeInTheDocument()
+
+    // 下一步 → 关闭批量操作弹窗 → 打开批量整理弹窗，drafts 仅含所选 Skill
+    await userEvent.click(within(dialog).getByRole('button', { name: '下一步' }))
+    expect(await screen.findByRole('checkbox', { name: `选择 ${skills[0].name}` })).toBeChecked()
+    expect(screen.queryByRole('checkbox', { name: `选择 ${skills[1].name}` })).not.toBeInTheDocument()
   })
 })
 
@@ -1703,7 +1754,11 @@ describe('SkillsPage Candidate conflict resolution (#87)', () => {
     })
     renderConflictSkills([skill])
 
-    await userEvent.click(await screen.findByRole('button', { name: '批量整理 (1)' }))
+    await userEvent.click(await screen.findByRole('button', { name: '批量' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选当前' }))
+    await userEvent.click(screen.getByRole('button', { name: '操作' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '整理' }))
+    await userEvent.click(screen.getByRole('button', { name: '下一步' }))
     await userEvent.click(screen.getByRole('button', { name: `解决 ${skill.name} 的版本冲突` }))
     expect(api.previewConflictResolution).toHaveBeenCalledWith(skill.id)
     expect(await screen.findByText('/codex/demo')).toBeInTheDocument()
@@ -1756,7 +1811,11 @@ describe('SkillsPage Candidate conflict resolution (#87)', () => {
       previewConflictResolution: vi.fn().mockResolvedValue(conflictPreview)
     })
     renderConflictSkills([skill])
-    await userEvent.click(await screen.findByRole('button', { name: '批量整理 (1)' }))
+    await userEvent.click(await screen.findByRole('button', { name: '批量' }))
+    await userEvent.click(screen.getByRole('button', { name: '全选当前' }))
+    await userEvent.click(screen.getByRole('button', { name: '操作' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '整理' }))
+    await userEvent.click(screen.getByRole('button', { name: '下一步' }))
     await userEvent.click(screen.getByRole('button', { name: `解决 ${skill.name} 的版本冲突` }))
     await screen.findByText('/codex/demo')
     await userEvent.click(screen.getByRole('radio', { name: '选择版本 A 作为原名权威版本' }))
