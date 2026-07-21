@@ -24,7 +24,7 @@ import { getSourceById, getSourceByPath, getCanonicalSourceBySkillId, upsertSour
 import { deleteSkill, getAllSkills, getSkillById, getSkillByName, updatePrimarySourcePath, upsertSkill } from '../db/dao/skills'
 import { markConsolidationItemRegistryCommitted } from '../db/dao/consolidations'
 import { getDeploymentsBySkillId } from '../db/dao/deployments'
-import type { Deployment, SkillSource, SourceOrigin } from '../types'
+import type { Deployment, DeployMode, SkillSource, SourceOrigin } from '../types'
 import { createBackup } from './backup'
 import { hashDir } from './hash'
 import { assertAbsolutePath, resolveWithin, validateSkillName } from './path-safety'
@@ -275,6 +275,34 @@ interface CandidateSourcePlanSnapshot {
 }
 
 type CandidateSourceSnapshot = SkillSource | CandidateSourcePlanSnapshot
+
+/**
+ * Replace a managed deployment target so it points at `newSource`.
+ *
+ * Unifies the four managed-deployment fs mutations in consolidation
+ * (forward redirect, compensation rollback, undo restore, undo compensation
+ * rebuild). The caller picks `newSource` — canonical path, original link
+ * payload, backup path, or original source path — and handles mode-specific
+ * guards and any pre-backup of displaced content.
+ *
+ * - symlink/junction: remove the existing target (link or displaced dir),
+ *   recreate parent dirs, then link to `newSource`.
+ * - copy: remove the existing target, then copy `newSource` into place.
+ */
+function redirectManagedDeployment(
+  targetPath: string,
+  mode: DeployMode,
+  newSource: string
+): void {
+  if (mode === 'symlink' || mode === 'junction') {
+    try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
+    mkdirSync(dirname(targetPath), { recursive: true })
+    symlinkSync(newSource, targetPath, mode === 'junction' ? 'junction' : 'dir')
+  } else {
+    rmSync(targetPath, { recursive: true, force: true })
+    cpSync(newSource, targetPath, { recursive: true, force: false })
+  }
+}
 
 function snapshotSources(snapshot: string): SkillSource[] {
   const parsed = JSON.parse(snapshot) as CandidateSourceSnapshot
@@ -1233,20 +1261,15 @@ export function createSkillLibraryFacade(options: {
             markItem(plan.item, persisted.batch.id, itemIndex, 'managed-redirected', state.evidence, 'prepared')
             for (const snapshot of plan.managed) {
               const targetPath = snapshot.deployment.target_path!
-              if (snapshot.deployment.mode === 'symlink' || snapshot.deployment.mode === 'junction') {
-                // Remove old link and create new one pointing to canonical
-                try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
-                symlinkSync(plan.item.canonical_path, targetPath, snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
-                state.redirectedManaged.push({ snapshot, backupPath: null })
-              } else {
-                // copy mode: backup old content, then overwrite with canonical
-                const backupPath = resolveWithin(sourceArchivePath, persisted.batch.id, 'managed-backup', String(snapshot.deployment.id))
+              let backupPath: string | null = null
+              if (snapshot.deployment.mode === 'copy') {
+                // copy mode: back up displaced content first so compensation can restore it.
+                backupPath = resolveWithin(sourceArchivePath, persisted.batch.id, 'managed-backup', String(snapshot.deployment.id))
                 mkdirSync(dirname(backupPath), { recursive: true })
                 cpSync(targetPath, backupPath, { recursive: true, force: true })
-                rmSync(targetPath, { recursive: true, force: true })
-                cpSync(plan.item.canonical_path, targetPath, { recursive: true, force: false })
-                state.redirectedManaged.push({ snapshot, backupPath })
               }
+              redirectManagedDeployment(targetPath, snapshot.deployment.mode, plan.item.canonical_path)
+              state.redirectedManaged.push({ snapshot, backupPath })
             }
             markItem(plan.item, persisted.batch.id, itemIndex, 'managed-redirected', state.evidence, 'applied')
           }
@@ -1337,15 +1360,16 @@ export function createSkillLibraryFacade(options: {
             // Restore managed deployments before moving canonical back
             for (const entry of [...state.redirectedManaged].reverse()) {
               const targetPath = entry.snapshot.deployment.target_path!
-              if (entry.snapshot.deployment.mode === 'symlink' || entry.snapshot.deployment.mode === 'junction') {
-                try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
+              const mode = entry.snapshot.deployment.mode
+              if (mode === 'symlink' || mode === 'junction') {
                 if (entry.snapshot.linkTarget) {
-                  mkdirSync(dirname(targetPath), { recursive: true })
-                  symlinkSync(entry.snapshot.linkTarget, targetPath, entry.snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
+                  redirectManagedDeployment(targetPath, mode, entry.snapshot.linkTarget)
+                } else {
+                  // No original link payload to restore; drop the redirected link only.
+                  try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
                 }
               } else if (entry.backupPath && pathEntryExists(entry.backupPath)) {
-                rmSync(targetPath, { recursive: true, force: true })
-                cpSync(entry.backupPath, targetPath, { recursive: true, force: false })
+                redirectManagedDeployment(targetPath, mode, entry.backupPath)
               }
             }
             if (state.canonicalInstalled && pathEntryExists(state.plan.item.canonical_path)) renameSync(state.plan.item.canonical_path, state.stage)
@@ -1492,17 +1516,11 @@ export function createSkillLibraryFacade(options: {
         // Restore managed deployments to point back to the original candidate source
         for (const entry of plan.managed) {
           const targetPath = entry.deployment.target_path!
-          const originalSourcePath = entry.deployment.source_path
-          if (entry.deployment.mode === 'symlink' || entry.deployment.mode === 'junction') {
-            try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
-            mkdirSync(dirname(targetPath), { recursive: true })
-            const linkTarget = entry.linkTarget ?? originalSourcePath
-            symlinkSync(linkTarget, targetPath, entry.deployment.mode === 'junction' ? 'junction' : 'dir')
-          } else {
-            // copy mode: restore original content from the restored candidate source
-            rmSync(targetPath, { recursive: true, force: true })
-            cpSync(originalSourcePath, targetPath, { recursive: true, force: false })
-          }
+          const mode = entry.deployment.mode
+          const newSource = mode === 'symlink' || mode === 'junction'
+            ? (entry.linkTarget ?? entry.deployment.source_path)
+            : entry.deployment.source_path
+          redirectManagedDeployment(targetPath, mode, newSource)
           state.restoredManaged.push(entry)
         }
         markItem(plan.item, batchId, index, 'undo-restoring', evidence, 'applied', 'completed')
@@ -1561,14 +1579,7 @@ export function createSkillLibraryFacade(options: {
           // 受管部署在整理完成态本应指向权威路径;补偿重建(而非删除)以避免清单存在但目标缺失的 drift。
           for (const entry of [...state.restoredManaged].reverse()) {
             const targetPath = entry.deployment.target_path!
-            if (entry.deployment.mode === 'symlink' || entry.deployment.mode === 'junction') {
-              try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
-              mkdirSync(dirname(targetPath), { recursive: true })
-              symlinkSync(state.plan.canonical.path, targetPath, entry.deployment.mode === 'junction' ? 'junction' : 'dir')
-            } else {
-              rmSync(targetPath, { recursive: true, force: true })
-              cpSync(state.plan.canonical.path, targetPath, { recursive: true, force: false })
-            }
+            redirectManagedDeployment(targetPath, entry.deployment.mode, state.plan.canonical.path)
           }
         }
         removeCreatedParents(applied.flatMap((state) => state.createdRestoreParents))
