@@ -165,8 +165,10 @@ export type ConsolidationPreview = {
   skillId: number
   skillName: string
   operations: Array<{
-    kind: 'write-canonical' | 'archive-candidate' | 'remove-observed-entry'
+    kind: 'write-canonical' | 'archive-candidate' | 'remove-observed-entry' | 'redirect-deployment' | 'redeploy-copy'
     path: string
+    skillId: number
+    skillName: string
   }>
 }
 
@@ -255,6 +257,12 @@ interface ObservedEntrySnapshot {
   linkTarget: string
 }
 
+interface ManagedEntrySnapshot {
+  deployment: Deployment
+  /** For symlink/junction: the exact readlink payload before redirect. */
+  linkTarget: string | null
+}
+
 interface CandidateSourcePlanSnapshot {
   sources: SkillSource[]
   canonicalSourceId?: number
@@ -263,6 +271,7 @@ interface CandidateSourcePlanSnapshot {
   rewriteIdentity?: boolean
   archiveOnly?: boolean
   replacingCanonical?: boolean
+  managedDeployments?: ManagedEntrySnapshot[]
 }
 
 type CandidateSourceSnapshot = SkillSource | CandidateSourcePlanSnapshot
@@ -273,7 +282,7 @@ function snapshotSources(snapshot: string): SkillSource[] {
 }
 
 function snapshotPlan(item: ItemRow): Required<Pick<CandidateSourcePlanSnapshot,
-  'sources' | 'canonicalSourceId' | 'originalSkillId' | 'outputSkillName' | 'rewriteIdentity' | 'archiveOnly' | 'replacingCanonical'>> {
+  'sources' | 'canonicalSourceId' | 'originalSkillId' | 'outputSkillName' | 'rewriteIdentity' | 'archiveOnly' | 'replacingCanonical'>> & { managedDeployments?: ManagedEntrySnapshot[] } {
   const parsed = JSON.parse(item.candidate_source_snapshot) as CandidateSourceSnapshot
   const sources = 'sources' in parsed ? parsed.sources : [parsed]
   return {
@@ -283,7 +292,8 @@ function snapshotPlan(item: ItemRow): Required<Pick<CandidateSourcePlanSnapshot,
     outputSkillName: 'sources' in parsed && parsed.outputSkillName !== undefined ? parsed.outputSkillName : item.skill_name,
     rewriteIdentity: 'sources' in parsed && parsed.rewriteIdentity === true,
     archiveOnly: 'sources' in parsed && parsed.archiveOnly === true,
-    replacingCanonical: 'sources' in parsed && parsed.replacingCanonical === true
+    replacingCanonical: 'sources' in parsed && parsed.replacingCanonical === true,
+    managedDeployments: 'sources' in parsed ? parsed.managedDeployments : undefined
   }
 }
 
@@ -540,6 +550,16 @@ export function createSkillLibraryFacade(options: {
     mkdirSync(dirname(snapshot.deployment.target_path!), { recursive: true })
     symlinkSync(snapshot.linkTarget, snapshot.deployment.target_path!,
       snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
+  }
+
+  function snapshotManagedEntry(deployment: Deployment): ManagedEntrySnapshot {
+    const isLink = deployment.mode === 'symlink' || deployment.mode === 'junction'
+    return {
+      deployment,
+      linkTarget: isLink && deployment.target_path && pathEntryExists(deployment.target_path)
+        ? readlinkSync(deployment.target_path)
+        : null
+    }
   }
 
   function canonicalPlacement(skillName: string, relativeParent: string): string {
@@ -835,8 +855,11 @@ export function createSkillLibraryFacade(options: {
       if (allRelations.some((deployment) => deployment.source_id == null)) {
         throw new Error('Candidate Source has an unresolved legacy Deployment; reconcile it before consolidation')
       }
-      if (allRelations.some((deployment) => deployment.management !== 'observed')) {
-        throw new Error('Candidate Source has a Managed Deployment and cannot be consolidated')
+      const managed = allRelations.filter((deployment) => deployment.management !== 'observed').sort((a, b) => a.id - b.id)
+      for (const deployment of managed) {
+        if (!deployment.target_path || !pathEntryExists(deployment.target_path)) {
+          throw new Error(`Managed Deployment target is missing: ${deployment.target_path ?? deployment.id}`)
+        }
       }
       const observed = relationSources.flatMap(observedForSource).sort((a, b) => a.id - b.id)
       for (const deployment of observed) {
@@ -854,7 +877,9 @@ export function createSkillLibraryFacade(options: {
         canonicalPath,
         archivePath,
         observed,
-        observedSnapshots: observed.map(snapshotObservedEntry)
+        observedSnapshots: observed.map(snapshotObservedEntry),
+        managed,
+        managedSnapshots: managed.map(snapshotManagedEntry)
       }
     })
   }
@@ -867,7 +892,7 @@ export function createSkillLibraryFacade(options: {
     if (new Set(prepared.map((item) => item.outputSkillName)).size !== prepared.length) throw new Error('Consolidation Batch contains duplicate output Skill identities')
     if (new Set(prepared.map((item) => resolve(item.canonicalPath))).size !== prepared.length) throw new Error('Consolidation Batch contains duplicate Canonical Placements')
     const claimedPaths = prepared.flatMap((item) => {
-      const paths = [...item.sources.map((source) => source.path), ...item.observed.map((entry) => entry.target_path!)]
+      const paths = [...item.sources.map((source) => source.path), ...item.observed.map((entry) => entry.target_path!), ...item.managed.map((entry) => entry.target_path!)]
       if (!item.replacingCanonical) paths.push(item.canonicalPath)
       return paths.map((path) => resolve(path))
     })
@@ -893,16 +918,23 @@ export function createSkillLibraryFacade(options: {
         outputSkillName: item.outputSkillName,
         rewriteIdentity: item.rewriteIdentity,
         archiveOnly: item.archiveOnly,
-        replacingCanonical: item.replacingCanonical
+        replacingCanonical: item.replacingCanonical,
+        managedDeployments: item.managedSnapshots
       }), JSON.stringify(item.observedSnapshots), item.canonicalPath, item.archivePath)
     })
     return {
       status: 'confirmation-required', confirmationId: batchId, batchId,
       items: prepared.map((item) => ({ skillId: item.skill.id, skillName: item.outputSkillName, canonicalPath: item.canonicalPath })),
       operations: prepared.flatMap((item) => [
-        ...(item.archiveOnly ? [] : [{ kind: 'write-canonical' as const, path: item.canonicalPath }]),
-        ...item.sources.map((source) => ({ kind: 'archive-candidate' as const, path: archivePathForSource(item.archivePath, source, item.sources) })),
-        ...item.observed.map((deployment) => ({ kind: 'remove-observed-entry' as const, path: deployment.target_path! }))
+        ...(item.archiveOnly ? [] : [{ kind: 'write-canonical' as const, path: item.canonicalPath, skillId: item.skill.id, skillName: item.outputSkillName }]),
+        ...item.sources.map((source) => ({ kind: 'archive-candidate' as const, path: archivePathForSource(item.archivePath, source, item.sources), skillId: item.skill.id, skillName: item.outputSkillName })),
+        ...item.observed.map((deployment) => ({ kind: 'remove-observed-entry' as const, path: deployment.target_path!, skillId: item.skill.id, skillName: item.outputSkillName })),
+        ...item.managed.map((deployment) => ({
+          kind: (deployment.mode === 'copy' ? 'redeploy-copy' : 'redirect-deployment') as 'redirect-deployment' | 'redeploy-copy',
+          path: deployment.target_path!,
+          skillId: item.skill.id,
+          skillName: item.outputSkillName
+        }))
       ])
     }
   }
@@ -917,7 +949,7 @@ export function createSkillLibraryFacade(options: {
     return sources.length === 1 ? archivePath : resolveWithin(archivePath, String(source.id))
   }
 
-  function validatePlan(batch: BatchRow, item: ItemRow): { source: SkillSource; sources: SkillSource[]; observed: ObservedEntrySnapshot[] } {
+  function validatePlan(batch: BatchRow, item: ItemRow): { source: SkillSource; sources: SkillSource[]; observed: ObservedEntrySnapshot[]; managed: ManagedEntrySnapshot[] } {
     if (batch.status !== 'previewed') throw new Error('Confirmation is no longer pending')
     const snapshot = snapshotPlan(item)
     const sources = snapshot.sources
@@ -949,17 +981,26 @@ export function createSkillLibraryFacade(options: {
       ? sources.filter((source) => source.source_role === 'candidate')
       : sources
     const currentRelations = relationSources.flatMap(allKnownRelationsForSource).sort((a, b) => a.id - b.id)
-    if (currentRelations.some((deployment) => deployment.source_id == null || deployment.management !== 'observed')) {
-      throw new Error('Candidate Source Deployment set became unresolved or managed')
+    if (currentRelations.some((deployment) => deployment.source_id == null)) {
+      throw new Error('Candidate Source Deployment set became unresolved')
     }
-    const observed = currentRelations.map(snapshotObservedEntry)
+    const currentObserved = currentRelations.filter((d) => d.management === 'observed')
+    const currentManaged = currentRelations.filter((d) => d.management !== 'observed')
+    const observed = currentObserved.map(snapshotObservedEntry)
     if (JSON.stringify(observed) !== JSON.stringify(observedSnapshot)) throw new Error('Observed Subscription set changed')
     for (const snapshot of observed) {
       const archivePath = resolveWithin(sourceArchivePath, batch.id, 'links', String(snapshot.deployment.id))
       const rollbackPath = resolveWithin(dirname(snapshot.deployment.target_path!), `.${basename(snapshot.deployment.target_path!)}.skill-switch-${batch.id}`)
       if (pathEntryExists(archivePath) || pathEntryExists(rollbackPath)) throw new Error('Observed Subscription archive or rollback path is occupied')
     }
-    return { source, sources, observed }
+    const managedSnapshots = (snapshot.managedDeployments ?? []) as ManagedEntrySnapshot[]
+    if (currentManaged.length !== managedSnapshots.length) throw new Error('Managed Deployment set changed')
+    const managed = currentManaged.map(snapshotManagedEntry)
+    for (let i = 0; i < managed.length; i++) {
+      if (managed[i].deployment.id !== managedSnapshots[i].deployment.id) throw new Error('Managed Deployment set changed')
+      if (!managed[i].deployment.target_path || !pathEntryExists(managed[i].deployment.target_path!)) throw new Error('Managed Deployment target is no longer available')
+    }
+    return { source, sources, observed, managed }
   }
 
   function markBatch(id: string, status: ConsolidationBatchStatus, failure?: string, phase?: string | null, evidence?: unknown): void {
@@ -987,12 +1028,14 @@ export function createSkillLibraryFacade(options: {
       const plan = snapshotPlan(item)
       const sources = plan.sources
       const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
+      const managed = (plan.managedDeployments ?? []) as ManagedEntrySnapshot[]
       return [
         `skill:${item.skill_name}`,
         `skill:${getSkillById(options.db, plan.originalSkillId)?.name ?? plan.originalSkillId}`,
         ...sources.flatMap((source) => [`source:${source.id}`, `path:${resolve(source.path)}`]),
         `path:${resolve(item.canonical_path)}`,
-        ...observed.map((entry) => `path:${resolve(entry.deployment.target_path!)}`)
+        ...observed.map((entry) => `path:${resolve(entry.deployment.target_path!)}`),
+        ...managed.map((entry) => `path:${resolve(entry.deployment.target_path!)}`)
       ]
     })
   }
@@ -1080,7 +1123,7 @@ export function createSkillLibraryFacade(options: {
       return { status: 'rejected', batchId: persisted.batch.id, reason: 'batch-busy', message: 'Consolidation resources are busy.' }
     }
     try {
-      let plans: Array<{ item: ItemRow; source: SkillSource; sources: SkillSource[]; observed: ObservedEntrySnapshot[] }>
+      let plans: Array<{ item: ItemRow; source: SkillSource; sources: SkillSource[]; observed: ObservedEntrySnapshot[]; managed: ManagedEntrySnapshot[] }>
       try {
         plans = persisted.items.map((item) => ({ item, ...validatePlan(persisted.batch, item) }))
         const plannedBySkill = new Map<number, number[]>()
@@ -1109,6 +1152,7 @@ export function createSkillLibraryFacade(options: {
         sourceRollbacks: Array<{ source: SkillSource; path: string; displaced: boolean }>
         evidence: unknown
         displacedLinks: Array<ObservedEntrySnapshot & { rollbackPath: string; archivePath: string }>
+        redirectedManaged: Array<{ snapshot: ManagedEntrySnapshot; backupPath: string | null }>
         canonicalInstalled: boolean
         canonicalHash: string | null
         createdCanonicalParents: string[]
@@ -1134,6 +1178,7 @@ export function createSkillLibraryFacade(options: {
               }))
             },
             displacedLinks: [] as Array<ObservedEntrySnapshot & { rollbackPath: string; archivePath: string }>,
+            redirectedManaged: [] as Array<{ snapshot: ManagedEntrySnapshot; backupPath: string | null }>,
             canonicalInstalled: false, canonicalHash: null as string | null,
             createdCanonicalParents: missingParents(plan.item.canonical_path)
           }
@@ -1183,6 +1228,28 @@ export function createSkillLibraryFacade(options: {
             state.canonicalInstalled = true
             markItem(plan.item, persisted.batch.id, itemIndex, 'canonical-installed', state.evidence, 'applied')
           }
+          // Redirect managed deployments to point to the new canonical path
+          if (plan.managed.length > 0 && !output.archiveOnly) {
+            markItem(plan.item, persisted.batch.id, itemIndex, 'managed-redirected', state.evidence, 'prepared')
+            for (const snapshot of plan.managed) {
+              const targetPath = snapshot.deployment.target_path!
+              if (snapshot.deployment.mode === 'symlink' || snapshot.deployment.mode === 'junction') {
+                // Remove old link and create new one pointing to canonical
+                try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
+                symlinkSync(plan.item.canonical_path, targetPath, snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
+                state.redirectedManaged.push({ snapshot, backupPath: null })
+              } else {
+                // copy mode: backup old content, then overwrite with canonical
+                const backupPath = resolveWithin(sourceArchivePath, persisted.batch.id, 'managed-backup', String(snapshot.deployment.id))
+                mkdirSync(dirname(backupPath), { recursive: true })
+                cpSync(targetPath, backupPath, { recursive: true, force: true })
+                rmSync(targetPath, { recursive: true, force: true })
+                cpSync(plan.item.canonical_path, targetPath, { recursive: true, force: false })
+                state.redirectedManaged.push({ snapshot, backupPath })
+              }
+            }
+            markItem(plan.item, persisted.batch.id, itemIndex, 'managed-redirected', state.evidence, 'applied')
+          }
         }
         options.consolidationHooks?.onFaultPoint?.({ batchId: persisted.batch.id, itemIndex: -1, point: 'before-registry-commit' })
         runInTransaction(options.db, () => {
@@ -1203,6 +1270,11 @@ export function createSkillLibraryFacade(options: {
               const oldCanonicalSource = plan.sources.find((source) => source.source_role === 'canonical')!
               options.db.prepare('UPDATE skill_sources SET hash = ?, mtime = ? WHERE id = ?')
                 .run(state.canonicalHash!, Math.floor(statSync(plan.item.canonical_path).mtimeMs), oldCanonicalSource.id)
+              // Update managed deployment records to point to the new canonical
+              for (const entry of state.redirectedManaged) {
+                options.db.prepare('UPDATE deployments SET source_path = ?, source_hash_at_deploy = ?, source_id = ?, target_id = ?, deployed_at = ? WHERE id = ?')
+                  .run(plan.item.canonical_path, state.canonicalHash!, oldCanonicalSource.id, entry.snapshot.deployment.target_id, new Date().toISOString(), entry.snapshot.deployment.id)
+              }
               markConsolidationItemRegistryCommitted(options.db, plan.item.id, output.originalSkillId, state.canonicalHash!)
               plan.item.skill_id = output.originalSkillId
               continue
@@ -1213,6 +1285,14 @@ export function createSkillLibraryFacade(options: {
             updatePrimarySourcePath(options.db, outputSkillId, plan.item.canonical_path)
             upsertSource(options.db, outputSkillId, plan.item.canonical_path, state.canonicalHash!,
               Math.floor(statSync(plan.item.canonical_path).mtimeMs), 'central-repo', { role: 'canonical', origin: 'local' })
+            // Update managed deployment records to point to the new canonical
+            if (state.redirectedManaged.length > 0) {
+              const newCanonicalSource = getSourceByPath(options.db, plan.item.canonical_path)
+              for (const entry of state.redirectedManaged) {
+                options.db.prepare('UPDATE deployments SET source_path = ?, source_hash_at_deploy = ?, source_id = ?, target_id = ?, skill_id = ?, deployed_at = ? WHERE id = ?')
+                  .run(plan.item.canonical_path, state.canonicalHash!, newCanonicalSource?.id ?? null, entry.snapshot.deployment.target_id, outputSkillId, new Date().toISOString(), entry.snapshot.deployment.id)
+              }
+            }
             markConsolidationItemRegistryCommitted(options.db, plan.item.id, outputSkillId, state.canonicalHash!)
             plan.item.skill_id = outputSkillId
           }
@@ -1254,6 +1334,20 @@ export function createSkillLibraryFacade(options: {
         try {
           for (const [reverseIndex, state] of [...applied].reverse().entries()) {
             options.consolidationHooks?.onFaultPoint?.({ batchId: persisted.batch.id, itemIndex: applied.length - 1 - reverseIndex, point: 'before-compensation' })
+            // Restore managed deployments before moving canonical back
+            for (const entry of [...state.redirectedManaged].reverse()) {
+              const targetPath = entry.snapshot.deployment.target_path!
+              if (entry.snapshot.deployment.mode === 'symlink' || entry.snapshot.deployment.mode === 'junction') {
+                try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
+                if (entry.snapshot.linkTarget) {
+                  mkdirSync(dirname(targetPath), { recursive: true })
+                  symlinkSync(entry.snapshot.linkTarget, targetPath, entry.snapshot.deployment.mode === 'junction' ? 'junction' : 'dir')
+                }
+              } else if (entry.backupPath && pathEntryExists(entry.backupPath)) {
+                rmSync(targetPath, { recursive: true, force: true })
+                cpSync(entry.backupPath, targetPath, { recursive: true, force: false })
+              }
+            }
             if (state.canonicalInstalled && pathEntryExists(state.plan.item.canonical_path)) renameSync(state.plan.item.canonical_path, state.stage)
             for (const snapshot of [...state.displacedLinks].reverse()) {
               if (pathEntryExists(snapshot.rollbackPath) && !pathEntryExists(snapshot.deployment.target_path!)) renameSync(snapshot.rollbackPath, snapshot.deployment.target_path!)
@@ -1288,6 +1382,7 @@ export function createSkillLibraryFacade(options: {
     source: SkillSource
     sources: SkillSource[]
     observed: ObservedEntrySnapshot[]
+    managed: ManagedEntrySnapshot[]
     canonical: SkillSource
     rollback: string
   }
@@ -1299,6 +1394,7 @@ export function createSkillLibraryFacade(options: {
       if (sources.length === 0) throw new Error('归档批次没有可恢复的原候选来源。')
       const source = sources[0]
       const observed = JSON.parse(item.observed_deployments_snapshot) as ObservedEntrySnapshot[]
+      const managed = (snapshot.managedDeployments ?? []) as ManagedEntrySnapshot[]
       const checkSources = snapshot.replacingCanonical
         ? sources.filter((candidate) => candidate.source_role === 'candidate')
         : sources
@@ -1309,7 +1405,9 @@ export function createSkillLibraryFacade(options: {
       if (!canonical || canonical.source_role !== 'canonical' || !existsSync(canonical.path) || hashDir(canonical.path) !== item.canonical_hash) {
         throw new Error('权威 Source 已变化或不可用。')
       }
-      if (getDeploymentsBySkillId(options.db, canonical.skill_id).some((deployment) => deployment.source_id === canonical.id)) {
+      // Exclude managed deployments that were redirected as part of this consolidation
+      const redirectedIds = new Set(managed.map((entry) => entry.deployment.id))
+      if (getDeploymentsBySkillId(options.db, canonical.skill_id).some((deployment) => deployment.source_id === canonical.id && !redirectedIds.has(deployment.id))) {
         throw new Error('权威 Source 已存在后续部署。')
       }
       for (const candidate of sources) {
@@ -1324,7 +1422,7 @@ export function createSkillLibraryFacade(options: {
       }
       const rollback = resolveWithin(canonicalRepositoryPath, `.consolidation-undo-${persisted.batch.id}-${index}`)
       if (pathEntryExists(rollback)) throw new Error('恢复回滚位置已被占用。')
-      return { item, source, sources, observed, canonical, rollback }
+      return { item, source, sources, observed, managed, canonical, rollback }
     })
   }
 
@@ -1364,14 +1462,14 @@ export function createSkillLibraryFacade(options: {
       const reason = errorMessage(error).includes('占用') ? 'restore-path-occupied' as const : 'plan-stale' as const
       return { status: 'rejected', batchId, reason, message: errorMessage(error) }
     }
-    const applied: Array<{ plan: RestorePlan; canonicalMoved: boolean; restoredSources: SkillSource[]; restoredTargets: string[]; createdRestoreParents: string[] }> = []
+    const applied: Array<{ plan: RestorePlan; canonicalMoved: boolean; restoredSources: SkillSource[]; restoredTargets: string[]; restoredManaged: ManagedEntrySnapshot[]; createdRestoreParents: string[] }> = []
     let registryCommitted = false
     try {
       for (const [index, plan] of plans.entries()) {
         const evidence = { canonicalPath: plan.canonical.path, canonicalRollback: plan.rollback, sourcePaths: plan.sources.map((source) => source.path),
           archivePath: plan.item.archive_path, toolEntries: plan.observed.map((entry) => ({ targetPath: entry.deployment.target_path })), journal: [] as Array<{ phase: string; intent: string }> }
         const state = {
-          plan, canonicalMoved: false, restoredSources: [] as SkillSource[], restoredTargets: [] as string[],
+          plan, canonicalMoved: false, restoredSources: [] as SkillSource[], restoredTargets: [] as string[], restoredManaged: [] as ManagedEntrySnapshot[],
           createdRestoreParents: [...new Set([
             ...plan.sources.flatMap((source) => missingParents(source.path)),
             ...plan.observed.flatMap((entry) => missingParents(entry.deployment.target_path!))
@@ -1391,6 +1489,22 @@ export function createSkillLibraryFacade(options: {
           restoreObservedEntry(snapshot)
           state.restoredTargets.push(snapshot.deployment.target_path!)
         }
+        // Restore managed deployments to point back to the original candidate source
+        for (const entry of plan.managed) {
+          const targetPath = entry.deployment.target_path!
+          const originalSourcePath = entry.deployment.source_path
+          if (entry.deployment.mode === 'symlink' || entry.deployment.mode === 'junction') {
+            try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
+            mkdirSync(dirname(targetPath), { recursive: true })
+            const linkTarget = entry.linkTarget ?? originalSourcePath
+            symlinkSync(linkTarget, targetPath, entry.deployment.mode === 'junction' ? 'junction' : 'dir')
+          } else {
+            // copy mode: restore original content from the restored candidate source
+            rmSync(targetPath, { recursive: true, force: true })
+            cpSync(originalSourcePath, targetPath, { recursive: true, force: false })
+          }
+          state.restoredManaged.push(entry)
+        }
         markItem(plan.item, batchId, index, 'undo-restoring', evidence, 'applied', 'completed')
       }
       runInTransaction(options.db, () => {
@@ -1402,6 +1516,11 @@ export function createSkillLibraryFacade(options: {
           }
           for (const source of state.plan.sources) restoreSourceSnapshot(options.db, source)
           for (const snapshot of state.plan.observed) restoreDeploymentSnapshot(options.db, snapshot.deployment)
+          // Restore managed deployment DB records to their original state
+          for (const entry of state.plan.managed) {
+            options.db.prepare('UPDATE deployments SET source_path = ?, source_hash_at_deploy = ?, source_id = ?, target_id = ?, skill_id = ?, deployed_at = ? WHERE id = ?')
+              .run(entry.deployment.source_path, entry.deployment.source_hash_at_deploy, entry.deployment.source_id, entry.deployment.target_id, entry.deployment.skill_id, entry.deployment.deployed_at, entry.deployment.id)
+          }
           if (!output.rewriteIdentity) updatePrimarySourcePath(options.db, output.originalSkillId, state.plan.source.path)
           options.db.prepare("UPDATE consolidation_items SET phase = 'undo-registry-committed' WHERE id = ?").run(state.plan.item.id)
         }
@@ -1435,9 +1554,22 @@ export function createSkillLibraryFacade(options: {
       try {
         for (const [reverseIndex, state] of [...applied].reverse().entries()) {
           options.consolidationHooks?.onFaultPoint?.({ batchId, itemIndex: applied.length - 1 - reverseIndex, point: 'before-compensation' })
-          for (const target of [...state.restoredTargets].reverse()) if (pathEntryExists(target)) rmSync(target, { force: false })
+          // restoredTargets 只含 observed 符号链接;recursive 对链接只删链接本身,不会递归进目标。
+          for (const target of [...state.restoredTargets].reverse()) if (pathEntryExists(target)) rmSync(target, { recursive: true, force: false })
           for (const source of [...state.restoredSources].reverse()) if (pathEntryExists(source.path)) rmSync(source.path, { recursive: true, force: false })
           if (state.canonicalMoved && pathEntryExists(state.plan.rollback)) renameSync(state.plan.rollback, state.plan.canonical.path)
+          // 受管部署在整理完成态本应指向权威路径;补偿重建(而非删除)以避免清单存在但目标缺失的 drift。
+          for (const entry of [...state.restoredManaged].reverse()) {
+            const targetPath = entry.deployment.target_path!
+            if (entry.deployment.mode === 'symlink' || entry.deployment.mode === 'junction') {
+              try { unlinkSync(targetPath) } catch { rmSync(targetPath, { recursive: true, force: true }) }
+              mkdirSync(dirname(targetPath), { recursive: true })
+              symlinkSync(state.plan.canonical.path, targetPath, entry.deployment.mode === 'junction' ? 'junction' : 'dir')
+            } else {
+              rmSync(targetPath, { recursive: true, force: true })
+              cpSync(state.plan.canonical.path, targetPath, { recursive: true, force: false })
+            }
+          }
         }
         removeCreatedParents(applied.flatMap((state) => state.createdRestoreParents))
       } catch (failure) { compensationError = failure }

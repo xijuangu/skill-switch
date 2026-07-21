@@ -138,9 +138,12 @@ export function useBatchConsolidationFlow(
   const drafts = state?.drafts ?? null
   const preview = state?.preview ?? null
 
-  const open = useCallback(() => {
+  const open = useCallback((filterSkillIds?: Set<number>) => {
+    const items = filterSkillIds
+      ? plan.filter((item) => filterSkillIds.has(item.skillId))
+      : plan
     setState({
-      drafts: plan.map((item) => ({
+      drafts: items.map((item) => ({
         ...item,
         selected: item.selectedByDefault,
         canonicalRelativeParent: item.canonicalRelativeParent

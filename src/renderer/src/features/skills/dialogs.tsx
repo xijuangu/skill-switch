@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Button, Input, Dialog, StatusDot } from '../../shared'
 import { completeMutation } from '../../async-state'
 import { groupByHash, shortHash, findSourceGroup } from './sourceGrouping'
@@ -50,7 +50,7 @@ export function sourceRoleLabel(role: SkillSourceView['source_role']): string {
   return role === 'canonical' ? '权威来源' : '候选来源'
 }
 
-type BulkAction = 'deploy' | 'undeploy' | 'remove'
+type BulkAction = 'deploy' | 'undeploy' | 'remove' | 'consolidate'
 type BulkDeployPair = {
   key: string
   skillName: string
@@ -80,12 +80,19 @@ function deploymentRiskLabel(reason: string): string {
 
 export function BulkSkillActionsDialog({
   skills,
+  allFilteredSkills,
+  consolidationPlan,
   onRefresh,
-  onClose
+  onClose,
+  onConsolidate
 }: {
   skills: SkillView[]
+  /** 搜索词 + 部署状态筛选后的全量 Skill（整理 Tab 展示范围）。 */
+  allFilteredSkills: SkillView[]
+  consolidationPlan: ConsolidationPlanItem[]
   onRefresh: () => Promise<void>
   onClose: () => void
+  onConsolidate: (skillIds: Set<number>) => void
 }) {
   const [action, setAction] = useState<BulkAction>('deploy')
   const [mode, setMode] = useState<DeployMode>('symlink')
@@ -98,6 +105,11 @@ export function BulkSkillActionsDialog({
   const [loadError, setLoadError] = useState<string | null>(null)
   const skillsKey = skills.map((skill) => skill.id).join(',')
 
+  const consolidatableIds = useMemo(
+    () => new Set(consolidationPlan.map((item) => item.skillId)),
+    [consolidationPlan]
+  )
+
   useEffect(() => {
     let cancelled = false
     setLoadError(null)
@@ -106,6 +118,13 @@ export function BulkSkillActionsDialog({
       setSelectedKeys((current) => current.size > 0
         ? current
         : new Set(skills.map((skill) => String(skill.id))))
+      return () => { cancelled = true }
+    }
+    if (action === 'consolidate') {
+      setBusy(false)
+      setSelectedKeys((current) => current.size > 0
+        ? current
+        : new Set(allFilteredSkills.filter((skill) => consolidatableIds.has(skill.id)).map((skill) => String(skill.id))))
       return () => { cancelled = true }
     }
     setBusy(true)
@@ -161,7 +180,7 @@ export function BulkSkillActionsDialog({
       })
     }
     return () => { cancelled = true }
-  }, [action, skillsKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [action, skillsKey, allFilteredSkills, consolidatableIds]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggle = (key: string) => {
     setSelectedKeys((current) => {
@@ -244,7 +263,9 @@ export function BulkSkillActionsDialog({
   )
   const actionLabel = action === 'deploy'
     ? hasPendingConfirmation ? '确认并继续' : '批量部署'
-    : action === 'undeploy' ? '批量取消部署' : '批量从注册表移除'
+    : action === 'undeploy' ? '批量取消部署'
+    : action === 'consolidate' ? '下一步'
+    : '批量从注册表移除'
 
   return (
     <Dialog
@@ -254,7 +275,12 @@ export function BulkSkillActionsDialog({
       description="成功项会从选择中移除；失败项保留，修正后可直接重试。"
       confirmLabel={actionLabel}
       busy={busy}
-      onConfirm={() => { if (selectedCount > 0) run() }}
+      onConfirm={() => {
+        if (action === 'consolidate') {
+          const ids = new Set([...selectedKeys].map(Number).filter((id) => consolidatableIds.has(id)))
+          if (ids.size > 0) onConsolidate(ids)
+        } else if (selectedCount > 0) run()
+      }}
       closeOnOverlay={false}
     >
       <div className="space-y-4">
@@ -262,7 +288,8 @@ export function BulkSkillActionsDialog({
           {([
             ['deploy', '部署'],
             ['undeploy', '取消部署'],
-            ['remove', '从注册表移除']
+            ['remove', '从注册表移除'],
+            ['consolidate', '整理']
           ] as const).map(([value, label]) => (
             <Button
               key={value}
@@ -354,6 +381,18 @@ export function BulkSkillActionsDialog({
               {resultByKey.get(String(skill.id))?.message && <span className="text-danger ml-auto">{resultByKey.get(String(skill.id))?.message}</span>}
             </label>
           ))}
+          {action === 'consolidate' && allFilteredSkills.map((skill) => {
+            const consolidatable = consolidatableIds.has(skill.id)
+            return (
+              <label key={skill.id} className={`flex items-center gap-2 rounded border border-border p-2 text-xs ${!consolidatable ? 'opacity-50' : ''}`}>
+                <input type="checkbox" aria-label={`整理 ${skill.name}`} checked={consolidatable && selectedKeys.has(String(skill.id))} disabled={!consolidatable || busy} onChange={() => toggle(String(skill.id))} />
+                <span className="flex-1">{skill.name}</span>
+                <span className={`text-2xs px-1.5 py-0.5 rounded ${consolidatable ? 'bg-primary-subtle text-primary' : 'bg-surface-secondary text-foreground-muted'}`}>
+                  {consolidatable ? '可整理' : '无需整理'}
+                </span>
+              </label>
+            )
+          })}
         </div>
       </div>
     </Dialog>
@@ -1079,23 +1118,50 @@ export function RemoveRegistryDialog({
 }
 
 function ConsolidationOperations({ operations }: { operations: ConsolidationPreview['operations'] }) {
-  const labels: Record<ConsolidationPreview['operations'][number]['kind'], string> = {
-    'write-canonical': '写入权威源码库',
-    'archive-candidate': '永久归档候选来源',
-    'remove-observed-entry': '移除外部订阅入口'
+  const operationStyles: Record<ConsolidationPreview['operations'][number]['kind'], { label: string; icon: string; className: string }> = {
+    'write-canonical': { label: '写入权威源码库', icon: '✦', className: 'text-primary' },
+    'archive-candidate': { label: '永久归档候选来源', icon: '▸', className: 'text-foreground-muted' },
+    'remove-observed-entry': { label: '移除外部订阅入口', icon: '✕', className: 'text-warning' },
+    'redirect-deployment': { label: '重定向部署链接', icon: '↻', className: 'text-primary' },
+    'redeploy-copy': { label: '重新部署副本', icon: '↻', className: 'text-primary' }
+  }
+  type Operation = ConsolidationPreview['operations'][number]
+  const groups: Array<{ skillId: number; skillName: string; operations: Operation[] }> = []
+  for (const operation of operations) {
+    let group = groups.find((candidate) => candidate.skillId === operation.skillId)
+    if (!group) {
+      group = { skillId: operation.skillId, skillName: operation.skillName, operations: [] }
+      groups.push(group)
+    }
+    group.operations.push(operation)
   }
   return (
     <div className="space-y-3">
       <div className="space-y-2">
-        {operations.map((operation, index) => (
-          <div key={`${operation.kind}:${operation.path}:${index}`} className="rounded border border-border p-2">
-            <p className="text-xs font-medium text-foreground-secondary">{labels[operation.kind]}</p>
-            <code className="block mt-1 text-2xs text-foreground-muted break-all">{operation.path}</code>
+        {groups.map((group) => (
+          <div key={group.skillId} className="rounded-md border border-border overflow-hidden">
+            <div className="px-2.5 py-1.5 bg-surface-secondary border-b border-border">
+              <span className="text-xs font-semibold text-foreground">{group.skillName}</span>
+            </div>
+            <div className="p-2 space-y-1.5">
+              {group.operations.map((operation, index) => {
+                const style = operationStyles[operation.kind]
+                return (
+                  <div key={`${operation.kind}:${operation.path}:${index}`} className="flex items-start gap-2">
+                    <span className={`text-xs leading-4 ${style.className} shrink-0`} aria-hidden>{style.icon}</span>
+                    <div className="min-w-0">
+                      <p className={`text-2xs font-medium ${style.className}`}>{style.label}</p>
+                      <code className="block text-2xs text-foreground-muted break-all">{operation.path}</code>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         ))}
       </div>
       <p className="text-xs text-warning">归档会永久保留，直到你手动清理归档批次。</p>
-      <p className="text-xs text-foreground-secondary">整理只建立权威来源，不会自动部署到任何工具。</p>
+      <p className="text-xs text-foreground-secondary">整理只建立权威来源；受管部署会自动重定向，不会新增部署到任何工具。</p>
     </div>
   )
 }

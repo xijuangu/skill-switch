@@ -165,7 +165,7 @@ export type ConsolidationPreviewView = {
   batchId: string
   skillId: number
   skillName: string
-  operations: Array<{ kind: 'write-canonical' | 'archive-candidate' | 'remove-observed-entry'; path: string }>
+  operations: Array<{ kind: 'write-canonical' | 'archive-candidate' | 'remove-observed-entry' | 'redirect-deployment' | 'redeploy-copy'; path: string; skillId: number; skillName: string }>
 }
 
 export type ConsolidationBatchPreviewView = {
