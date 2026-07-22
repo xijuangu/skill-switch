@@ -36,6 +36,7 @@ skill-switch 内置以下工具的发现目录（可在「工具」中启用 / �
 > ⚠️ **未签名与未公证**：skill-switch 没有商业代码签名和公证证书。首次打开时 macOS Gatekeeper 或 Windows SmartScreen 可能提示「无法验证开发者」或「已保护你的电脑」。这来自未签名状态，不代表安装失败。
 >
 > - **macOS**：在「访达」中右键点击应用 → 选择「打开」→ 在弹窗中确认「打开」；或在「系统设置 → 隐私与安全性」中点「仍要打开」。
+>   - **macOS Sequoia (15+) 「已损坏」提示**：浏览器下载的未签名应用可能直接显示「已损坏」，右键打开无效。终端执行 `xattr -dr com.apple.quarantine /Applications/skill-switch.app` 移除隔离属性后即可正常打开；或用 `curl -L -o skill-switch.dmg <下载链接>` 从终端下载（不附加隔离属性）。
 > - **Windows**：在 SmartScreen 弹窗中选「更多信息」→「仍要运行」。
 >
 > 详见 [SECURITY.md](SECURITY.md)。
