@@ -428,6 +428,7 @@ export type DriftKindView =
   | 'unresolved'
   | 'drift'
   | 'external'
+  | 'registered-candidate'
   | 'recovery-required'
   | 'bidirectional'
 

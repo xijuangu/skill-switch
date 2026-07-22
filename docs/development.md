@@ -127,6 +127,7 @@ skill-switch 的产品化历史以 issue 为单位推进；以下是主要里程
 - 公开 v1.0 产品化与发布规格：[issue #114](https://github.com/xijuangu/skill-switch/issues/114)
 - 建立最小开源仓库信任面：[issue #118](https://github.com/xijuangu/skill-switch/issues/118)
 - 批量 UX 与受管部署重定向：[issues #123–#127](https://github.com/xijuangu/skill-switch/issues)（整理时原地迁移受管部署、卡片式整理预览、批量操作对话框整合、工具页分组多选）
+- 工具页外部 skill 读模型一致性修复：新增 `registered-candidate` drift kind，`readToolDrifts` 跨表查询 `skill_sources`；移除 ToolsPage 冗余"登记候选"按钮与 external 分组多选，扫描统一走 SkillsPage（ADR 0006）
 
 ## ADR
 
@@ -136,3 +137,5 @@ skill-switch 的产品化历史以 issue 为单位推进；以下是主要里程
 - [ADR 0002 renderer 功能边界](./adr/0002-renderer-feature-boundaries.md)
 - [ADR 0003 Deployment 生命周期深模块](./adr/0003-deployment-lifecycle-module.md)
 - [ADR 0004 权威库整理生命周期](./adr/0004-canonical-library-lifecycle.md)
+- [ADR 0005 整理时原地迁移受管部署](./adr/0005-consolidation-redirects-managed-deployments.md)
+- [ADR 0006 registered-candidate drift kind 与 ToolsPage 入口简化](./adr/0006-registered-candidate-drift-kind.md)

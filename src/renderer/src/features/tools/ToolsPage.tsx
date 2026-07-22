@@ -33,11 +33,10 @@ export function ToolsPage({
   const [bulkResult, setBulkResult] = useState<BulkAdoptionResultView | null>(null)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkFacts, setBulkFacts] = useState<Awaited<ReturnType<typeof window.api.getBulkAdoptionFacts>>>({ total: 0, tools: [] })
-  // #127 分组多选批量操作:四类批量确认 + 批量重新部署的汇总风险弹窗。
+  // #127 分组多选批量操作:三类批量确认 + 批量重新部署的汇总风险弹窗。
   const [bulkUndeployConfirm, setBulkUndeployConfirm] = useState<DriftStatusView[] | null>(null)
   const [bulkRedeployConfirm, setBulkRedeployConfirm] = useState<DriftStatusView[] | null>(null)
   const [bulkAdoptConfirm, setBulkAdoptConfirm] = useState<DriftStatusView[] | null>(null)
-  const [bulkManageConfirm, setBulkManageConfirm] = useState<DriftStatusView[] | null>(null)
   const [bulkRedeployRisks, setBulkRedeployRisks] = useState<Array<{ drift: DriftStatusView; risk: ConfirmationRequiredView }> | null>(null)
   const [selectionResetKey, setSelectionResetKey] = useState(0)
   // 工具配置 + 发现目录(#116)
@@ -429,23 +428,6 @@ export function ToolsPage({
     setBulkAdoptConfirm(null)
   }
 
-  const handleBulkManage = async () => {
-    if (!bulkManageConfirm) return
-    setBulkBusy(true)
-    try {
-      // 纳入管理 = 触发扫描,把工具目录下未登记的外部 skill 原地注册为候选来源(不移动文件)。
-      await window.api.scan()
-      setSelectionResetKey((key) => key + 1)
-      await refreshPage()
-      success('已登记为候选来源，可在 Skills 页管理')
-    } catch (e) {
-      toastError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBulkBusy(false)
-      setBulkManageConfirm(null)
-    }
-  }
-
   if (loading) {
     return (
       <div className="h-full overflow-auto">
@@ -601,7 +583,6 @@ export function ToolsPage({
                 onBulkUndeploy={(drifts) => setBulkUndeployConfirm(drifts)}
                 onBulkRedeploy={(drifts) => setBulkRedeployConfirm(drifts)}
                 onBulkAdopt={(drifts) => setBulkAdoptConfirm(drifts)}
-                onBulkManage={(drifts) => setBulkManageConfirm(drifts)}
               />
             ))}
           </ul>
@@ -804,27 +785,6 @@ export function ToolsPage({
           ))}
         </ul>
       </Dialog>
-
-      <Dialog
-        open={bulkManageConfirm !== null}
-        onClose={() => setBulkManageConfirm(null)}
-        title="纳入管理:重新扫描工具目录?"
-        description="将重新扫描所有已启用工具目录,把其中发现的外部 skill 原地登记为候选来源(不移动文件)。此操作是全量扫描,不限于所选条目;所选条目仅作为参考列在下方。登记后可在 Skills 页查看并整理或部署。"
-        confirmLabel="纳入管理"
-        onConfirm={handleBulkManage}
-        busy={bulkBusy}
-        closeOnOverlay={false}
-      >
-        <ul className="space-y-1">
-          <li className="text-2xs text-foreground-muted">所选外部 skill(参考,扫描会覆盖工具目录下全部外部 skill):</li>
-          {bulkManageConfirm?.map((drift) => (
-            <li key={drift.targetPath} className="text-xs text-foreground-secondary">
-              {drift.skillName}
-              <code className="block text-2xs text-foreground-muted break-all">{drift.targetPath}</code>
-            </li>
-          ))}
-        </ul>
-      </Dialog>
     </div>
   )
 }
@@ -841,8 +801,7 @@ function ToolCard({
   onAdopt,
   onBulkUndeploy,
   onBulkRedeploy,
-  onBulkAdopt,
-  onBulkManage
+  onBulkAdopt
 }: {
   tool: ToolWithDriftsView
   expanded: boolean
@@ -856,23 +815,21 @@ function ToolCard({
   onBulkUndeploy: (drifts: DriftStatusView[]) => void
   onBulkRedeploy: (drifts: DriftStatusView[]) => void
   onBulkAdopt: (drifts: DriftStatusView[]) => void
-  onBulkManage: (drifts: DriftStatusView[]) => void
 }) {
   const { config, drifts } = tool
-  const managed = drifts.filter((d) => d.kind !== 'external' && d.deployment?.management !== 'observed')
+  const managed = drifts.filter((d) => d.kind !== 'external' && d.kind !== 'registered-candidate' && d.deployment?.management !== 'observed')
   const observed = drifts.filter((d) => d.deployment?.management === 'observed')
-  const external = drifts.filter((d) => d.kind === 'external')
+  // external 分组包含未登记('external')和已登记候选('registered-candidate'),都是清单无记录的外部 skill
+  const external = drifts.filter((d) => d.kind === 'external' || d.kind === 'registered-candidate')
   const driftCount = managed.filter((d) => d.kind !== 'normal').length
 
-  // #127 分组多选:managed/observed 按 deployment id,external 按 targetPath。
+  // #127 分组多选:managed/observed 按 deployment id。
   const [managedSelected, setManagedSelected] = useState<Set<number>>(new Set())
   const [observedSelected, setObservedSelected] = useState<Set<number>>(new Set())
-  const [externalSelected, setExternalSelected] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     setManagedSelected(new Set())
     setObservedSelected(new Set())
-    setExternalSelected(new Set())
   }, [selectionResetKey])
 
   const toggleManaged = (id: number) => setManagedSelected((prev) => {
@@ -887,24 +844,15 @@ function ToolCard({
     else next.add(id)
     return next
   })
-  const toggleExternal = (path: string) => setExternalSelected((prev) => {
-    const next = new Set(prev)
-    if (next.has(path)) next.delete(path)
-    else next.add(path)
-    return next
-  })
 
   const managedIds = managed.map((d) => d.deployment!.id)
   const allManagedSelected = managedIds.length > 0 && managedIds.every((id) => managedSelected.has(id))
   const observedIds = observed.map((d) => d.deployment!.id)
   const allObservedSelected = observedIds.length > 0 && observedIds.every((id) => observedSelected.has(id))
-  const externalPaths = external.map((d) => d.targetPath)
-  const allExternalSelected = externalPaths.length > 0 && externalPaths.every((path) => externalSelected.has(path))
 
   const selectedManagedDrifts = managed.filter((d) => managedSelected.has(d.deployment!.id))
   const selectedObservedDrifts = observed.filter((d) => observedSelected.has(d.deployment!.id))
-  const selectedExternalDrifts = external.filter((d) => externalSelected.has(d.targetPath))
-  const hasSelection = selectedManagedDrifts.length > 0 || selectedObservedDrifts.length > 0 || selectedExternalDrifts.length > 0
+  const hasSelection = selectedManagedDrifts.length > 0 || selectedObservedDrifts.length > 0
 
   if (!config.enabled || !config.exists) {
     return (
@@ -1041,19 +989,10 @@ function ToolCard({
               )}
               {external.length > 0 && (
                 <div className="border-t border-border-subtle pt-2">
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center mb-1.5">
                     <p className="text-2xs font-semibold text-foreground-muted uppercase">
                       外部 skill（skill-switch 未管理）
                     </p>
-                    <label className="flex items-center gap-1 text-2xs text-foreground-secondary cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        aria-label="全选外部 skill"
-                        checked={allExternalSelected}
-                        onChange={() => setExternalSelected(allExternalSelected ? new Set() : new Set(externalPaths))}
-                      />
-                      全选
-                    </label>
                   </div>
                   <ul className="space-y-1.5">
                     {external.map((d) => (
@@ -1061,8 +1000,6 @@ function ToolCard({
                         key={`ext:${d.skillName}`}
                         drift={d}
                         busy={false}
-                        selected={externalSelected.has(d.targetPath)}
-                        onToggleSelect={() => toggleExternal(d.targetPath)}
                       />
                     ))}
                   </ul>
@@ -1083,11 +1020,6 @@ function ToolCard({
                   {selectedObservedDrifts.length > 0 && (
                     <Button variant="primary" size="sm" onClick={() => onBulkAdopt(selectedObservedDrifts)}>
                       接管所选 ({selectedObservedDrifts.length})
-                    </Button>
-                  )}
-                  {selectedExternalDrifts.length > 0 && (
-                    <Button variant="secondary" size="sm" onClick={() => onBulkManage(selectedExternalDrifts)}>
-                      纳入管理 (触发全量扫描)
                     </Button>
                   )}
                 </div>
@@ -1120,7 +1052,7 @@ function DriftItem({
   onAdopt?: () => void
 }) {
   const status = getDriftStatus(drift.kind)
-  const isExternal = drift.kind === 'external'
+  const isExternal = drift.kind === 'external' || drift.kind === 'registered-candidate'
   const isDrift = drift.kind === 'drift'
   const isObserved = drift.deployment?.management === 'observed'
 
@@ -1184,7 +1116,9 @@ function DriftItem({
           </Button>
         )}
         {isExternal && (
-          <span className="text-2xs text-foreground-muted">未管理</span>
+          <span className="text-2xs text-foreground-muted">
+            {drift.kind === 'registered-candidate' ? '已登记候选' : '未管理'}
+          </span>
         )}
       </div>
     </li>

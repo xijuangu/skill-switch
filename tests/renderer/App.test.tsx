@@ -825,7 +825,6 @@ describe('App (integration)', () => {
 
     expect(screen.getByRole('checkbox', { name: '全选受管部署' })).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: '全选外部订阅' })).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: '全选外部 skill' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /取消部署所选/ })).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('checkbox', { name: '全选受管部署' }))
@@ -836,14 +835,10 @@ describe('App (integration)', () => {
     expect(screen.getByRole('button', { name: '接管所选 (1)' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '取消部署所选 (2)' })).toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('checkbox', { name: '全选外部 skill' }))
-    expect(screen.getByRole('button', { name: '纳入管理 (触发全量扫描)' })).toBeInTheDocument()
-
     const card = screen.getByRole('button', { name: /Agents/ }).closest('li')!
     expect(within(card).getByRole('button', { name: '取消部署所选 (2)' })).toBeInTheDocument()
     expect(within(card).getByRole('button', { name: '重新部署所选 (2)' })).toBeInTheDocument()
     expect(within(card).getByRole('button', { name: '接管所选 (1)' })).toBeInTheDocument()
-    expect(within(card).getByRole('button', { name: '纳入管理 (触发全量扫描)' })).toBeInTheDocument()
   })
 
   it('runs bulk undeploy per item after one confirmation listing the targets (#127)', async () => {
@@ -903,26 +898,6 @@ describe('App (integration)', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: '确认并全部重新部署' }))
 
     await waitFor(() => expect(api.deploymentConfirm).toHaveBeenCalledWith('rc-1'))
-  })
-
-  it('registers external skills in place via scan when bulk-managing them (#127)', async () => {
-    const api = mockWindowApi({
-      scan: vi.fn().mockResolvedValue({ tools: [], totalScanned: 0, totalUpserted: 0 }),
-      getTools: vi.fn().mockResolvedValue([agentsToolWithGroups()]) as Window['api']['getTools']
-    })
-    render(<App />)
-    await userEvent.click(screen.getByRole('button', { name: '工具' }))
-    await userEvent.click(await screen.findByRole('button', { name: /Agents/ }))
-    await userEvent.click(screen.getByRole('checkbox', { name: '全选外部 skill' }))
-    await userEvent.click(screen.getByRole('button', { name: '纳入管理 (触发全量扫描)' }))
-
-    const dialog = screen.getByRole('dialog')
-    expect(dialog).toHaveTextContent('纳入管理:重新扫描工具目录?')
-    expect(dialog).toHaveTextContent('此操作是全量扫描')
-    expect(dialog).toHaveTextContent('/agents/delta')
-    await userEvent.click(within(dialog).getByRole('button', { name: '纳入管理' }))
-
-    await waitFor(() => expect(api.scan).toHaveBeenCalledTimes(1))
   })
 
   it('uses the global bulk-adoption facts count instead of the enabled-tools read model', async () => {

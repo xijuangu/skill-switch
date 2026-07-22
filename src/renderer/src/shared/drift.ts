@@ -18,6 +18,7 @@ export const DRIFT_STATUS_MAP: Record<string, DriftStatusMeta> = {
   unresolved: { variant: 'danger', label: '待确认' },
   drift: { variant: 'danger', label: '漂移' },
   external: { variant: 'neutral', label: '外部' },
+  'registered-candidate': { variant: 'neutral', label: '已登记候选' },
   'recovery-required': { variant: 'danger', label: '需要人工恢复' },
   'bidirectional': { variant: 'danger', label: '双向漂移' },
 }

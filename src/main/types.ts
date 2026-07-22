@@ -258,7 +258,8 @@ export interface DeployResult {
  * - normal:清单有 + 目录有 + hash 一致(copy 模式)
  * - source-updated:清单有 + 目录有 + 源 hash 变了(copy 模式,"源已更新,可重新部署")
  * - drift:清单有 + 目录无(用户手动删了)
- * - external:清单无 + 目录有(外部 skill)
+ * - external:清单无 + 目录有(外部 skill,未被 scan 登记为候选来源)
+ * - registered-candidate:清单无 + 目录有 + 已被 scan 登记为 candidate source(纳入管理已生效)
  */
 export type DriftKind =
   | 'normal'
@@ -270,6 +271,7 @@ export type DriftKind =
   | 'unresolved'
   | 'drift'
   | 'external'
+  | 'registered-candidate'
   | 'recovery-required'
   | 'bidirectional'
 

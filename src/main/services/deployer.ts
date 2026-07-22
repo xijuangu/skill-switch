@@ -14,8 +14,8 @@ import {
   cpSync,
   existsSync,
   lstatSync,
-  realpathSync,
   readdirSync,
+  realpathSync,
   rmSync,
   renameSync,
   symlinkSync,
@@ -42,6 +42,7 @@ import {
   upsertDeployment
 } from '../db/dao/deployments'
 import { getSkillById } from '../db/dao/skills'
+import { getSourceByPath } from '../db/dao/skill-sources'
 import { hashDir } from './hash'
 import { createBackup } from './backup'
 import { assertAbsolutePath, assertSafeDeployTarget } from './path-safety'
@@ -580,6 +581,16 @@ export function readToolDrifts(
       } catch (error) {
         externalError = `无法解析 Skill 身份：${error instanceof Error ? error.message : String(error)}`
       }
+      // scan 登记的 source path:真实子目录用 targetPath,链接用 realpath。
+      // 已登记为 candidate source 的目录不再算 'external',显示 'registered-candidate'。
+      let registeredCandidate = false
+      if (!recovery) {
+        const source = getSourceByPath(db, targetPath)
+          ?? (entry.isSymbolicLink() ? (() => {
+            try { return getSourceByPath(db, realpathSync(targetPath)) } catch { return undefined }
+          })() : undefined)
+        registeredCandidate = source?.source_role === 'candidate'
+      }
       results.push({
         skillId: -1,
         skillName,
@@ -591,7 +602,7 @@ export function readToolDrifts(
         targetExists: true,
         currentSourceHash: null,
         currentTargetHash: null,
-        kind: recovery ? 'recovery-required' : 'external',
+        kind: recovery ? 'recovery-required' : registeredCandidate ? 'registered-candidate' : 'external',
         ...(recovery ? { recovery } : {})
       })
     }

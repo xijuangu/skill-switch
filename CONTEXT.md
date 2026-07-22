@@ -94,3 +94,11 @@ _Avoid_: Drift, automatic rollback
 **Source Recovery（权威来源恢复）**:
 权威 Source 缺失或不可读时的显式恢复流程。相关变更先被冻结；系统收集 Source Archive、历史权威版本、Copy Deployment 和用户指定目录作为恢复候选，按内容与最后已知哈希分类，但不自动选择或反向提升任一副本。用户选定版本后恢复到原 Canonical Placement，再重新评估所有 Deployment。
 _Avoid_: automatic copy promotion, deployment recovery, new placement
+
+**Drift（漂移）**:
+清单（`deployments` 表）与文件系统（Discovery Target 目录）之间的状态偏差。`readToolDrifts` 对比两侧得到 Drift Kind，不修改 DB 或文件，只用于展示。Drift 不自动触发任何操作；用户看到后选择 redeploy / undeploy / adopt / 解除登记 / 扫描登记等显式动作。
+_Avoid_: automatic repair, bidirectional sync, background watcher
+
+**Drift Kind（漂移类型）**:
+`readToolDrifts` 对每个目标条目计算的分类，取值见 ADR 0006：`normal`（清单与文件系统一致）/ `source-updated`（源 hash 变了）/ `target-modified`（目标侧被改）/ `link-mismatch`（symlink 指向错误）/ `source-missing`（源目录消失）/ `target-unconfigured`（目标工具目录已从配置移除）/ `unresolved`（无法判定）/ `drift`（其他偏差）/ `external`（清单无记录 + 目录有 + 未登记 candidate source）/ `registered-candidate`（清单无记录 + 目录有 + 已登记 candidate source，ADR 0006 新增）/ `recovery-required`（部署中断需恢复）/ `bidirectional`（源和目标都变了）。`external` 与 `registered-candidate` 的区别在于系统是否已通过 scan 知道该外部 skill——同一事实在 Skills 页和 Tools 页读模型中一致可见。
+_Avoid_: Drift action, mutation trigger
