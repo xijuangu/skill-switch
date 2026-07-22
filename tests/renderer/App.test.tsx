@@ -589,7 +589,7 @@ describe('App (integration)', () => {
     await userEvent.click(screen.getByRole('button', { name: '设置' }))
     expect(await screen.findByText('权威源码库')).toBeInTheDocument()
     expect(screen.getByText('/canonical/skills')).toBeInTheDocument()
-    expect(screen.getByText('skill-switch v1.0.0')).toBeInTheDocument()
+    expect(screen.getByText('skill-switch v1.1.0')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '检查更新' })).toBeInTheDocument()
     expect(screen.queryByText('候选来源目录')).not.toBeInTheDocument()
     expect(screen.queryByText('/imports/team-skills')).not.toBeInTheDocument()
