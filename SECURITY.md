@@ -32,3 +32,4 @@ Include the affected skill-switch version, OS, reproduction steps, a minimal exa
 
 - skill-switch 的发布安装包**未签名、未公证**。首次启动时 macOS Gatekeeper 或 Windows SmartScreen 会拦截，需要用户手动放行（见 README 的「下载与指南」）。这不是漏洞，而是发布成本决定的已知状态。
 - 应用不内置自动更新、不进行后台联网检查；版本升级由用户从 GitHub Releases 手动下载。
+- 外部链接仅允许 HTTPS 且限定 GitHub 域白名单（`github.com` / `raw.githubusercontent.com`）；renderer 强制 `sandbox` + `contextIsolation` + `nodeIntegration:false`。

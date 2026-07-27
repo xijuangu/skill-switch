@@ -105,6 +105,11 @@ describe('issue #119: Draft Release 自动合同', () => {
     expect(ciText).toContain('-x86_64.AppImage')
     expect(ciText).toContain('-amd64.deb')
     expect(ciText).toContain('find release-assets -type f -size 0')
+    // macOS arm64 DMG 资产命名
+    expect(ciText).toContain('-arm64.dmg')
+    // Windows x64 NSIS 安装包命名
+    expect(ciText).toContain('-x64.exe')
+    expect(ciText).toContain('Setup-')
   })
 
   test('CI workflow verify job 在三平台原生 runner 上运行', () => {

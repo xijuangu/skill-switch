@@ -4,7 +4,7 @@
 
 ## 搭建开发环境（中文）
 
-需要本地安装 Node.js 22.12 或更高版本和 npm。`better-sqlite3` 是原生依赖，不同工作流需要不同的 ABI，仓库已通过 npm 脚本自动准备对应二进制。
+需要本地安装 Node.js 22.12 或更高版本和 npm。推荐使用 nvm 或 fnm 管理版本。`better-sqlite3` 是原生依赖，不同工作流需要不同的 ABI，仓库已通过 npm 脚本自动准备对应二进制。
 
 ```bash
 # 安装依赖（better-sqlite3 自带 install 脚本下载 Node ABI；install 阶段不为 Electron 重建）
@@ -17,9 +17,9 @@ npm run dev
 常用命令：
 
 ```bash
-npm run typecheck   # TypeScript 类型检查（main + renderer）
+npm run typecheck   # TypeScript 类型检查（main/node + renderer）
 npm test            # 重建 Node ABI 后运行 Vitest 全套测试
-npm run verify      # typecheck + test + 构建 main/renderer 产物
+npm run verify      # typecheck + test + 构建 main/preload/renderer 产物
 npm run package     # 为当前平台构建安装包
 ```
 
@@ -30,7 +30,7 @@ npm run package     # 为当前平台构建安装包
 1. 从最新基线创建分支：`git checkout -b <your-name>/<short-description>`。
 2. 保持每个变更聚焦于单一目的；通过现有公共行为边界验证，不锁定组件拆分、CSS 实现细节或内部 SQL。
 3. 提交信息用中文或英文均可，但请说明「为什么」而不仅是「做了什么」。
-4. 推送分支并开启 Pull Request。在 PR 描述中关联相关 issue（如 `Closes #118`）。
+4. 推送分支并开启 Pull Request。在 PR 描述中关联相关 issue（如 `Closes #<issue-number>`）。
 
 我们不要求签署 CLA 或 DCO。提交即表示你同意以 MIT 协议发布你的贡献。
 

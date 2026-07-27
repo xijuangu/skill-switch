@@ -8,7 +8,7 @@ skill-switch 的发布产物包含以下第三方组件。本仓库自身代码�
 
 | 组件 | 许可证 | `package.json` 声明范围 |
 | --- | --- | --- |
-| [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) | MIT | `^11.5.0` |
+| [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) | MIT | `^12.0.0` |
 | [adm-zip](https://github.com/cthackers/adm-zip) | MIT | `^0.5.18` |
 | [gray-matter](https://github.com/jonschlinkert/gray-matter) | MIT | `^4.0.3` |
 
@@ -26,7 +26,7 @@ skill-switch 的发布产物包含以下第三方组件。本仓库自身代码�
 
 | 组件 | 许可证 | `package.json` 声明范围 |
 | --- | --- | --- |
-| [Electron](https://www.electronjs.org/) | MIT | `^28.2.0` |
+| [Electron](https://www.electronjs.org/) | MIT | `^41.0.0` |
 
 各库的完整许可证文本保留在各自的 npm 包（`node_modules/<name>/LICENSE`）中。MIT 与 ISC 许可证均要求在分发时保留版权与许可声明；本通知即满足该要求。
 

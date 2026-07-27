@@ -47,7 +47,7 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 - Provider/API 配置管理（cc-switch 的核心功能，不在本仓库）。
 - MCP / Prompts / Sessions 管理。
 - Smithery registry 原生集成。
-- Skill 更新检查。
+- Skill 内容更新检查（如 GitHub 仓库 Skill 的新 commit 检测）。
 - GitHub 仓库浏览器 UI。
 - Deep Link 导入。
 - 云同步 / WebDAV / 系统托盘。
@@ -63,6 +63,28 @@ On next launch, manifest vs actual scan → drift status (✅ / ⚠️ / 🆕)
 - Mutex 保护的 DB 连接。
 - 分层架构：Commands → Services → DAO → Database。
 - 最小侵入：卸载 skill-switch 不破坏工具 Skill 目录。
+
+## 三层架构
+
+skill-switch 采用 Electron 三层架构：
+
+- **主进程（src/main/）**：文件系统操作、数据库、部署/整理/恢复等核心业务逻辑，无 UI 依赖
+- **Preload 桥（src/preload/）**：通过 contextBridge 暴露 window.api，renderer 只通过语义 ID 调用主进程，绝不直接传递文件系统路径
+- **渲染进程（src/renderer/）**：React UI，只依赖 preload 暴露的类型，不直接 import 主进程模块
+
+主进程内部分层：Commands（IPC）→ Services（业务）→ DAO（数据访问）→ Database（SQLite）。
+
+## 主进程模块映射
+
+| 文件 | 对应 ADR / 功能 |
+|---|---|
+| deployment-facade.ts | ADR 0003 Deployment 深模块（14 个 Facade 方法）|
+| skill-library-facade.ts | ADR 0004/0005 整理 + Relocation + Archive Purge |
+| source-recovery-facade.ts | ADR 0004 Source Recovery |
+| bulk-mutation-facade.ts | 批量 deploy/undeploy/remove（issue #97/#123-127）|
+| deployer.ts | 部署执行器（纯函数 + DB 操作）|
+| scanner.ts | 工具目录扫描 + 候选来源登记 |
+| scan-all.ts | 全量扫描入口 |
 
 ## 原生依赖与平台打包
 
@@ -90,7 +112,7 @@ Node 运行时加载时触发段错误（exit 139），表现为 macOS verify �
 | `npm test` / `npm run test:watch` | Node | 先 `native:node`，再跑 vitest |
 | `npm run dev` / `npm start` | Electron | 先 `native:electron`，再启动 Electron |
 | `npm run build:electron` / `npm run package:*` | Electron | 先 `native:electron`，再构建/打包 |
-| `npm run build` / `npm run verify` | 无 | 只做 vite 打包，不加载原生模块 |
+| `npm run build` / `npm run verify` | Node（经 npm test 间接准备） | 只做 vite 打包，不加载原生模块；verify 顺序 typecheck → test（间接准备 Node ABI）→ build |
 | `npm ci` | Node | better-sqlite3 自带 install 脚本下载 Node 预编译 |
 
 若 `better_sqlite3.node` 报 `NODE_MODULE_VERSION` 不匹配，运行对应的原生准备命令
@@ -104,6 +126,24 @@ Node 运行时加载时触发段错误（exit 139），表现为 macOS verify �
 - `npm run package:linux` → AppImage 和 DEB
 
 正式版本的版本号、Release Notes、tag、三平台 CI、Draft Release 与人工发布顺序统一记录在根目录 [RELEASING.md](../RELEASING.md)。发布流程不得从历史 issue 或旧版本说明中推断。
+
+## 开发命令
+
+以下 npm scripts 来自 `package.json`，按用途分组（ABI 准备见上一节的表格）：
+
+| 命令 | 用途 |
+| --- | --- |
+| `npm run typecheck` | 同时跑 `typecheck:node` 与 `typecheck:web`，仅类型检查不产出 |
+| `npm run typecheck:node` | 主进程 + preload 的 TypeScript 类型检查（`tsconfig.node.json`）|
+| `npm run typecheck:web` | 渲染进程的 TypeScript 类型检查（`tsconfig.web.json`）|
+| `npm run rebuild` | 等同于 `native:electron`，为 Electron 重建 better-sqlite3 |
+| `npm run native:node` | 为 Node/Vitest 重建 better-sqlite3（先清 build 目录）|
+| `npm run native:electron` | 为 Electron 强制重建 better-sqlite3（`electron-rebuild -f`）|
+| `npm run test:watch` | vitest watch 模式，先跑 `native:node` 准备 Node ABI |
+| `npm run package` | `build:electron` + `electron-builder --publish never`（当前平台）|
+| `npm run verify` | typecheck + test + build 的聚合入口，用于 PR 前本地验证 |
+
+`npm run dev`、`npm start`、`npm test`、`npm run build`、`npm run build:electron` 及 `npm run package:mac/win/linux` 见上一节 ABI 表格与平台打包命令说明。
 
 ## 测试与手工验收
 
@@ -127,7 +167,7 @@ skill-switch 的产品化历史以 issue 为单位推进；以下是主要里程
 - 公开 v1.0 产品化与发布规格：[issue #114](https://github.com/xijuangu/skill-switch/issues/114)
 - 建立最小开源仓库信任面：[issue #118](https://github.com/xijuangu/skill-switch/issues/118)
 - 批量 UX 与受管部署重定向：[issues #123–#127](https://github.com/xijuangu/skill-switch/issues)（整理时原地迁移受管部署、卡片式整理预览、批量操作对话框整合、工具页分组多选）
-- 工具页外部 skill 读模型一致性修复：新增 `registered-candidate` drift kind，`readToolDrifts` 跨表查询 `skill_sources`；移除 ToolsPage 冗余"登记候选"按钮与 external 分组多选，扫描统一走 SkillsPage（ADR 0006）
+- 工具页外部 skill 读模型一致性修复：[issue #127](https://github.com/xijuangu/skill-switch/issues/127)（ADR 0006；与 #123-#126 同批次，聚焦读模型一致性）
 
 ## ADR
 

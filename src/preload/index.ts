@@ -79,8 +79,6 @@ const api = {
     ipcRenderer.invoke('bulk:removeFromRegistry', requests),
   bulkDetachDeployments: (requests: Array<{ key: string; deploymentId: number }>) =>
     ipcRenderer.invoke('bulk:detachDeployments', requests),
-  bulkManageExternalSkills: (requests: Array<{ key: string; targetId: string; entryName: string }>) =>
-    ipcRenderer.invoke('bulk:manageExternalSkills', requests),
   adoptDeployment: (deploymentId: number) => ipcRenderer.invoke('adoptDeployment', deploymentId),
   adoptTargetAsCandidate: (deploymentId: number) => ipcRenderer.invoke('adoptTargetAsCandidate', deploymentId),
   getBulkAdoptionFacts: () => ipcRenderer.invoke('getBulkAdoptionFacts'),

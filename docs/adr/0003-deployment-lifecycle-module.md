@@ -1,6 +1,18 @@
 # Deployment 生命周期收归一个深模块
 
+## Status
+
+Accepted
+
+## Context
+
+Deployment 的资格判断、确认、模式降级、目标互斥、文件系统补偿、清单更新和单个 Deployment 漂移规则需要统一收归，IPC/preload 只作为传输适配器，renderer 只提交 Source、Discovery Target、Deployment 等语义 ID 并呈现结构化结果。
+
+## Decision
+
 Deployment 的资格判断、确认、模式降级、目标互斥、文件系统补偿、清单更新和单个 Deployment 漂移规则统一收归主进程中的深模块；IPC/preload 只作为传输适配器，renderer 只提交 Source、Discovery Target、Deployment 等语义 ID 并呈现结构化结果。模块采用面向当前 GUI 的 Facade（deploy、confirm、redeploy、undeploy、inspect），而不采用通用 command bus 或一次替换多个订阅的声明式 Engine，因为命名入口让常见调用最直接，同时避免在尚无需求时引入多目标锁与跨目标补偿。
+
+Facade 表面随 issue #77/#89/#97/#123 扩展为 14 个方法，新增 preflightUndeploy、detachStaleTarget、detachRegistration、adopt、adoptTargetAsCandidate、manageExternal、getBulkAdoptionFacts、previewBulkAdoption、confirmBulkAdoption，均经同一 target lock 与 path-free 边界。
 
 ## Consequences
 

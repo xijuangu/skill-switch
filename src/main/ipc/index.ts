@@ -601,19 +601,6 @@ export function registerIpcHandlers(db: DB): void {
     }))
   })
 
-  ipcMain.handle('bulk:manageExternalSkills', async (_e, requests: unknown) => {
-    if (!Array.isArray(requests)) throw new Error('bulk external management requests must be an array')
-    return bulkMutationFacade.manageExternal(requests.map((request, index) => {
-      if (typeof request !== 'object' || request === null) throw new Error(`bulk external item ${index} must be an object`)
-      const dto = request as Record<string, unknown>
-      return {
-        key: assertNonEmptyString(dto.key, `bulk external item ${index} key`),
-        targetId: assertNonEmptyString(dto.targetId, `bulk external item ${index} targetId`),
-        entryName: validateSkillName(assertNonEmptyString(dto.entryName, `bulk external item ${index} entryName`))
-      }
-    }))
-  })
-
   ipcMain.handle('adoptDeployment', async (_e, deploymentId: number) =>
     deploymentFacade.adopt(assertInteger(deploymentId, 'deploymentId'))
   )

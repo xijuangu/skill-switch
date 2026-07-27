@@ -10,6 +10,8 @@
    npm version <version> --no-git-tag-version
    ```
 
+   版本号必须为纯数字语义版本（如 `1.2.0`），不支持 pre-release 后缀（如 `-rc.1`），由 `tests/release-contract.test.ts` 强制。
+
 2. **版本说明**：新增 `docs/release-notes/v<version>.md`。保留旧版本文件，不要覆盖。内容至少包括中文发布说明、3–5 条英文摘要、支持平台、未签名/未公证状态、联网边界和已知限制。
 3. **Git tag**：合并后的最终提交通过三平台 CI 后创建与 package version 完全一致的 tag。
 

@@ -74,7 +74,6 @@ function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     selectZipFile: vi.fn(),
     selectLocalDir: vi.fn(),
     bulkDetachDeployments: vi.fn(),
-    bulkManageExternalSkills: vi.fn(),
     checkForUpdates: vi.fn().mockResolvedValue({
       status: 'up-to-date',
       currentVersion: '1.0.0',

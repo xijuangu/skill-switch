@@ -516,7 +516,6 @@ declare global {
       bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
       bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) => Promise<BulkMutationResultView>
       bulkDetachDeployments: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
-      bulkManageExternalSkills: (requests: Array<{ key: string; targetId: string; entryName: string }>) => Promise<BulkMutationResultView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       adoptTargetAsCandidate: (deploymentId: number) => Promise<TargetAdoptionOutcomeView>
       getBulkAdoptionFacts: () => Promise<BulkAdoptionPreviewFactsView>

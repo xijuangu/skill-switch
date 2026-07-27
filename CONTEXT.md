@@ -1,4 +1,4 @@
-# Skill Management
+# skill-switch 领域语言 / Context
 
 skill-switch 管理 skill 的内容来源，以及这些内容被派生到各 AI 编码工具后的部署关系。
 

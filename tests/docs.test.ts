@@ -1,7 +1,7 @@
 // issue #118: 最小开源仓库信任面 — 必需文件与内部链接通过最小自动检查。
 // 只做结构性验证（必需文件存在、相对链接可解析、许可证文本在场），不对营销文案做脆弱快照。
 import { test, expect, describe } from 'vitest'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -26,14 +26,26 @@ const requiredFiles = [
   'src/renderer/src/assets/fonts/OFL.txt'
 ]
 
+/** 动态收集 docs/adr 与 docs/release-notes 下的 .md 文件，避免新增文档后忘记纳入扫描。 */
+function listMdFiles(dir: string): string[] {
+  return readdirSync(resolve(repoRoot, dir), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+    .map((entry) => `${dir}/${entry.name}`)
+    .sort()
+}
+
 const docsToScan = [
   'README.md',
   'SECURITY.md',
   'CONTRIBUTING.md',
   'RELEASING.md',
+  'CONTEXT.md',
   'docs/user-guide.md',
   'docs/development.md',
-  'docs/THIRD_PARTY_LICENSES.md'
+  'docs/manual-qa.md',
+  'docs/THIRD_PARTY_LICENSES.md',
+  ...listMdFiles('docs/adr'),
+  ...listMdFiles('docs/release-notes')
 ]
 
 describe('issue #118: 最小开源仓库信任面', () => {
@@ -59,6 +71,51 @@ describe('issue #118: 最小开源仓库信任面', () => {
     for (const name of ['better-sqlite3', 'adm-zip', 'gray-matter', 'react', 'lucide-react', 'Inter', 'Open Font License']) {
       expect(text, `expected ${name} in third-party notice`).toContain(name)
     }
+  })
+
+  test('THIRD_PARTY_LICENSES.md 中关键依赖版本号与 package.json 一致', () => {
+    const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      devDependencies: Record<string, string>
+    }
+    const licenseText = readFileSync(resolve(repoRoot, 'docs/THIRD_PARTY_LICENSES.md'), 'utf8')
+    // 关键依赖：运行时 + 经 Vite 打包 + 应用框架
+    const keyDeps = [
+      'better-sqlite3',
+      'electron',
+      'adm-zip',
+      'gray-matter',
+      'react',
+      'react-dom',
+      'lucide-react'
+    ]
+    const combined = { ...pkg.dependencies, ...pkg.devDependencies }
+    const lines = licenseText.split('\n')
+    const mismatches: string[] = []
+    for (const dep of keyDeps) {
+      const declared = combined[dep]
+      if (!declared) {
+        mismatches.push(`${dep}: not found in package.json`)
+        continue
+      }
+      // doc 中以 `[dep](url)` 形式列出（Electron 显示为大写 E，做大小写无关匹配）
+      const line = lines.find((l) => new RegExp(`\\[${dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`, 'i').test(l))
+      if (!line) {
+        mismatches.push(`${dep}: not found in THIRD_PARTY_LICENSES.md`)
+        continue
+      }
+      // 取该行第一个反引号包裹的版本范围（如 `^12.0.0`）
+      const verMatch = line.match(/`([^`]+)`/)
+      if (!verMatch) {
+        mismatches.push(`${dep}: no backtick version in doc line`)
+        continue
+      }
+      const documented = verMatch[1]
+      if (documented !== declared) {
+        mismatches.push(`${dep}: package.json=${declared} vs doc=${documented}`)
+      }
+    }
+    expect(mismatches, `version mismatches:\n  ${mismatches.join('\n  ')}`).toEqual([])
   })
 
   test('README 首屏包含定位、支持工具、下载与本地承诺', () => {

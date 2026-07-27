@@ -8,7 +8,7 @@ skill-switch 是一个本地优先的桌面应用，为同时使用多个 AI 编
 
 ![skill-switch 主界面](docs/screenshot.png)
 
-> 截图来自 v1.0.0 RC 构建，使用虚构示例数据（不包含真实用户名、绝对路径或 Token）。
+> 截图来自 v1.1.0 构建，使用虚构示例数据（不包含真实用户名、绝对路径或 Token）。
 
 ## 支持工具
 
@@ -39,11 +39,12 @@ skill-switch 内置以下工具的发现目录（可在「工具」中启用 / �
 >   - **macOS Sequoia (15+) 「已损坏」提示**：浏览器下载的未签名应用可能直接显示「已损坏」，右键打开无效。终端执行 `xattr -dr com.apple.quarantine /Applications/skill-switch.app` 移除隔离属性后即可正常打开；或用 `curl -L -o skill-switch.dmg <下载链接>` 从终端下载（不附加隔离属性）。
 > - **Windows**：在 SmartScreen 弹窗中选「更多信息」→「仍要运行」。
 >
-> 详见 [SECURITY.md](SECURITY.md)。
+> [SECURITY.md](SECURITY.md) 描述漏洞报告范围与安全措施。
 
 ## 本地优先、隐私与确认承诺
 
 - **无账号、无遥测、无后台服务**：应用不调用任何登录或云同步接口，不在后台常驻，也不上报任何使用数据。
+- **不自动更新**：版本升级由用户从 GitHub Releases 手动下载。
 - **主动联网边界**：应用只在你主动「从 GitHub 安装 Skill」时通过 `git` 拉取公开仓库内容，或在你点击「检查更新」时读取 GitHub Latest Release 元数据。其他操作（扫描、整理、部署、取消部署、批量操作、备份与恢复）完全在本机完成，不会把你的 Skill 内容或本机路径上传到任何服务器。
 - **一次性确认**：覆盖外部内容、降级部署模式（如 `symlink` → `copy`）和批量变更都需要你在执行前明确确认；renderer 只提交语义 ID，绝不直接提交文件系统路径。
 - **可恢复**：整理移除的来源默认进入可恢复的来源归档区；部署中断会保留现场和备份，由你选择恢复方案。
@@ -52,7 +53,7 @@ skill-switch 内置以下工具的发现目录（可在「工具」中启用 / �
 
 - **一个权威版本**：每个已整理 Skill 在 `~/.skill-switch/skills` 中只有一个权威 Source，所有工具的部署都从它派生。
 - **多工具部署**：安装或部署时可在同一个多工具矩阵中连续把 Skill 部署到 TRAE、Codex、Claude Code、Agents、Gemini CLI，默认使用 `symlink` 共享同一份权威内容。
-- **安全的批量操作**：技能页支持批量部署、取消部署和从注册表移除；工具页的部署关系支持批量取消部署、解除登记，以及把外部 Skill 批量纳入管理。
+- **安全的批量操作**：技能页支持批量部署、取消部署、从注册表移除和整理；工具页的部署关系支持批量取消部署、重新部署和接管外部订阅。
 - **外部订阅只读**：扫描到的其他程序建立的链接在显式接管前不会被删除或改写；从注册表移除会先预检全部关系，存在未接管关系时拒绝执行。
 - **最小侵入**：卸载 skill-switch 不会破坏已部署到工具目录的 Skill；`symlink` / `junction` 仍指向权威源码库。
 
@@ -66,7 +67,7 @@ skill-switch 内置以下工具的发现目录（可在「工具」中启用 / �
 
 ## 平台支持
 
-skill-switch 在 macOS、Windows 和 Linux 上运行。开发者工具以桌面应用形式分发，不依赖系统包管理器。当前首发最小资产合同为：一个 macOS DMG、一个 Windows x64 NSIS 安装包、至少一个 Linux x64 安装包（AppImage 优先）。macOS Intel 独立 DMG、Windows ARM、Linux ARM 暂不在首发范围内。
+skill-switch 在 macOS、Windows 和 Linux 上运行。开发者工具以桌面应用形式分发，不依赖系统包管理器。当前最小资产合同为：一个 macOS DMG、一个 Windows x64 NSIS 安装包、至少一个 Linux x64 安装包（AppImage 优先）。macOS Intel 独立 DMG、Windows ARM、Linux ARM 暂不在首发范围内。
 
 ## 贡献与开发
 
