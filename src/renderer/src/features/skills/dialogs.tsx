@@ -99,6 +99,7 @@ export function BulkSkillActionsDialog({
   const [deployPairs, setDeployPairs] = useState<BulkDeployPair[]>([])
   const [undeployItems, setUndeployItems] = useState<BulkUndeployItem[]>([])
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
+  const [expandedTargets, setExpandedTargets] = useState<Set<string>>(new Set())
   const [toolFilter, setToolFilter] = useState('all')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<BulkMutationResultView | null>(null)
@@ -316,6 +317,7 @@ export function BulkSkillActionsDialog({
                 setAction(value)
                 setResult(null)
                 setSelectedKeys(new Set())
+                setExpandedTargets(new Set())
               }}
             >
               {label}
@@ -381,15 +383,24 @@ export function BulkSkillActionsDialog({
           </div>
         )}
 
-        <div className="max-h-72 overflow-auto space-y-2">
+        <div className="space-y-2">
           {action === 'deploy' && deployTargetGroups.map((group) => {
             const eligibleKeys = group.pairs.filter((pair) => pair.eligible).map((pair) => pair.key)
             const selectedInGroup = eligibleKeys.filter((key) => selectedKeys.has(key)).length
             const allSelected = eligibleKeys.length > 0 && selectedInGroup === eligibleKeys.length
             const someSelected = selectedInGroup > 0 && !allSelected
+            const expanded = expandedTargets.has(group.targetId)
+            const toggleExpanded = () => {
+              setExpandedTargets((current) => {
+                const next = new Set(current)
+                if (next.has(group.targetId)) next.delete(group.targetId)
+                else next.add(group.targetId)
+                return next
+              })
+            }
             return (
               <div key={group.targetId} role="group" aria-label={`目标 ${group.targetName}`}>
-                <label className="flex items-center gap-2 rounded border border-border bg-surface-secondary p-2 text-xs font-medium">
+                <div className="flex items-center gap-2 rounded border border-border bg-surface-secondary p-2 text-xs font-medium">
                   <input
                     type="checkbox"
                     aria-label={`全选 ${group.targetName}`}
@@ -398,16 +409,27 @@ export function BulkSkillActionsDialog({
                     ref={(el) => { if (el) el.indeterminate = someSelected }}
                     onChange={() => toggleTargetGroup(eligibleKeys, allSelected)}
                   />
-                  <span>{group.targetName} · {selectedInGroup}/{eligibleKeys.length}</span>
-                </label>
-                <div className="space-y-1 mt-1">
-                  {group.pairs.map((pair) => (
-                    <label key={pair.key} className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!pair.eligible ? 'opacity-50' : ''}`}>
-                      <input type="checkbox" aria-label={`${pair.skillName} → ${pair.targetName}`} checked={selectedKeys.has(pair.key)} disabled={!pair.eligible || busy} onChange={() => toggle(pair.key)} />
-                      <span><strong>{pair.skillName}</strong> → {pair.targetName}{pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}</span>
-                    </label>
-                  ))}
+                  <button
+                    type="button"
+                    onClick={toggleExpanded}
+                    aria-expanded={expanded}
+                    aria-label={`${expanded ? '收起' : '展开'} ${group.targetName}`}
+                    className="flex flex-1 items-center gap-1.5 text-left text-foreground hover:text-foreground-secondary"
+                  >
+                    <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+                    <span>{group.targetName} · {selectedInGroup}/{eligibleKeys.length}</span>
+                  </button>
                 </div>
+                {expanded && (
+                  <div className="space-y-1 mt-1">
+                    {group.pairs.map((pair) => (
+                      <label key={pair.key} className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!pair.eligible ? 'opacity-50' : ''}`}>
+                        <input type="checkbox" aria-label={`${pair.skillName} → ${pair.targetName}`} checked={selectedKeys.has(pair.key)} disabled={!pair.eligible || busy} onChange={() => toggle(pair.key)} />
+                        <span><strong>{pair.skillName}</strong> → {pair.targetName}{pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
             )
           })}

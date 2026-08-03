@@ -357,6 +357,7 @@ describe('App (integration)', () => {
     expect(screen.getByText(/target busy/)).toBeInTheDocument()
     view.rerender(<BulkSkillActionsDialog skills={skills.map((skill) => ({ ...skill }))} allFilteredSkills={skills} consolidationPlan={[]} onRefresh={vi.fn()} onClose={vi.fn()} onConsolidate={vi.fn()} />)
     expect(screen.getByText('完成 1，失败 1')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '展开 Codex' }))
     expect(screen.getByRole('checkbox', { name: `${skills[0].name} → Codex` })).not.toBeChecked()
     expect(screen.getByRole('checkbox', { name: `${skills[1].name} → Codex` })).toBeChecked()
   })
@@ -405,7 +406,7 @@ describe('App (integration)', () => {
     })
 
     render(<BulkSkillActionsDialog skills={[skill]} allFilteredSkills={[skill]} consolidationPlan={[]} onRefresh={vi.fn()} onClose={vi.fn()} onConsolidate={vi.fn()} />)
-    await screen.findByRole('checkbox', { name: `${skill.name} → Codex` })
+    await screen.findByRole('checkbox', { name: '全选 Codex' })
     await userEvent.click(screen.getByRole('checkbox', { name: '全选 Codex' }))
     await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
     expect(await screen.findByText('将覆盖目标中不受管理的现有内容')).toBeInTheDocument()

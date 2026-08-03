@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import React from 'react'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BulkSkillActionsDialog } from '../../src/renderer/src/features/skills/dialogs'
 import type { SkillWithConflictView } from '../../src/preload'
@@ -53,7 +53,7 @@ function renderDialog(skills: SkillWithConflictView[]) {
 }
 
 describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
-  it('按 Discovery Target 分组展示，且默认不勾选任何部署项', async () => {
+  it('分组默认折叠：只见组头，展开后才出现部署项，且默认不勾选', async () => {
     const skills = [buildSkill(1, 'alpha'), buildSkill(2, 'beta')]
     mockWindowApi({
       getDeployTargets: vi.fn().mockResolvedValue([
@@ -63,16 +63,17 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
     })
     renderDialog(skills)
 
-    const codexGroup = await screen.findByRole('group', { name: /Codex/ })
-    const agentsGroup = await screen.findByRole('group', { name: /Agents/ })
-    expect(within(codexGroup).getByRole('checkbox', { name: 'alpha → Codex' })).toBeInTheDocument()
-    expect(within(codexGroup).getByRole('checkbox', { name: 'beta → Codex' })).toBeInTheDocument()
-    expect(within(agentsGroup).getByRole('checkbox', { name: 'alpha → Agents' })).toBeInTheDocument()
+    await screen.findByRole('checkbox', { name: '全选 Codex' })
+    // 默认折叠：pair 复选框不在文档中
+    expect(screen.queryByRole('checkbox', { name: 'alpha → Codex' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: 'alpha → Agents' })).not.toBeInTheDocument()
 
-    // 默认不选：所有 pair 复选框均未勾选
-    for (const box of screen.getAllByRole('checkbox')) {
-      expect(box).not.toBeChecked()
-    }
+    // 展开 Codex 组后出现该组 pair，且默认不勾选
+    await userEvent.click(screen.getByRole('button', { name: '展开 Codex' }))
+    expect(screen.getByRole('checkbox', { name: 'alpha → Codex' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'beta → Codex' })).not.toBeChecked()
+    // 未展开的组仍不可见
+    expect(screen.queryByRole('checkbox', { name: 'alpha → Agents' })).not.toBeInTheDocument()
   })
 
   it('组头开关一次选中该目标下全部 Skill，提交只包含该目标的 pair', async () => {
@@ -87,6 +88,8 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
 
     const codexHeader = await screen.findByRole('checkbox', { name: '全选 Codex' })
     await userEvent.click(codexHeader)
+    await userEvent.click(screen.getByRole('button', { name: '展开 Codex' }))
+    await userEvent.click(screen.getByRole('button', { name: '展开 Agents' }))
 
     expect(screen.getByRole('checkbox', { name: 'alpha → Codex' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'beta → Codex' })).toBeChecked()
@@ -108,7 +111,8 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
     })
     renderDialog(skills)
 
-    await userEvent.click(await screen.findByRole('checkbox', { name: 'alpha → Codex' }))
+    await userEvent.click(await screen.findByRole('button', { name: '展开 Codex' }))
+    await userEvent.click(screen.getByRole('checkbox', { name: 'alpha → Codex' }))
     const header = screen.getByRole('checkbox', { name: '全选 Codex' })
     expect(header).not.toBeChecked()
     expect((header as HTMLInputElement).indeterminate).toBe(true)
@@ -123,6 +127,31 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
     await userEvent.click(header)
     expect(screen.getByRole('checkbox', { name: 'alpha → Codex' })).not.toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'beta → Codex' })).not.toBeChecked()
+  })
+
+  it('展开/收起不改变勾选状态，组头复选框不触发折叠', async () => {
+    const skills = [buildSkill(1, 'alpha')]
+    mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([target('codex-user', 'Codex')])
+    })
+    renderDialog(skills)
+
+    await userEvent.click(await screen.findByRole('button', { name: '展开 Codex' }))
+    await userEvent.click(screen.getByRole('checkbox', { name: 'alpha → Codex' }))
+
+    // 收起后勾选状态保留在组头上
+    await userEvent.click(screen.getByRole('button', { name: '收起 Codex' }))
+    expect(screen.queryByRole('checkbox', { name: 'alpha → Codex' })).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '全选 Codex' })).toBeChecked()
+
+    // 重新展开，pair 勾选仍在
+    await userEvent.click(screen.getByRole('button', { name: '展开 Codex' }))
+    expect(screen.getByRole('checkbox', { name: 'alpha → Codex' })).toBeChecked()
+
+    // 点组头复选框只改选择，不改展开态
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选 Codex' }))
+    expect(screen.getByRole('checkbox', { name: 'alpha → Codex' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'alpha → Codex' })).not.toBeChecked()
   })
 
   it('取消部署 tab 默认不勾选任何受管部署，工具筛选保留', async () => {
