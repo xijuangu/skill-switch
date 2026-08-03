@@ -13,6 +13,7 @@ interface DialogProps {
   confirmLabel?: string
   cancelLabel?: string
   onConfirm?: () => void
+  confirmDisabled?: boolean
   hideCancel?: boolean
   closeOnOverlay?: boolean
 }
@@ -28,6 +29,7 @@ export function Dialog({
   confirmLabel = '确认',
   cancelLabel = '取消',
   onConfirm,
+  confirmDisabled = false,
   hideCancel = false,
   closeOnOverlay = true
 }: DialogProps) {
@@ -142,7 +144,7 @@ export function Dialog({
               variant={isDanger ? 'danger' : 'primary'}
               onClick={onConfirm}
               loading={busy}
-              disabled={busy}
+              disabled={busy || confirmDisabled}
               size="sm"
             >
               {busy ? '处理中…' : confirmLabel}

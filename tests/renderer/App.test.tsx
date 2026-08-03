@@ -6,84 +6,10 @@ import { ToastProvider } from '../../src/renderer/src/app/Toast'
 import { SkillsPage } from '../../src/renderer/src/features/skills/SkillsPage'
 import { BulkSkillActionsDialog, DeployDialogContent, InstallDialogContent, RemoveRegistryDialog } from '../../src/renderer/src/features/skills/dialogs'
 import type { SkillWithConflictView } from '../../src/preload'
+import { mockWindowApi } from './api-mock'
 
 // 回归 #52:App 必须在 ToastProvider 之内消费 useToast,
 // 否则首屏抛 "useToast must be used within ToastProvider" → 白屏(typecheck/build 不可见)。
-
-function mockWindowApi(overrides: Partial<Window['api']> = {}) {
-  const api: Window['api'] = {
-    scan: vi.fn().mockResolvedValue({ tools: [], totalScanned: 0, totalUpserted: 0 }),
-    getSkills: vi.fn().mockResolvedValue([]),
-    getSkillLibrary: vi.fn().mockResolvedValue({
-      canonicalRepository: { path: '/canonical' },
-      skills: [],
-      consolidationPlan: [],
-      consolidationBatches: [],
-      sourceRelocations: []
-    }),
-    previewConflictResolution: vi.fn(),
-    previewConsolidation: vi.fn(),
-    previewConsolidationBatch: vi.fn(),
-    confirmConsolidation: vi.fn(),
-    undoConsolidation: vi.fn(),
-    restoreConsolidation: vi.fn(),
-    previewSourceArchivePurge: vi.fn(),
-    confirmSourceArchivePurge: vi.fn(),
-    previewSourceRelocation: vi.fn(),
-    confirmSourceRelocation: vi.fn(),
-    undoSourceRelocation: vi.fn(),
-    getSettings: vi.fn().mockResolvedValue({
-      tools: [],
-      backupRetention: 5,
-      platform: { platform: 'darwin', canSymlink: true, canJunction: false },
-    }),
-    getSourceRoots: vi.fn().mockResolvedValue([]),
-    registerSourceRoot: vi.fn(),
-    rescanSourceRoot: vi.fn(),
-    detachSourceRoot: vi.fn(),
-    getDeployTargets: vi.fn().mockResolvedValue([]),
-    setPresetEnabled: vi.fn(),
-    setPresetPaths: vi.fn(),
-    addCustomTool: vi.fn(),
-    removeCustomTool: vi.fn(),
-    setBackupRetention: vi.fn(),
-    listBackups: vi.fn().mockResolvedValue([]),
-    restoreBackup: vi.fn(),
-    deleteBackup: vi.fn(),
-    deploymentDeploy: vi.fn(),
-    deploymentConfirm: vi.fn(),
-    redeploy: vi.fn(),
-    undeploy: vi.fn(),
-    bulkDeploy: vi.fn(),
-    bulkConfirmDeploy: vi.fn(),
-    bulkUndeploy: vi.fn(),
-    bulkRemoveFromRegistry: vi.fn(),
-    adoptDeployment: vi.fn(),
-    getBulkAdoptionFacts: vi.fn().mockResolvedValue({ total: 0, tools: [] }),
-    previewBulkAdoption: vi.fn().mockResolvedValue({ status: 'empty', facts: { total: 0, tools: [] } }),
-    confirmBulkAdoption: vi.fn(),
-    getTools: vi.fn().mockResolvedValue([]),
-    removeFromManifest: vi.fn(),
-    detachStaleDeployment: vi.fn(),
-    getDeploymentsForSkill: vi.fn().mockResolvedValue([]),
-    viewSkillMd: vi.fn(),
-    removeFromRegistry: vi.fn(),
-    installFromGitHub: vi.fn(),
-    installFromZip: vi.fn(),
-    installFromLocalDir: vi.fn(),
-    selectZipFile: vi.fn(),
-    selectLocalDir: vi.fn(),
-    bulkDetachDeployments: vi.fn(),
-    checkForUpdates: vi.fn().mockResolvedValue({
-      status: 'up-to-date',
-      currentVersion: '1.0.0',
-      latestVersion: '1.0.0'
-    }),
-    ...overrides,
-  }
-  Object.defineProperty(window, 'api', { value: api, writable: true, configurable: true })
-  return api
-}
 
 describe('App (integration)', () => {
   it('explains registry removal in user-visible actions and recovery limits', () => {
@@ -417,7 +343,9 @@ describe('App (integration)', () => {
 
     const view = render(<BulkSkillActionsDialog skills={skills} allFilteredSkills={skills} consolidationPlan={[]} onRefresh={vi.fn()} onClose={vi.fn()} onConsolidate={vi.fn()} />)
     expect(await screen.findByRole('radio', { name: 'symlink' })).toBeChecked()
-    await waitFor(() => expect(screen.getAllByRole('checkbox', { name: /Codex/ })).toHaveLength(2))
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: '全选 Codex' })).toBeInTheDocument())
+    expect(screen.getByRole('checkbox', { name: '全选 Codex' })).not.toBeChecked()
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选 Codex' }))
     await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
 
     await waitFor(() => expect(api.bulkDeploy).toHaveBeenCalledWith([
@@ -477,6 +405,7 @@ describe('App (integration)', () => {
 
     render(<BulkSkillActionsDialog skills={[skill]} allFilteredSkills={[skill]} consolidationPlan={[]} onRefresh={vi.fn()} onClose={vi.fn()} onConsolidate={vi.fn()} />)
     await screen.findByRole('checkbox', { name: `${skill.name} → Codex` })
+    await userEvent.click(screen.getByRole('checkbox', { name: '全选 Codex' }))
     await userEvent.click(screen.getByRole('button', { name: '批量部署' }))
     expect(await screen.findByText('将覆盖目标中不受管理的现有内容')).toBeInTheDocument()
     expect(screen.getByText('备份：/backups')).toBeInTheDocument()

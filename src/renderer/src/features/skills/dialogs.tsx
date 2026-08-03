@@ -144,11 +144,7 @@ export function BulkSkillActionsDialog({
         }))
       })).then((groups) => {
         if (cancelled) return
-        const pairs = groups.flat()
-        setDeployPairs(pairs)
-        setSelectedKeys((current) => current.size > 0
-          ? current
-          : new Set(pairs.filter((pair) => pair.eligible).map((pair) => pair.key)))
+        setDeployPairs(groups.flat())
       }).catch((error) => {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
       }).finally(() => {
@@ -168,11 +164,7 @@ export function BulkSkillActionsDialog({
           }))
       })).then((groups) => {
         if (cancelled) return
-        const items = groups.flat()
-        setUndeployItems(items)
-        setSelectedKeys((current) => current.size > 0
-          ? current
-          : new Set(items.map((item) => item.key)))
+        setUndeployItems(groups.flat())
       }).catch((error) => {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
       }).finally(() => {
@@ -187,6 +179,30 @@ export function BulkSkillActionsDialog({
       const next = new Set(current)
       if (next.has(key)) next.delete(key)
       else next.add(key)
+      return next
+    })
+  }
+
+  const deployTargetGroups = useMemo(() => {
+    const groups: { targetId: string; targetName: string; pairs: BulkDeployPair[] }[] = []
+    for (const pair of deployPairs) {
+      let group = groups.find((item) => item.targetId === pair.targetId)
+      if (!group) {
+        group = { targetId: pair.targetId, targetName: pair.targetName, pairs: [] }
+        groups.push(group)
+      }
+      group.pairs.push(pair)
+    }
+    return groups
+  }, [deployPairs])
+
+  const toggleTargetGroup = (eligibleKeys: string[], allSelected: boolean) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      for (const key of eligibleKeys) {
+        if (allSelected) next.delete(key)
+        else next.add(key)
+      }
       return next
     })
   }
@@ -275,6 +291,7 @@ export function BulkSkillActionsDialog({
       description="成功项会从选择中移除；失败项保留，修正后可直接重试。"
       confirmLabel={actionLabel}
       busy={busy}
+      confirmDisabled={selectedCount === 0}
       onConfirm={() => {
         if (action === 'consolidate') {
           const ids = new Set([...selectedKeys].map(Number).filter((id) => consolidatableIds.has(id)))
@@ -331,6 +348,9 @@ export function BulkSkillActionsDialog({
         )}
 
         {loadError && <p className="text-xs text-danger">{loadError}</p>}
+        {!busy && selectedCount === 0 && (
+          <p className="text-xs text-foreground-muted">请先勾选要执行的项目。</p>
+        )}
         {result && (
           <div className="rounded border border-border p-2 text-xs">
             <p className="font-medium">完成 {result.completed}，失败 {result.failed}</p>
@@ -361,13 +381,36 @@ export function BulkSkillActionsDialog({
           </div>
         )}
 
-        <div className="max-h-72 overflow-auto space-y-1">
-          {action === 'deploy' && deployPairs.map((pair) => (
-            <label key={pair.key} className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!pair.eligible ? 'opacity-50' : ''}`}>
-              <input type="checkbox" aria-label={`${pair.skillName} → ${pair.targetName}`} checked={selectedKeys.has(pair.key)} disabled={!pair.eligible || busy} onChange={() => toggle(pair.key)} />
-              <span><strong>{pair.skillName}</strong> → {pair.targetName}{pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}</span>
-            </label>
-          ))}
+        <div className="max-h-72 overflow-auto space-y-2">
+          {action === 'deploy' && deployTargetGroups.map((group) => {
+            const eligibleKeys = group.pairs.filter((pair) => pair.eligible).map((pair) => pair.key)
+            const selectedInGroup = eligibleKeys.filter((key) => selectedKeys.has(key)).length
+            const allSelected = eligibleKeys.length > 0 && selectedInGroup === eligibleKeys.length
+            const someSelected = selectedInGroup > 0 && !allSelected
+            return (
+              <div key={group.targetId} role="group" aria-label={`目标 ${group.targetName}`}>
+                <label className="flex items-center gap-2 rounded border border-border bg-surface-secondary p-2 text-xs font-medium">
+                  <input
+                    type="checkbox"
+                    aria-label={`全选 ${group.targetName}`}
+                    checked={allSelected}
+                    disabled={busy || eligibleKeys.length === 0}
+                    ref={(el) => { if (el) el.indeterminate = someSelected }}
+                    onChange={() => toggleTargetGroup(eligibleKeys, allSelected)}
+                  />
+                  <span>{group.targetName} · {selectedInGroup}/{eligibleKeys.length}</span>
+                </label>
+                <div className="space-y-1 mt-1">
+                  {group.pairs.map((pair) => (
+                    <label key={pair.key} className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!pair.eligible ? 'opacity-50' : ''}`}>
+                      <input type="checkbox" aria-label={`${pair.skillName} → ${pair.targetName}`} checked={selectedKeys.has(pair.key)} disabled={!pair.eligible || busy} onChange={() => toggle(pair.key)} />
+                      <span><strong>{pair.skillName}</strong> → {pair.targetName}{pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
           {action === 'undeploy' && visibleUndeployItems.map((item) => (
             <label key={item.key} className="flex items-start gap-2 rounded border border-border p-2 text-xs">
               <input type="checkbox" aria-label={`${item.skillName} → ${item.targetTool}`} checked={selectedKeys.has(item.key)} disabled={busy} onChange={() => toggle(item.key)} />
