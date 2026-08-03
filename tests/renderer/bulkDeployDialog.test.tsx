@@ -1,16 +1,16 @@
 import { describe, it, expect, vi } from 'vitest'
 import React from 'react'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BulkSkillActionsDialog } from '../../src/renderer/src/features/skills/dialogs'
-import type { SkillWithConflictView } from '../../src/preload'
+import type { SkillDeploymentView, SkillWithConflictView } from '../../src/preload'
 import { mockWindowApi } from './api-mock'
 
 // 批量部署对话框：按 Discovery Target 分组 + 组头三态开关 + 默认不选。
 // 回归背景：旧实现默认勾选全部 skill×target 对，且只能逐对取消，
 // 「20 个 skill 只部署到 1 个工具」需要 20×(N−1) 次取消点击。
 
-function buildSkill(id: number, name: string): SkillWithConflictView {
+function buildSkill(id: number, name: string, deployments: SkillDeploymentView[] = []): SkillWithConflictView {
   return {
     id,
     name,
@@ -31,7 +31,24 @@ function buildSkill(id: number, name: string): SkillWithConflictView {
       commit_sha: null
     }],
     conflict: { skillId: id, sourceCount: 1, distinctHashCount: 1, hasConflict: false, primarySource: null },
-    deployments: []
+    deployments
+  }
+}
+
+function managedDeployment(id: number, skillId: number, targetId: string): SkillDeploymentView {
+  return {
+    id,
+    skill_id: skillId,
+    target_tool: targetId.split('-')[0],
+    target_path: `/${targetId}/skill`,
+    mode: 'symlink',
+    management: 'managed',
+    source_path: `/canonical/skill`,
+    source_id: skillId,
+    target_id: targetId,
+    deployed_at: new Date().toISOString(),
+    source_hash_at_deploy: `hash-${skillId}`,
+    status: 'normal'
   }
 }
 
@@ -154,30 +171,68 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
     expect(screen.getByRole('checkbox', { name: 'alpha → Codex' })).not.toBeChecked()
   })
 
-  it('取消部署 tab 默认不勾选任何受管部署，工具筛选保留', async () => {
+  it('部署项展示已部署状态：已有受管部署的 pair 带「已部署」标记', async () => {
+    const skills = [
+      buildSkill(1, 'alpha', [managedDeployment(11, 1, 'codex-user')]),
+      buildSkill(2, 'beta')
+    ]
+    mockWindowApi({
+      getDeployTargets: vi.fn().mockResolvedValue([target('codex-user', 'Codex')])
+    })
+    renderDialog(skills)
+
+    await userEvent.click(await screen.findByRole('button', { name: '展开 Codex' }))
+    const alphaRow = screen.getByRole('checkbox', { name: 'alpha → Codex' }).closest('label')!
+    expect(within(alphaRow).getByText('已部署')).toBeInTheDocument()
+    const betaRow = screen.getByRole('checkbox', { name: 'beta → Codex' }).closest('label')!
+    expect(within(betaRow).queryByText('已部署')).not.toBeInTheDocument()
+  })
+
+  it('取消部署 tab 按工具分组：默认折叠，展开后默认不勾选', async () => {
     const skills = [buildSkill(1, 'alpha')]
     mockWindowApi({
       getDeploymentsForSkill: vi.fn().mockResolvedValue([
-        {
-          id: 11, skill_id: 1, target_tool: 'codex', target_path: '/codex/alpha',
-          mode: 'symlink', management: 'managed', source_path: '/canonical/alpha',
-          source_id: 1, target_id: 'codex-user', deployed_at: '2026-07-15T00:00:00.000Z',
-          source_hash_at_deploy: 'hash-1'
-        },
-        {
-          id: 12, skill_id: 1, target_tool: 'agents', target_path: '/agents/alpha',
-          mode: 'symlink', management: 'managed', source_path: '/canonical/alpha',
-          source_id: 1, target_id: 'agents-user', deployed_at: '2026-07-15T00:00:00.000Z',
-          source_hash_at_deploy: 'hash-1'
-        }
+        managedDeployment(11, 1, 'codex-user'),
+        managedDeployment(12, 1, 'agents-user')
       ])
     })
     renderDialog(skills)
 
     await userEvent.click(await screen.findByRole('button', { name: '取消部署' }))
-    expect(await screen.findByRole('checkbox', { name: 'alpha → codex' })).not.toBeChecked()
+    expect(await screen.findByRole('checkbox', { name: '全选 codex' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '全选 agents' })).toBeInTheDocument()
+    // 默认折叠：部署项不在文档中
+    expect(screen.queryByRole('checkbox', { name: 'alpha → codex' })).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '展开 codex' }))
+    expect(screen.getByRole('checkbox', { name: 'alpha → codex' })).not.toBeChecked()
+    expect(screen.queryByRole('checkbox', { name: 'alpha → agents' })).not.toBeInTheDocument()
+  })
+
+  it('取消部署组头一次选中该工具下全部部署，提交只包含该组', async () => {
+    const skills = [buildSkill(1, 'alpha'), buildSkill(2, 'beta')]
+    const api = mockWindowApi({
+      getDeploymentsForSkill: vi.fn().mockImplementation((skillId: number) =>
+        Promise.resolve(skillId === 1
+          ? [managedDeployment(11, 1, 'codex-user'), managedDeployment(13, 1, 'agents-user')]
+          : [managedDeployment(12, 2, 'codex-user')])),
+      bulkUndeploy: vi.fn().mockResolvedValue({ total: 2, completed: 2, failed: 0, items: [] })
+    })
+    renderDialog(skills)
+
+    await userEvent.click(await screen.findByRole('button', { name: '取消部署' }))
+    await userEvent.click(await screen.findByRole('checkbox', { name: '全选 codex' }))
+    await userEvent.click(screen.getByRole('button', { name: '展开 codex' }))
+    await userEvent.click(screen.getByRole('button', { name: '展开 agents' }))
+    expect(screen.getByRole('checkbox', { name: 'alpha → codex' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'beta → codex' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'alpha → agents' })).not.toBeChecked()
-    expect(screen.getByRole('combobox', { name: '目标工具' })).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '批量取消部署' }))
+    await waitFor(() => expect(api.bulkUndeploy).toHaveBeenCalledWith([
+      { key: '11', deploymentId: 11 },
+      { key: '12', deploymentId: 12 }
+    ]))
   })
 
   it('未选择任何项时禁用确认按钮并提示，勾选后启用', async () => {

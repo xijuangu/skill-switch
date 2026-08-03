@@ -59,6 +59,8 @@ type BulkDeployPair = {
   targetName: string
   eligible: boolean
   reason: string | null
+  /** 该 Skill 在此 Discovery Target 上已有受管部署 */
+  deployed: boolean
 }
 type BulkUndeployItem = {
   key: string
@@ -100,7 +102,6 @@ export function BulkSkillActionsDialog({
   const [undeployItems, setUndeployItems] = useState<BulkUndeployItem[]>([])
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [expandedTargets, setExpandedTargets] = useState<Set<string>>(new Set())
-  const [toolFilter, setToolFilter] = useState('all')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<BulkMutationResultView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -141,7 +142,10 @@ export function BulkSkillActionsDialog({
           targetId: target.targetId,
           targetName: target.displayName,
           eligible: target.eligible,
-          reason: target.reason
+          reason: target.reason,
+          deployed: skill.deployments.some(
+            (deployment) => deployment.management === 'managed' && deployment.target_id === target.targetId
+          )
         }))
       })).then((groups) => {
         if (cancelled) return
@@ -208,11 +212,21 @@ export function BulkSkillActionsDialog({
     })
   }
 
-  const visibleUndeployItems = toolFilter === 'all'
-    ? undeployItems
-    : undeployItems.filter((item) => item.targetTool === toolFilter)
+  const undeployToolGroups = useMemo(() => {
+    const groups: { tool: string; items: BulkUndeployItem[] }[] = []
+    for (const item of undeployItems) {
+      let group = groups.find((candidate) => candidate.tool === item.targetTool)
+      if (!group) {
+        group = { tool: item.targetTool, items: [] }
+        groups.push(group)
+      }
+      group.items.push(item)
+    }
+    return groups
+  }, [undeployItems])
+
   const selectedCount = action === 'undeploy'
-    ? visibleUndeployItems.filter((item) => selectedKeys.has(item.key)).length
+    ? undeployItems.filter((item) => selectedKeys.has(item.key)).length
     : selectedKeys.size
 
   const run = async () => {
@@ -253,7 +267,7 @@ export function BulkSkillActionsDialog({
         }
       } else if (action === 'undeploy') {
         outcome = await window.api.bulkUndeploy(
-          visibleUndeployItems
+          undeployItems
             .filter((item) => selectedKeys.has(item.key))
             .map((item) => ({ key: item.key, deploymentId: item.deploymentId }))
         )
@@ -339,16 +353,6 @@ export function BulkSkillActionsDialog({
           </div>
         )}
 
-        {action === 'undeploy' && (
-          <label className="block text-xs">
-            目标工具
-            <select className="ml-2 border border-border rounded bg-surface px-2 py-1" value={toolFilter} onChange={(event) => setToolFilter(event.target.value)}>
-              <option value="all">全部工具</option>
-              {[...new Set(undeployItems.map((item) => item.targetTool))].map((tool) => <option key={tool} value={tool}>{tool}</option>)}
-            </select>
-          </label>
-        )}
-
         {loadError && <p className="text-xs text-danger">{loadError}</p>}
         {!busy && selectedCount === 0 && (
           <p className="text-xs text-foreground-muted">请先勾选要执行的项目。</p>
@@ -425,7 +429,13 @@ export function BulkSkillActionsDialog({
                     {group.pairs.map((pair) => (
                       <label key={pair.key} className={`flex items-start gap-2 rounded border border-border p-2 text-xs ${!pair.eligible ? 'opacity-50' : ''}`}>
                         <input type="checkbox" aria-label={`${pair.skillName} → ${pair.targetName}`} checked={selectedKeys.has(pair.key)} disabled={!pair.eligible || busy} onChange={() => toggle(pair.key)} />
-                        <span><strong>{pair.skillName}</strong> → {pair.targetName}{pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}</span>
+                        <span className="flex-1">
+                          <span className="flex items-center gap-2">
+                            <span><strong>{pair.skillName}</strong> → {pair.targetName}</span>
+                            {pair.deployed && <StatusDot variant="success" label="已部署" />}
+                          </span>
+                          {pair.reason ? <span className="block text-foreground-muted">{pair.reason}</span> : null}
+                        </span>
                       </label>
                     ))}
                   </div>
@@ -433,12 +443,55 @@ export function BulkSkillActionsDialog({
               </div>
             )
           })}
-          {action === 'undeploy' && visibleUndeployItems.map((item) => (
-            <label key={item.key} className="flex items-start gap-2 rounded border border-border p-2 text-xs">
-              <input type="checkbox" aria-label={`${item.skillName} → ${item.targetTool}`} checked={selectedKeys.has(item.key)} disabled={busy} onChange={() => toggle(item.key)} />
-              <span><strong>{item.skillName}</strong> → {item.targetTool}<span className="block text-foreground-muted break-all">{item.targetPath}</span></span>
-            </label>
-          ))}
+          {action === 'undeploy' && undeployToolGroups.map((group) => {
+            const groupKeys = group.items.map((item) => item.key)
+            const selectedInGroup = groupKeys.filter((key) => selectedKeys.has(key)).length
+            const allSelected = groupKeys.length > 0 && selectedInGroup === groupKeys.length
+            const someSelected = selectedInGroup > 0 && !allSelected
+            const expanded = expandedTargets.has(group.tool)
+            const toggleExpanded = () => {
+              setExpandedTargets((current) => {
+                const next = new Set(current)
+                if (next.has(group.tool)) next.delete(group.tool)
+                else next.add(group.tool)
+                return next
+              })
+            }
+            return (
+              <div key={group.tool} role="group" aria-label={`工具 ${group.tool}`}>
+                <div className="flex items-center gap-2 rounded border border-border bg-surface-secondary p-2 text-xs font-medium">
+                  <input
+                    type="checkbox"
+                    aria-label={`全选 ${group.tool}`}
+                    checked={allSelected}
+                    disabled={busy || groupKeys.length === 0}
+                    ref={(el) => { if (el) el.indeterminate = someSelected }}
+                    onChange={() => toggleTargetGroup(groupKeys, allSelected)}
+                  />
+                  <button
+                    type="button"
+                    onClick={toggleExpanded}
+                    aria-expanded={expanded}
+                    aria-label={`${expanded ? '收起' : '展开'} ${group.tool}`}
+                    className="flex flex-1 items-center gap-1.5 text-left text-foreground hover:text-foreground-secondary"
+                  >
+                    <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+                    <span>{group.tool} · {selectedInGroup}/{groupKeys.length}</span>
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="space-y-1 mt-1">
+                    {group.items.map((item) => (
+                      <label key={item.key} className="flex items-start gap-2 rounded border border-border p-2 text-xs">
+                        <input type="checkbox" aria-label={`${item.skillName} → ${item.targetTool}`} checked={selectedKeys.has(item.key)} disabled={busy} onChange={() => toggle(item.key)} />
+                        <span><strong>{item.skillName}</strong> → {item.targetTool}<span className="block text-foreground-muted break-all">{item.targetPath}</span></span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
           {action === 'remove' && skills.map((skill) => (
             <label key={skill.id} className="flex items-center gap-2 rounded border border-border p-2 text-xs">
               <input type="checkbox" aria-label={`移除 ${skill.name}`} checked={selectedKeys.has(String(skill.id))} disabled={busy} onChange={() => toggle(String(skill.id))} />

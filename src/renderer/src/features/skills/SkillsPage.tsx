@@ -477,6 +477,13 @@ export function SkillsPage({
             >
               全选当前
             </button>
+            <button
+              className="text-2xs text-primary disabled:opacity-50"
+              disabled={bulkSelectedIds.size === 0}
+              onClick={() => setBulkSelectedIds(new Set())}
+            >
+              清空
+            </button>
             <span className="text-2xs text-foreground-muted flex-1">已选 {bulkSelectedIds.size}</span>
             <Button
               variant="primary"
@@ -527,7 +534,12 @@ export function SkillsPage({
                 selecting={bulkSelecting}
                 checked={bulkSelectedIds.has(skill.id)}
                 matchReason={getMatchReason(skill)}
-                onSelect={() => bulkSelecting ? toggleBulkSkill(skill.id) : setSelectedId(skill.id)}
+                onSelect={() => {
+                  if (bulkSelecting) {
+                    toggleBulkSkill(skill.id)
+                  }
+                  setSelectedId(skill.id)
+                }}
                 onToggleChecked={() => toggleBulkSkill(skill.id)}
                 onContextMenu={(e) => {
                   e.preventDefault()
