@@ -186,6 +186,9 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
     expect(within(alphaRow).getByText('已部署')).toBeInTheDocument()
     const betaRow = screen.getByRole('checkbox', { name: 'beta → Codex' }).closest('label')!
     expect(within(betaRow).queryByText('已部署')).not.toBeInTheDocument()
+    // 组头右侧汇总该目标下已部署数量
+    const codexGroup = screen.getByRole('group', { name: '目标 Codex' })
+    expect(within(codexGroup).getByText('1个已部署')).toBeInTheDocument()
   })
 
   it('取消部署 tab 按工具分组：默认折叠，展开后默认不勾选', async () => {
@@ -201,6 +204,9 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
     await userEvent.click(await screen.findByRole('button', { name: '取消部署' }))
     expect(await screen.findByRole('checkbox', { name: '全选 codex' })).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: '全选 agents' })).toBeInTheDocument()
+    // 组头右侧展示该工具下已部署数量（取消部署项均为已部署）
+    expect(within(screen.getByRole('group', { name: '工具 codex' })).getByText('1个已部署')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: '工具 agents' })).getByText('1个已部署')).toBeInTheDocument()
     // 默认折叠：部署项不在文档中
     expect(screen.queryByRole('checkbox', { name: 'alpha → codex' })).not.toBeInTheDocument()
 
@@ -235,7 +241,7 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
     ]))
   })
 
-  it('未选择任何项时禁用确认按钮并提示，勾选后启用', async () => {
+  it('未选择任何项时禁用确认按钮，勾选后启用', async () => {
     const skills = [buildSkill(1, 'alpha')]
     mockWindowApi({
       getDeployTargets: vi.fn().mockResolvedValue([target('codex-user', 'Codex')])
@@ -244,10 +250,8 @@ describe('BulkSkillActionsDialog deploy（按目标分组）', () => {
 
     await screen.findByRole('checkbox', { name: '全选 Codex' })
     expect(screen.getByRole('button', { name: '批量部署' })).toBeDisabled()
-    expect(screen.getByText(/请先勾选/)).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('checkbox', { name: '全选 Codex' }))
     expect(screen.getByRole('button', { name: '批量部署' })).toBeEnabled()
-    expect(screen.queryByText(/请先勾选/)).not.toBeInTheDocument()
   })
 })

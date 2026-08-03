@@ -354,9 +354,6 @@ export function BulkSkillActionsDialog({
         )}
 
         {loadError && <p className="text-xs text-danger">{loadError}</p>}
-        {!busy && selectedCount === 0 && (
-          <p className="text-xs text-foreground-muted">请先勾选要执行的项目。</p>
-        )}
         {result && (
           <div className="rounded border border-border p-2 text-xs">
             <p className="font-medium">完成 {result.completed}，失败 {result.failed}</p>
@@ -391,6 +388,7 @@ export function BulkSkillActionsDialog({
           {action === 'deploy' && deployTargetGroups.map((group) => {
             const eligibleKeys = group.pairs.filter((pair) => pair.eligible).map((pair) => pair.key)
             const selectedInGroup = eligibleKeys.filter((key) => selectedKeys.has(key)).length
+            const deployedInGroup = group.pairs.filter((pair) => pair.deployed).length
             const allSelected = eligibleKeys.length > 0 && selectedInGroup === eligibleKeys.length
             const someSelected = selectedInGroup > 0 && !allSelected
             const expanded = expandedTargets.has(group.targetId)
@@ -423,6 +421,9 @@ export function BulkSkillActionsDialog({
                     <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
                     <span>{group.targetName} · {selectedInGroup}/{eligibleKeys.length}</span>
                   </button>
+                  {deployedInGroup > 0 && (
+                    <span className="text-foreground-muted font-normal">{deployedInGroup}个已部署</span>
+                  )}
                 </div>
                 {expanded && (
                   <div className="space-y-1 mt-1">
@@ -478,6 +479,7 @@ export function BulkSkillActionsDialog({
                     <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
                     <span>{group.tool} · {selectedInGroup}/{groupKeys.length}</span>
                   </button>
+                  <span className="text-foreground-muted font-normal">{group.items.length}个已部署</span>
                 </div>
                 {expanded && (
                   <div className="space-y-1 mt-1">
