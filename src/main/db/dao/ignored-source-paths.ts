@@ -17,11 +17,13 @@ export interface IgnoredSourcePath {
 /**
  * 归一化忽略路径:存在的路径取 realpath(穿透 /var→/private/var 等符号链接),
  * 已不存在的路径退化为 resolve——移除后目录被用户手动删掉时仍能匹配解除。
+ * 必须用非 native 的 realpathSync:发现环节(scanner / source-roots)用的都是它;
+ * Windows 上 .native 会把 8.3 短路径名解析成长名,导致同一目录两种表示、匹配失败。
  */
 export function normalizeIgnoredSourcePath(path: string): string {
   const absolute = resolve(path)
   try {
-    return realpathSync.native(absolute)
+    return realpathSync(absolute)
   } catch {
     return absolute
   }

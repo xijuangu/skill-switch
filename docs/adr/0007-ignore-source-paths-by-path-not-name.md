@@ -21,7 +21,7 @@
 ## Consequences
 
 - 忽略是路径级的：同一 Skill 名的其他来源目录不受影响，消除了名称维度的误伤。
-- realpath 归一（存在时取 `realpathSync.native`，已删除路径退化为 `resolve`）保证符号链接变体（如 macOS `/var` → `/private/var`、目录链接部署）匹配一致。
+- realpath 归一（存在时取 `realpathSync`，已删除路径退化为 `resolve`）保证符号链接变体（如 macOS `/var` → `/private/var`、目录链接部署）匹配一致；必须用与发现环节一致的非 native 实现，Windows 上 `.native` 会把 8.3 短路径名解析成长名导致匹配失败。
 - 忽略条目只在显式登记（任何走 `upsertSource` 的链路：扫描解除后、Source Root 登记、安装等）或用户手动解除时消失，扫描本身不消费忽略条目。
 - 移除对话框（单个与批量）默认勾选忽略，用户需主动取消才能回到旧的"移除后可复活"行为。
 
