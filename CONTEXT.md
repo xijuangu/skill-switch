@@ -102,3 +102,7 @@ _Avoid_: automatic repair, bidirectional sync, background watcher
 **Drift Kind（漂移类型）**:
 `readToolDrifts` 对每个目标条目计算的分类，取值见 ADR 0006：`normal`（清单与文件系统一致）/ `source-updated`（源 hash 变了）/ `target-modified`（目标侧被改）/ `link-mismatch`（symlink 指向错误）/ `source-missing`（源目录消失）/ `target-unconfigured`（目标工具目录已从配置移除）/ `unresolved`（无法判定）/ `drift`（其他偏差）/ `external`（清单无记录 + 目录有 + 未登记 candidate source）/ `registered-candidate`（清单无记录 + 目录有 + 已登记 candidate source，ADR 0006 新增）/ `recovery-required`（部署中断需恢复）/ `bidirectional`（源和目标都变了）。`external` 与 `registered-candidate` 的区别在于系统是否已通过 scan 知道该外部 skill——同一事实在 Skills 页和 Tools 页读模型中一致可见。
 _Avoid_: Drift action, mutation trigger
+
+**Ignored Source Path（忽略来源目录）**:
+从注册表移除 Skill 时按路径登记的扫描忽略条目，只覆盖 Canonical Repository 外的来源位置。扫描发现环节遇到该路径不再登记为 Candidate Source，避免被移除的 Skill 确定性复活；同一路径一旦被显式登记，忽略即自动解除——已登记与忽略不共存。忽略不是删除：磁盘上的目录不受影响，用户可随时解除。
+_Avoid_: name-based exclusion, permanent ban, deleted source

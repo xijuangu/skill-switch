@@ -75,8 +75,8 @@ const api = {
     ipcRenderer.invoke('bulk:confirmDeploy', requests),
   bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) =>
     ipcRenderer.invoke('bulk:undeploy', requests),
-  bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) =>
-    ipcRenderer.invoke('bulk:removeFromRegistry', requests),
+  bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>, ignoreSourcePaths?: boolean) =>
+    ipcRenderer.invoke('bulk:removeFromRegistry', requests, ignoreSourcePaths),
   bulkDetachDeployments: (requests: Array<{ key: string; deploymentId: number }>) =>
     ipcRenderer.invoke('bulk:detachDeployments', requests),
   adoptDeployment: (deploymentId: number) => ipcRenderer.invoke('adoptDeployment', deploymentId),
@@ -94,8 +94,10 @@ const api = {
     ipcRenderer.invoke('getDeploymentsForSkill', skillId),
   viewSkillMd: (skillId: number, sourcePath?: string) =>
     ipcRenderer.invoke('viewSkillMd', skillId, sourcePath),
-  removeFromRegistry: (skillId: number) =>
-    ipcRenderer.invoke('removeFromRegistry', skillId),
+  removeFromRegistry: (skillId: number, ignoreSourcePaths?: boolean) =>
+    ipcRenderer.invoke('removeFromRegistry', skillId, ignoreSourcePaths),
+  getIgnoredSourcePaths: () => ipcRenderer.invoke('getIgnoredSourcePaths'),
+  unignoreSourcePath: (path: string) => ipcRenderer.invoke('unignoreSourcePath', path),
   // Install(#7)
   installFromGitHub: (url: string) => ipcRenderer.invoke('installFromGitHub', url),
   installFromZip: (zipPath: string) => ipcRenderer.invoke('installFromZip', zipPath),

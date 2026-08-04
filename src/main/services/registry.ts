@@ -28,6 +28,7 @@ import {
   getDeploymentsBySkillId
 } from '../db/dao/deployments'
 import { runInTransaction } from '../db/database'
+import { addIgnoredSourcePaths } from '../db/dao/ignored-source-paths'
 import { createBackup, restoreBackup, type BackupMeta } from './backup'
 import {
   assertAbsolutePath,
@@ -208,6 +209,11 @@ export interface RemoveFromRegistryOptions {
     status: 'ready' | 'rejected' | 'recovery-required'
     message?: string
   }
+  /**
+   * 为 true 时,移除成功后把中央仓库外的来源路径登记进忽略名单,
+   * 扫描发现环节不再复活这些来源(见 ignored_source_paths)。
+   */
+  ignoreSourcePaths?: boolean
 }
 
 export class RegistryMutationRejectedError extends Error {}
@@ -340,6 +346,14 @@ export async function removeFromRegistry(
     runInTransaction(db, () => {
       deleteSourcesBySkillId(db, skillId)
       deleteSkill(db, skillId)
+      if (opts.ignoreSourcePaths) {
+        addIgnoredSourcePaths(
+          db,
+          sources
+            .filter((source) => !isPathWithin(opts.centralSkillsDir, source.path))
+            .map((source) => ({ path: source.path, skillName: skill.name }))
+        )
+      }
     })
   } catch (error) {
     if (canonicalBackup && centralEntityPath && !existsSync(centralEntityPath)) {

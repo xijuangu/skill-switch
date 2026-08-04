@@ -21,6 +21,7 @@ import {
 import { deleteSkill, getSkillById, updatePrimarySourcePath, upsertSkill } from '../db/dao/skills'
 import { getDeploymentsBySkillId } from '../db/dao/deployments'
 import { runInTransaction } from '../db/database'
+import { getIgnoredSourcePathSet } from '../db/dao/ignored-source-paths'
 import { assertAbsolutePath, isPathWithin, validateSkillName } from './path-safety'
 import { hashDir } from './hash'
 
@@ -107,7 +108,11 @@ export function rescanSourceRoot(db: DB, rootId: number): SourceRootScanResult {
   const root = getSourceRootById(db, rootId)
   if (!root) throw new Error(`Source Root not found: ${rootId}`)
   const canonicalRoot = realpathSync(root.path)
-  const discoveredPaths = discoverSkillDirs(canonicalRoot)
+  const ignoredPaths = getIgnoredSourcePathSet(db)
+  // 忽略名单内的目录视为有意缺席:不参与登记,也不进入 keep 集合。
+  const discoveredPaths = discoverSkillDirs(canonicalRoot).filter(
+    (skillDir) => !ignoredPaths.has(skillDir)
+  )
   const keep = new Set(discoveredPaths)
   let removed = 0
 

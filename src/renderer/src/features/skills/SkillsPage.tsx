@@ -278,14 +278,14 @@ export function SkillsPage({
     setRemoveRegistryTarget(skill)
   }
 
-  const handleRemoveFromRegistryConfirm = async () => {
+  const handleRemoveFromRegistryConfirm = async (ignoreSourcePaths: boolean) => {
     if (!removeRegistryTarget) return
     const removedId = removeRegistryTarget.id
     // 记录被删项在当前 filtered 中的索引,用于 refresh 后选相邻项
     const removedIndex = filtered.findIndex((s) => s.id === removedId)
     setActionBusy(true)
     try {
-      const result = await window.api.removeFromRegistry(removedId)
+      const result = await window.api.removeFromRegistry(removedId, ignoreSourcePaths)
       const msg = result.backedUp
         ? `已移除「${result.skillName}」(已备份，从 ${result.undeployedTools.length} 个工具取消部署)`
         : `已移除「${result.skillName}」(从 ${result.undeployedTools.length} 个工具取消部署)`

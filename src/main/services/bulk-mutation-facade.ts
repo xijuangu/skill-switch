@@ -54,7 +54,7 @@ interface BulkMutationDependencies {
   deploy: (request: DeploymentRequest) => Promise<DeploymentOutcome>
   confirmDeploy: (confirmationId: string) => Promise<DeploymentOutcome>
   undeploy: (deploymentId: number) => Promise<DeploymentMutationOutcome>
-  removeFromRegistry: (skillId: number) => Promise<RemoveFromRegistryResult>
+  removeFromRegistry: (skillId: number, ignoreSourcePaths?: boolean) => Promise<RemoveFromRegistryResult>
   detachRegistration?: (deploymentId: number) => Promise<DeploymentMutationOutcome>
   manageExternal?: (request: { targetId: string; entryName: string }) => Promise<ExternalManagementOutcome>
 }
@@ -138,11 +138,11 @@ export function createBulkMutationFacade(deps: BulkMutationDependencies) {
     return summarize(items)
   }
 
-  async function remove(requests: BulkRemoveRequest[]): Promise<BulkMutationResult> {
+  async function remove(requests: BulkRemoveRequest[], ignoreSourcePaths?: boolean): Promise<BulkMutationResult> {
     const items: BulkMutationItem[] = []
     for (const [index, request] of requests.entries()) {
       try {
-        const outcome = await deps.removeFromRegistry(request.skillId)
+        const outcome = await deps.removeFromRegistry(request.skillId, ignoreSourcePaths)
         items.push({ key: request.key, status: 'completed', outcome })
       } catch (error) {
         if (error instanceof RegistryRecoveryRequiredError) {

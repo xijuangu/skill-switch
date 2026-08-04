@@ -62,6 +62,8 @@ export function mockWindowApi(overrides: Partial<Window['api']> = {}) {
     getDeploymentsForSkill: vi.fn().mockResolvedValue([]),
     viewSkillMd: vi.fn(),
     removeFromRegistry: vi.fn(),
+    getIgnoredSourcePaths: vi.fn().mockResolvedValue([]),
+    unignoreSourcePath: vi.fn().mockResolvedValue(true),
     installFromGitHub: vi.fn(),
     installFromZip: vi.fn(),
     installFromLocalDir: vi.fn(),

@@ -149,6 +149,12 @@ CREATE TABLE IF NOT EXISTS source_recovery_locks (
   recovery_id TEXT NOT NULL,
   FOREIGN KEY (recovery_id) REFERENCES source_recoveries(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS ignored_source_paths (
+  path TEXT PRIMARY KEY,
+  skill_name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `
 
 /**
@@ -461,6 +467,13 @@ export function runMigrations(
       resource TEXT PRIMARY KEY,
       recovery_id TEXT NOT NULL,
       FOREIGN KEY (recovery_id) REFERENCES source_recoveries(id) ON DELETE CASCADE
+    );
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ignored_source_paths (
+      path TEXT PRIMARY KEY,
+      skill_name TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
   `)
 }

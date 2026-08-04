@@ -12,6 +12,7 @@ import type { ScanResult } from '../types'
 import { runInTransaction } from '../db/database'
 import { upsertSkill } from '../db/dao/skills'
 import { upsertSource } from '../db/dao/skill-sources'
+import { normalizeIgnoredSourcePath } from '../db/dao/ignored-source-paths'
 import { hashDir } from './hash'
 import { validateSkillName } from './path-safety'
 
@@ -53,12 +54,16 @@ function resolveScannableSkillDir(parentDir: string, entry: Dirent): ScannableSk
  *
  * @param skipPaths 要跳过的子目录绝对路径集合(如 manifest 管理的 Deployment target,
  *                  避免部署产物被当成新 source 索引进来)。默认空集合。
+ * @param sourceTool 发现工具 key
+ * @param ignoredPaths 忽略名单(realpath 归一):命中的来源目录不再登记,
+ *                     与被移除 Skill 的确定性复活对应。默认空集合。
  */
 export function scanToolDir(
   db: DB,
   toolDir: string,
   skipPaths: Set<string> = new Set(),
-  sourceTool: string | null = null
+  sourceTool: string | null = null,
+  ignoredPaths: Set<string> = new Set()
 ): ScanResult {
   const skillDirsByPath = new Map<string, { path: string; sourceTool: string | null }>()
   const observedSubscriptions: ScanResult['observedSubscriptions'] = []
@@ -68,6 +73,8 @@ export function scanToolDir(
     if (skipPaths.has(discoveryPath)) continue
     const candidate = resolveScannableSkillDir(toolDir, entry)
     if (!candidate) continue
+    // 忽略名单按 realpath 匹配:普通子目录在此处归一,目录链接已是 realpath。
+    if (ignoredPaths.has(normalizeIgnoredSourcePath(candidate.path))) continue
     if (candidate.linked) {
       observedSubscriptions.push({
         discoveryPath,

@@ -41,6 +41,10 @@ import {
 import { getAllSkills, getSkillById } from '../db/dao/skills'
 import { getSourceById } from '../db/dao/skill-sources'
 import {
+  getIgnoredSourcePaths,
+  removeIgnoredSourcePath as unignoreSourcePath
+} from '../db/dao/ignored-source-paths'
+import {
   assertRegisteredSkillSource,
   computeConflict,
   filterSourcesByEnabledTools,
@@ -275,10 +279,11 @@ export function registerIpcHandlers(db: DB): void {
       }
     }
   })
-  const removeSkillFromRegistry = (skillId: number) =>
+  const removeSkillFromRegistry = (skillId: number, ignoreSourcePaths?: boolean) =>
     removeFromRegistry(db, skillId, {
       centralSkillsDir: SKILLS_DIR,
       backupsDir: BACKUPS_DIR,
+      ignoreSourcePaths,
       undeployDeployment: (deploymentId) => deploymentFacade.undeploy(deploymentId),
       preflightUndeploy: (deploymentId) => deploymentFacade.preflightUndeploy(deploymentId)
     })
@@ -577,8 +582,9 @@ export function registerIpcHandlers(db: DB): void {
     }))
   })
 
-  ipcMain.handle('bulk:removeFromRegistry', async (_e, requests: unknown) => {
+  ipcMain.handle('bulk:removeFromRegistry', async (_e, requests: unknown, ignoreSourcePaths?: boolean) => {
     if (!Array.isArray(requests)) throw new Error('bulk remove requests must be an array')
+    const ignore = ignoreSourcePaths === undefined ? false : assertBoolean(ignoreSourcePaths, 'ignoreSourcePaths')
     return bulkMutationFacade.remove(requests.map((request, index) => {
       if (typeof request !== 'object' || request === null) throw new Error(`bulk remove item ${index} must be an object`)
       const dto = request as Record<string, unknown>
@@ -586,7 +592,7 @@ export function registerIpcHandlers(db: DB): void {
         key: assertNonEmptyString(dto.key, `bulk remove item ${index} key`),
         skillId: assertInteger(dto.skillId, `bulk remove item ${index} skillId`)
       }
-    }))
+    }), ignore)
   })
 
   ipcMain.handle('bulk:detachDeployments', async (_e, requests: unknown) => {
@@ -676,9 +682,18 @@ export function registerIpcHandlers(db: DB): void {
    * Remove from Registry(切片 #8):删中央仓库实体 + 所有部署 + 注册表记录,删前备份。
    * 与 undeploy 明确分开:undeploy 只删某工具的部署,Remove from Registry 彻底移除 skill。
    */
-  ipcMain.handle('removeFromRegistry', async (_e, skillId: number) => {
-    return removeSkillFromRegistry(assertInteger(skillId, 'skillId'))
+  ipcMain.handle('removeFromRegistry', async (_e, skillId: number, ignoreSourcePaths?: boolean) => {
+    return removeSkillFromRegistry(
+      assertInteger(skillId, 'skillId'),
+      ignoreSourcePaths === undefined ? false : assertBoolean(ignoreSourcePaths, 'ignoreSourcePaths')
+    )
   })
+
+  ipcMain.handle('getIgnoredSourcePaths', async () => getIgnoredSourcePaths(db))
+
+  ipcMain.handle('unignoreSourcePath', async (_e, path: string) =>
+    unignoreSourcePath(db, assertNonEmptyString(path, 'path'))
+  )
 
   ipcMain.handle('getTools', async () => {
     // issue #21: 读逻辑抽到 readToolsView,与测试共用同一函数。

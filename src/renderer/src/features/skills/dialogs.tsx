@@ -102,6 +102,7 @@ export function BulkSkillActionsDialog({
   const [undeployItems, setUndeployItems] = useState<BulkUndeployItem[]>([])
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [expandedTargets, setExpandedTargets] = useState<Set<string>>(new Set())
+  const [ignoreOnRemove, setIgnoreOnRemove] = useState(true)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<BulkMutationResultView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -275,7 +276,8 @@ export function BulkSkillActionsDialog({
         outcome = await window.api.bulkRemoveFromRegistry(
           skills
             .filter((skill) => selectedKeys.has(String(skill.id)))
-            .map((skill) => ({ key: String(skill.id), skillId: skill.id }))
+            .map((skill) => ({ key: String(skill.id), skillId: skill.id })),
+          ignoreOnRemove
         )
       }
       setResult(outcome)
@@ -351,6 +353,17 @@ export function BulkSkillActionsDialog({
               ))}
             </div>
           </div>
+        )}
+
+        {action === 'remove' && (
+          <label className="flex items-center gap-2 text-xs text-foreground">
+            <input
+              type="checkbox"
+              checked={ignoreOnRemove}
+              onChange={(event) => setIgnoreOnRemove(event.target.checked)}
+            />
+            忽略这些来源目录，扫描不再登记
+          </label>
         )}
 
         {loadError && <p className="text-xs text-danger">{loadError}</p>}
@@ -1219,9 +1232,14 @@ export function RemoveRegistryDialog({
 }: {
   skill: SkillView
   busy: boolean
-  onConfirm: () => void
+  onConfirm: (ignoreSourcePaths: boolean) => void
   onCancel: () => void
 }) {
+  const [ignoreSources, setIgnoreSources] = useState(true)
+  // 忽略名单只登记中央仓库外的来源;中央仓库实体会被删除,无需忽略。
+  const ignorablePaths = skill.sources
+    .filter((source) => source.source_type !== 'central-repo')
+    .map((source) => source.path)
   return (
     <Dialog
       open
@@ -1230,10 +1248,28 @@ export function RemoveRegistryDialog({
       variant="danger"
       description={`这会彻底删除 skill-switch 对「${skill.name}」的管理记录。执行前会备份权威源码目录（如存在），然后从所有已接管工具中取消部署，并删除权威源码目录、来源记录和 Skill 记录。若仍有未接管的外部订阅，操作会被拒绝。删除后不能一键撤销；备份仅可用于恢复文件内容，原部署关系需要重新建立。`}
       confirmLabel="从注册表移除"
-      onConfirm={onConfirm}
+      onConfirm={() => onConfirm(ignorablePaths.length > 0 && ignoreSources)}
       busy={busy}
       closeOnOverlay={false}
-    />
+    >
+      {ignorablePaths.length > 0 && (
+        <div className="space-y-1.5">
+          <label className="flex items-center gap-2 text-xs text-foreground">
+            <input
+              type="checkbox"
+              checked={ignoreSources}
+              onChange={(event) => setIgnoreSources(event.target.checked)}
+            />
+            忽略这些来源目录，扫描不再登记
+          </label>
+          <ul className="space-y-0.5 pl-6">
+            {ignorablePaths.map((path) => (
+              <li key={path} className="font-mono text-2xs text-foreground-muted break-all">{path}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Dialog>
   )
 }
 

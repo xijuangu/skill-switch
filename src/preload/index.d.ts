@@ -44,6 +44,13 @@ export interface SkillWithConflictView {
 
 export type SkillLibrarySourceView = SkillSourceView
 
+/** Ignored Source Path(忽略来源目录):按路径维系的扫描忽略名单条目 */
+export interface IgnoredSourcePathView {
+  path: string
+  skill_name: string
+  created_at: string
+}
+
 export interface SkillLibraryReadModelView {
   canonicalRepository: { path: string }
   skills: Array<{
@@ -514,7 +521,7 @@ declare global {
       bulkDeploy: (requests: Array<{ key: string; sourceId: number; targetId: string; requestedMode: DeployModeView }>) => Promise<BulkMutationResultView>
       bulkConfirmDeploy: (requests: Array<{ key: string; confirmationId: string }>) => Promise<BulkMutationResultView>
       bulkUndeploy: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
-      bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>) => Promise<BulkMutationResultView>
+      bulkRemoveFromRegistry: (requests: Array<{ key: string; skillId: number }>, ignoreSourcePaths?: boolean) => Promise<BulkMutationResultView>
       bulkDetachDeployments: (requests: Array<{ key: string; deploymentId: number }>) => Promise<BulkMutationResultView>
       adoptDeployment: (deploymentId: number) => Promise<DeploymentMutationOutcomeView>
       adoptTargetAsCandidate: (deploymentId: number) => Promise<TargetAdoptionOutcomeView>
@@ -528,8 +535,12 @@ declare global {
       getDeploymentsForSkill: (skillId: number) => Promise<DeploymentView[]>
       viewSkillMd: (skillId: number, sourcePath?: string) => Promise<{ content: string; path: string } | null>
       removeFromRegistry: (
-        skillId: number
+        skillId: number,
+        ignoreSourcePaths?: boolean
       ) => Promise<{ skillName: string; backedUp: boolean; undeployedTools: string[] }>
+      // Ignored Source Path(忽略来源目录)
+      getIgnoredSourcePaths: () => Promise<IgnoredSourcePathView[]>
+      unignoreSourcePath: (path: string) => Promise<boolean>
       // Install
       installFromGitHub: (url: string) => Promise<InstallResultView>
       installFromZip: (zipPath: string) => Promise<InstallResultView>

@@ -3,11 +3,13 @@ import { RotateCcw } from 'lucide-react'
 import { Tabs } from '../../shared'
 import { SourceArchiveContent } from '../source-archive/SourceArchivePage'
 import { BackupsContent } from '../backups/BackupsPage'
+import { IgnoredPathsContent } from './IgnoredPathsContent'
 
-type RecoveryTab = 'source-archive' | 'backups'
+type RecoveryTab = 'source-archive' | 'backups' | 'ignored-paths'
 
-// #116:来源归档与备份合并为「恢复」一级入口下的两个标签,
+// #116:来源归档与备份合并为「恢复」一级入口下的标签,
 // 让用户按恢复任务而不是内部存储类型找到入口。
+// 「忽略目录」标签管理扫描忽略名单(ignored_source_paths)的查看与解除。
 export function RecoveryPage() {
   const [tab, setTab] = useState<RecoveryTab>('source-archive')
   return (
@@ -19,7 +21,8 @@ export function RecoveryPage() {
       <Tabs
         tabs={[
           { key: 'source-archive', label: '来源归档' },
-          { key: 'backups', label: '备份' }
+          { key: 'backups', label: '备份' },
+          { key: 'ignored-paths', label: '忽略目录' }
         ]}
         activeKey={tab}
         onChange={(key) => setTab(key as RecoveryTab)}
@@ -27,6 +30,7 @@ export function RecoveryPage() {
       <div className="mt-4">
         {tab === 'source-archive' && <SourceArchiveContent />}
         {tab === 'backups' && <BackupsContent />}
+        {tab === 'ignored-paths' && <IgnoredPathsContent />}
       </div>
     </div>
   )

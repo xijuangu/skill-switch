@@ -19,6 +19,7 @@ import {
   upsertDeployment
 } from '../db/dao/deployments'
 import { getSourceByPath } from '../db/dao/skill-sources'
+import { getIgnoredSourcePathSet } from '../db/dao/ignored-source-paths'
 import { reconcileIndexedSources } from './registry'
 
 /**
@@ -50,6 +51,8 @@ export function scanAllTools(
 
   // #3: 扫描前构建所有 manifest-managed Deployment target 的 skipPaths
   const skipPaths = buildSkipPaths(db)
+  // 忽略名单:被移除 Skill 的来源目录不再复活(按 realpath 匹配)
+  const ignoredPaths = getIgnoredSourcePathSet(db)
   // #1: 收集本次扫描实际 upsert 的 source 路径,用于清理失效 source
   const allScannedSourcePaths: string[] = []
   const successfullyScannedDirs: string[] = []
@@ -71,7 +74,7 @@ export function scanAllTools(
         })
         continue
       }
-      const r = scanToolDir(db, dir, skipPaths, tool.key)
+      const r = scanToolDir(db, dir, skipPaths, tool.key, ignoredPaths)
       for (const observation of r.observedSubscriptions) {
         const source = getSourceByPath(db, observation.sourcePath)
         if (!source) continue

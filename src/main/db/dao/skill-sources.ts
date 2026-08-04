@@ -3,6 +3,7 @@ import type { DB } from '../database'
 import { getCanonicalRepositoryPath } from '../database'
 import { isAbsolute, relative, resolve, sep } from 'path'
 import type { SkillSource, SourceOrigin, SourceRole, SourceType } from '../../types'
+import { normalizeIgnoredSourcePath } from './ignored-source-paths'
 
 /**
  * Upsert 一个 source:按 (skill_id, path) UNIQUE 约束。
@@ -92,6 +93,9 @@ export function upsertSource(
     metadata.repoUrl ?? null,
     metadata.commitSha ?? null
   )
+  // 显式登记优先:任何来源路径一旦登记,其忽略条目即解除——
+  // 「已登记」与「被忽略」永不共存。
+  db.prepare('DELETE FROM ignored_source_paths WHERE path = ?').run(normalizeIgnoredSourcePath(path))
 }
 
 export function getSourcesByRootId(db: DB, rootId: number): SkillSource[] {
