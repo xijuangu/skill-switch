@@ -1,6 +1,6 @@
 {
   "name": "skill-switch",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "A standalone GUI tool to manage AI coding tool skills — scan, index, install, and deploy via copy or symlink.",
   "main": "./out/main/index.js",
   "author": "xijuangu <xijuangu@users.noreply.github.com>",
